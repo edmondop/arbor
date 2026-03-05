@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="assets/screenshot.png">
+    <img src="assets/screenshot.png" alt="Arbor UI screenshot" width="1100" />
+  </a>
+</p>
+
 # Arbor
 
 [![CI](https://github.com/penso/arbor/actions/workflows/ci.yml/badge.svg)](https://github.com/penso/arbor/actions/workflows/ci.yml)
