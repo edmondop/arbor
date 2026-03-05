@@ -11,14 +11,17 @@ use {
         },
         vte::ansi::{Color, NamedColor, Processor, StdSyncHandler},
     },
-    portable_pty::{Child, ChildKiller, CommandBuilder, PtySize, native_pty_system},
+    portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system},
     std::{
         env,
         ffi::OsStr,
         io::{Read, Write},
         path::Path,
         process::{Command, Stdio},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
         thread,
     },
 };
@@ -27,12 +30,17 @@ const TERMINAL_ROWS: u16 = 56;
 const TERMINAL_COLS: u16 = 180;
 const TERMINAL_SCROLLBACK: usize = 8_000;
 
-const TERMINAL_DEFAULT_FG: u32 = 0xc8ccd4;
+const TERMINAL_DEFAULT_FG: u32 = 0xabb2bf;
 const TERMINAL_DEFAULT_BG: u32 = 0x282c34;
-const TERMINAL_CURSOR: u32 = 0x93d3c3;
+const TERMINAL_CURSOR: u32 = 0x74ade8;
+const TERMINAL_BRIGHT_FG: u32 = 0xdce0e5;
+const TERMINAL_DIM_FG: u32 = 0x636d83;
 const TERMINAL_ANSI_16: [u32; 16] = [
-    0x1d1f23, 0xbe5046, 0x98c379, 0xd19a66, 0x61afef, 0xc678dd, 0x56b6c2, 0xdcdfe4, 0x5c6370,
-    0xe06c75, 0xa5d6a7, 0xe5c07b, 0x7aa2f7, 0xd7a9e3, 0x7fd1da, 0xf5f6f7,
+    0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x636d83,
+    0xea858b, 0xaad581, 0xffd885, 0x85c1ff, 0xd398eb, 0x6ed5de, 0xfafafa,
+];
+const TERMINAL_ANSI_DIM_8: [u32; 8] = [
+    0x3b3f4a, 0xa7545a, 0x6d8f59, 0xb8985b, 0x457cad, 0x8d54a0, 0x3c818a, 0x8f969b,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,16 +72,26 @@ pub enum TerminalLaunch {
 #[derive(Clone)]
 pub struct EmbeddedTerminal {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     emulator: Arc<Mutex<TerminalEmulator>>,
     exit_code: Arc<Mutex<Option<i32>>>,
+    generation: Arc<AtomicU64>,
     killer: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+    size: Arc<Mutex<(u16, u16, u16, u16)>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EmbeddedSnapshot {
     pub output: String,
     pub styled_lines: Vec<TerminalStyledLine>,
+    pub cursor: Option<TerminalCursor>,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalCursor {
+    pub line: usize,
+    pub column: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,13 +102,23 @@ struct StyledColor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalStyledLine {
+    pub cells: Vec<TerminalStyledCell>,
     pub runs: Vec<TerminalStyledRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalStyledCell {
+    pub column: usize,
+    pub text: String,
+    pub fg: u32,
+    pub bg: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalStyledRun {
     pub text: String,
     pub fg: u32,
+    pub bg: u32,
 }
 
 struct TerminalDimensions {
@@ -136,6 +164,14 @@ impl TerminalEmulator {
 
     fn process(&mut self, bytes: &[u8]) {
         self.processor.advance(&mut self.term, bytes);
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        let dimensions = TerminalDimensions {
+            rows: usize::from(rows),
+            cols: usize::from(cols),
+        };
+        self.term.resize(dimensions);
     }
 }
 
@@ -190,7 +226,13 @@ impl EmbeddedTerminal {
         let mut command = CommandBuilder::new(default_shell());
         command.arg("-l");
         command.cwd(path_as_os_str(cwd));
-        command.env("TERM", "xterm-256color");
+
+        if env::var_os("TERM").is_none() {
+            command.env("TERM", "xterm-256color");
+        }
+        if env::var_os("COLORTERM").is_none() {
+            command.env("COLORTERM", "truecolor");
+        }
 
         let child = pair
             .slave
@@ -206,19 +248,31 @@ impl EmbeddedTerminal {
             .master
             .take_writer()
             .map_err(|error| format!("failed to open PTY writer: {error}"))?;
+        let master = pair.master;
 
         let emulator = Arc::new(Mutex::new(TerminalEmulator::new()));
         let exit_code = Arc::new(Mutex::new(None));
+        let generation = Arc::new(AtomicU64::new(1));
         let killer = Arc::new(Mutex::new(Some(killer)));
+        let size = Arc::new(Mutex::new((TERMINAL_ROWS, TERMINAL_COLS, 0, 0)));
 
-        spawn_reader_thread(reader, emulator.clone());
-        spawn_wait_thread(child, emulator.clone(), exit_code.clone(), killer.clone());
+        spawn_reader_thread(reader, emulator.clone(), generation.clone());
+        spawn_wait_thread(
+            child,
+            emulator.clone(),
+            exit_code.clone(),
+            killer.clone(),
+            generation.clone(),
+        );
 
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
+            master: Arc::new(Mutex::new(master)),
             emulator,
             exit_code,
+            generation,
             killer,
+            size,
         })
     }
 
@@ -240,16 +294,18 @@ impl EmbeddedTerminal {
     }
 
     pub fn snapshot(&self) -> EmbeddedSnapshot {
-        let (output, styled_lines) = match self.emulator.lock() {
+        let (output, styled_lines, cursor) = match self.emulator.lock() {
             Ok(emulator) => (
                 snapshot_output(&emulator.term),
                 collect_styled_lines(&emulator.term),
+                snapshot_cursor(&emulator.term),
             ),
             Err(poisoned) => {
                 let emulator = poisoned.into_inner();
                 (
                     snapshot_output(&emulator.term),
                     collect_styled_lines(&emulator.term),
+                    snapshot_cursor(&emulator.term),
                 )
             },
         };
@@ -261,8 +317,71 @@ impl EmbeddedTerminal {
         EmbeddedSnapshot {
             output,
             styled_lines,
+            cursor,
             exit_code,
         }
+    }
+
+    pub fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), String> {
+        let rows = rows.max(1);
+        let cols = cols.max(2);
+        let pixel_width = pixel_width.max(1);
+        let pixel_height = pixel_height.max(1);
+
+        {
+            let size = self
+                .size
+                .lock()
+                .map_err(|_| "failed to acquire terminal size lock".to_owned())?;
+            if *size == (rows, cols, pixel_width, pixel_height) {
+                return Ok(());
+            }
+        }
+
+        {
+            let mut emulator = self
+                .emulator
+                .lock()
+                .map_err(|_| "failed to acquire emulator lock for resize".to_owned())?;
+            emulator.resize(rows, cols);
+        }
+
+        {
+            let master = self
+                .master
+                .lock()
+                .map_err(|_| "failed to acquire PTY master lock for resize".to_owned())?;
+            master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width,
+                    pixel_height,
+                })
+                .map_err(|error| format!("failed to resize PTY: {error}"))?;
+        }
+
+        {
+            let mut size = self
+                .size
+                .lock()
+                .map_err(|_| "failed to update terminal size lock".to_owned())?;
+            *size = (rows, cols, pixel_width, pixel_height);
+        }
+
+        self.generation.fetch_add(1, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 }
 
@@ -283,17 +402,22 @@ impl Drop for EmbeddedTerminal {
     }
 }
 
-fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, emulator: Arc<Mutex<TerminalEmulator>>) {
+fn spawn_reader_thread(
+    mut reader: Box<dyn Read + Send>,
+    emulator: Arc<Mutex<TerminalEmulator>>,
+    generation: Arc<AtomicU64>,
+) {
     thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
 
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(read) => process_terminal_bytes(&emulator, &buffer[..read]),
+                Ok(read) => process_terminal_bytes(&emulator, &generation, &buffer[..read]),
                 Err(error) => {
                     process_terminal_bytes(
                         &emulator,
+                        &generation,
                         format!("\r\n[terminal reader error: {error}]\r\n").as_bytes(),
                     );
                     break;
@@ -308,6 +432,7 @@ fn spawn_wait_thread(
     emulator: Arc<Mutex<TerminalEmulator>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     killer: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+    generation: Arc<AtomicU64>,
 ) {
     thread::spawn(move || {
         let mut child = child;
@@ -341,22 +466,42 @@ fn spawn_wait_thread(
             *killer_guard = None;
         }
 
-        process_terminal_bytes(&emulator, exit_message.as_bytes());
+        process_terminal_bytes(&emulator, &generation, exit_message.as_bytes());
     });
 }
 
-fn process_terminal_bytes(emulator: &Arc<Mutex<TerminalEmulator>>, bytes: &[u8]) {
+fn process_terminal_bytes(
+    emulator: &Arc<Mutex<TerminalEmulator>>,
+    generation: &Arc<AtomicU64>,
+    bytes: &[u8],
+) {
     let mut guard = match emulator.lock() {
         Ok(lock) => lock,
         Err(poisoned) => poisoned.into_inner(),
     };
     guard.process(bytes);
+    generation.fetch_add(1, Ordering::Relaxed);
 }
 
 fn snapshot_output(term: &Term<VoidListener>) -> String {
     let start = Point::new(term.topmost_line(), Column(0));
     let end = Point::new(term.bottommost_line(), term.last_column());
     term.bounds_to_string(start, end)
+}
+
+fn snapshot_cursor(term: &Term<VoidListener>) -> Option<TerminalCursor> {
+    let grid = term.grid();
+    let top = grid.topmost_line().0;
+    let bottom = grid.bottommost_line().0;
+    let cursor = grid.cursor.point;
+
+    if cursor.line.0 < top || cursor.line.0 > bottom {
+        return None;
+    }
+
+    let line = usize::try_from(cursor.line.0 - top).ok()?;
+    let column = cursor.column.0;
+    Some(TerminalCursor { line, column })
 }
 
 fn collect_styled_lines(term: &Term<VoidListener>) -> Vec<TerminalStyledLine> {
@@ -370,56 +515,45 @@ fn collect_styled_lines(term: &Term<VoidListener>) -> Vec<TerminalStyledLine> {
 
     for line_index in top_line..=bottom_line {
         let row = &grid[Line(line_index)];
-        let mut runs: Vec<TerminalStyledRun> = Vec::new();
-        let mut current_style: Option<StyledColor> = None;
-        let mut current_text = String::new();
+        let mut cells: Vec<TerminalStyledCell> = Vec::with_capacity(columns);
+        let mut previous_cell_had_extras = false;
 
         for column_index in 0..columns {
             let cell = &row[Column(column_index)];
-            if cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-            {
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
 
+            if cell.c == ' ' && previous_cell_had_extras {
+                previous_cell_had_extras = false;
+                continue;
+            }
+            previous_cell_had_extras = matches!(cell.zerowidth(), Some(chars) if !chars.is_empty());
+
             let style = resolve_cell_color(cell, colors);
             let text = cell_text(cell);
-
-            if current_style != Some(style) {
-                if let Some(previous_style) = current_style.take()
-                    && !current_text.is_empty()
-                {
-                    runs.push(TerminalStyledRun {
-                        text: std::mem::take(&mut current_text),
-                        fg: previous_style.fg,
-                    });
-                }
-                current_style = Some(style);
-            }
-
-            current_text.push_str(&text);
-        }
-
-        if let Some(style) = current_style
-            && !current_text.is_empty()
-        {
-            runs.push(TerminalStyledRun {
-                text: current_text,
+            cells.push(TerminalStyledCell {
+                column: column_index,
+                text,
                 fg: style.fg,
+                bg: style.bg,
             });
         }
 
-        trim_trailing_whitespace_runs(&mut runs);
-        lines.push(TerminalStyledLine { runs });
+        trim_trailing_whitespace_cells(&mut cells);
+        let runs = runs_from_cells(&cells);
+        lines.push(TerminalStyledLine { cells, runs });
     }
 
-    while lines.last().is_some_and(|line| line.runs.is_empty()) {
+    while lines.last().is_some_and(|line| line.cells.is_empty()) {
         lines.pop();
     }
 
     if lines.is_empty() {
-        lines.push(TerminalStyledLine { runs: Vec::new() });
+        lines.push(TerminalStyledLine {
+            cells: Vec::new(),
+            runs: Vec::new(),
+        });
     }
 
     lines
@@ -442,12 +576,6 @@ fn resolve_cell_color(cell: &Cell, colors: &Colors) -> StyledColor {
 
     if cell.flags.contains(Flags::INVERSE) {
         std::mem::swap(&mut fg, &mut bg);
-    }
-
-    if cell.flags.contains(Flags::DIM) {
-        fg = scale_color(fg, 0.62);
-    } else if cell.flags.contains(Flags::BOLD) {
-        fg = scale_color(fg, 1.12);
     }
 
     StyledColor { fg, bg }
@@ -493,43 +621,74 @@ fn named_color_to_rgb(color: NamedColor, default: u32) -> u32 {
         NamedColor::Foreground => default,
         NamedColor::Background => TERMINAL_DEFAULT_BG,
         NamedColor::Cursor => TERMINAL_CURSOR,
-        NamedColor::DimBlack => scale_color(TERMINAL_ANSI_16[0], 0.72),
-        NamedColor::DimRed => scale_color(TERMINAL_ANSI_16[1], 0.72),
-        NamedColor::DimGreen => scale_color(TERMINAL_ANSI_16[2], 0.72),
-        NamedColor::DimYellow => scale_color(TERMINAL_ANSI_16[3], 0.72),
-        NamedColor::DimBlue => scale_color(TERMINAL_ANSI_16[4], 0.72),
-        NamedColor::DimMagenta => scale_color(TERMINAL_ANSI_16[5], 0.72),
-        NamedColor::DimCyan => scale_color(TERMINAL_ANSI_16[6], 0.72),
-        NamedColor::DimWhite => scale_color(TERMINAL_ANSI_16[7], 0.72),
-        NamedColor::BrightForeground => scale_color(default, 1.12),
-        NamedColor::DimForeground => scale_color(default, 0.72),
+        NamedColor::DimBlack => TERMINAL_ANSI_DIM_8[0],
+        NamedColor::DimRed => TERMINAL_ANSI_DIM_8[1],
+        NamedColor::DimGreen => TERMINAL_ANSI_DIM_8[2],
+        NamedColor::DimYellow => TERMINAL_ANSI_DIM_8[3],
+        NamedColor::DimBlue => TERMINAL_ANSI_DIM_8[4],
+        NamedColor::DimMagenta => TERMINAL_ANSI_DIM_8[5],
+        NamedColor::DimCyan => TERMINAL_ANSI_DIM_8[6],
+        NamedColor::DimWhite => TERMINAL_ANSI_DIM_8[7],
+        NamedColor::BrightForeground => TERMINAL_BRIGHT_FG,
+        NamedColor::DimForeground => TERMINAL_DIM_FG,
     }
 }
 
-fn trim_trailing_whitespace_runs(runs: &mut Vec<TerminalStyledRun>) {
-    while let Some(last_run) = runs.last_mut() {
-        let trimmed = last_run.text.trim_end_matches(' ').to_owned();
-        if trimmed.is_empty() {
-            runs.pop();
-            continue;
+fn trim_trailing_whitespace_cells(cells: &mut Vec<TerminalStyledCell>) {
+    while let Some(last_cell) = cells.last() {
+        if last_cell.bg != TERMINAL_DEFAULT_BG {
+            break;
         }
-        if trimmed.len() != last_run.text.len() {
-            last_run.text = trimmed;
+
+        if last_cell.text.chars().all(|character| character == ' ') {
+            cells.pop();
+            continue;
         }
         break;
     }
 }
 
-fn scale_color(rgb: u32, factor: f32) -> u32 {
-    let red = ((rgb >> 16) & 0xff) as f32;
-    let green = ((rgb >> 8) & 0xff) as f32;
-    let blue = (rgb & 0xff) as f32;
+fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
+    let mut runs = Vec::new();
+    let mut current_style: Option<StyledColor> = None;
+    let mut current_text = String::new();
+    let mut next_expected_column: Option<usize> = None;
 
-    let scaled_red = (red * factor).round().clamp(0.0, 255.0) as u32;
-    let scaled_green = (green * factor).round().clamp(0.0, 255.0) as u32;
-    let scaled_blue = (blue * factor).round().clamp(0.0, 255.0) as u32;
+    for cell in cells {
+        let style = StyledColor {
+            fg: cell.fg,
+            bg: cell.bg,
+        };
 
-    (scaled_red << 16) | (scaled_green << 8) | scaled_blue
+        let gap_breaks_run = next_expected_column != Some(cell.column);
+        if current_style != Some(style) || gap_breaks_run {
+            if let Some(previous_style) = current_style.take()
+                && !current_text.is_empty()
+            {
+                runs.push(TerminalStyledRun {
+                    text: std::mem::take(&mut current_text),
+                    fg: previous_style.fg,
+                    bg: previous_style.bg,
+                });
+            }
+            current_style = Some(style);
+        }
+
+        current_text.push_str(&cell.text);
+        next_expected_column = Some(cell.column.saturating_add(1));
+    }
+
+    if let Some(style) = current_style
+        && !current_text.is_empty()
+    {
+        runs.push(TerminalStyledRun {
+            text: current_text,
+            fg: style.fg,
+            bg: style.bg,
+        });
+    }
+
+    runs
 }
 
 fn ansi_256_to_rgb(index: u8) -> u32 {
@@ -776,6 +935,17 @@ mod tests {
             snapshot_line_count > usize::from(TERMINAL_ROWS),
             "expected snapshot line count ({snapshot_line_count}) to exceed viewport rows ({TERMINAL_ROWS})",
         );
+    }
+
+    #[test]
+    fn styled_lines_skip_space_after_zero_width_sequence() {
+        let mut emulator = TerminalEmulator::new();
+        emulator.process("A☀️B\r\n".as_bytes());
+
+        let styled_lines = collect_styled_lines(&emulator.term);
+        let rendered = styled_line_to_string(styled_lines.first());
+
+        assert_eq!(rendered, "A☀️B");
     }
 
     fn styled_line_to_string(line: Option<&TerminalStyledLine>) -> String {

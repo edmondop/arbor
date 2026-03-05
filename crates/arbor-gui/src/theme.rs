@@ -10,7 +10,7 @@ pub struct ThemePalette {
     pub chrome_border: u32,
     pub app_bg: u32,
     pub sidebar_bg: u32,
-    pub center_bg: u32,
+    pub terminal_bg: u32,
     pub panel_bg: u32,
     pub panel_active_bg: u32,
     pub tab_bg: u32,
@@ -22,6 +22,7 @@ pub struct ThemePalette {
     pub notice_bg: u32,
     pub notice_text: u32,
     pub accent: u32,
+    pub terminal_cursor: u32,
 }
 
 impl ThemeKind {
@@ -39,7 +40,7 @@ impl ThemeKind {
                 chrome_border: 0x464b57,
                 app_bg: 0x282c33,
                 sidebar_bg: 0x2f343e,
-                center_bg: 0x282c34,
+                terminal_bg: 0x282c34,
                 panel_bg: 0x2e343e,
                 panel_active_bg: 0x363c46,
                 tab_bg: 0x2f343e,
@@ -51,13 +52,14 @@ impl ThemeKind {
                 notice_bg: 0x5d3330,
                 notice_text: 0xffe3dc,
                 accent: 0x74ade8,
+                terminal_cursor: 0xebdbb2,
             },
             ThemeKind::AyuDark => ThemePalette {
                 chrome_bg: 0x313337,
                 chrome_border: 0x3f4043,
                 app_bg: 0x0d1016,
                 sidebar_bg: 0x1f2127,
-                center_bg: 0x0d1016,
+                terminal_bg: 0x0d1016,
                 panel_bg: 0x1f2127,
                 panel_active_bg: 0x2a2d34,
                 tab_bg: 0x1f2127,
@@ -69,6 +71,7 @@ impl ThemeKind {
                 notice_bg: 0x5d3330,
                 notice_text: 0xffe3dc,
                 accent: 0x5ac1fe,
+                terminal_cursor: 0xbfbdb6,
             },
         }
     }

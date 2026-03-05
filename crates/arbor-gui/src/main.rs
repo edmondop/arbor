@@ -7,10 +7,11 @@ use {
         worktree,
     },
     gpui::{
-        App, Application, Bounds, Context, Div, ElementId, FocusHandle, FontWeight, KeyBinding,
-        KeyDownEvent, Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, ScrollHandle,
-        Stateful, SystemMenuType, TitlebarOptions, Window, WindowBounds, WindowControlArea,
-        WindowDecorations, WindowOptions, actions, div, point, prelude::*, px, rgb, size,
+        App, Application, Bounds, Context, Div, ElementId, FocusHandle, FontFallbacks,
+        FontFeatures, FontWeight, KeyBinding, KeyDownEvent, Keystroke, Menu, MenuItem, MouseButton,
+        MouseDownEvent, ScrollHandle, Stateful, SystemMenuType, TextRun, TitlebarOptions, Window,
+        WindowBounds, WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div,
+        fill, font, point, prelude::*, px, rgb, size,
     },
     std::{
         env, fs,
@@ -19,20 +20,61 @@ use {
         time::{Duration, Instant},
     },
     terminal_backend::{
-        EmbeddedTerminal, TerminalBackendKind, TerminalLaunch, TerminalStyledLine,
-        TerminalStyledRun,
+        EmbeddedTerminal, TerminalBackendKind, TerminalCursor, TerminalLaunch, TerminalStyledCell,
+        TerminalStyledLine, TerminalStyledRun,
     },
     theme::{ThemeKind, ThemePalette},
 };
 
 const FONT_UI: &str = ".ZedSans";
-const FONT_MONO: &str = "Menlo";
+const FONT_MONO: &str = "CaskaydiaMono Nerd Font Mono";
+const TERMINAL_FONT_FAMILIES: [&str; 6] = [
+    ".ZedMono",
+    FONT_MONO,
+    "SF Mono",
+    "Menlo",
+    "Monaco",
+    "Courier New",
+];
+const TERMINAL_CELL_WIDTH_PX: f32 = 9.0;
+const TERMINAL_CELL_HEIGHT_PX: f32 = 19.0;
+const TERMINAL_FONT_SIZE_PX: f32 = 14.0;
+const TERMINAL_SCROLLBAR_WIDTH_PX: f32 = 12.0;
 
 const TITLEBAR_HEIGHT: f32 = 34.;
 const TRAFFIC_LIGHT_PADDING: f32 = 71.;
 const QUIT_ARM_WINDOW: Duration = Duration::from_millis(1200);
 
 static QUIT_ARMED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn terminal_mono_font(cx: &App) -> gpui::Font {
+    let fallbacks = FontFallbacks::from_fonts(
+        TERMINAL_FONT_FAMILIES
+            .iter()
+            .map(|family| (*family).to_owned())
+            .collect::<Vec<_>>(),
+    );
+
+    for family in TERMINAL_FONT_FAMILIES {
+        let mut candidate = font(family);
+        candidate.features = FontFeatures::disable_ligatures();
+        candidate.fallbacks = Some(fallbacks.clone());
+        let font_id = cx.text_system().resolve_font(&candidate);
+        let resolved_family = cx
+            .text_system()
+            .get_font_for_id(font_id)
+            .map(|font| font.family.to_string())
+            .unwrap_or_default();
+        if resolved_family == family {
+            return candidate;
+        }
+    }
+
+    let mut fallback = font("Menlo");
+    fallback.features = FontFeatures::disable_ligatures();
+    fallback.fallbacks = Some(fallbacks);
+    fallback
+}
 
 actions!(arbor, [
     RequestQuit,
@@ -62,8 +104,10 @@ struct TerminalSession {
     title: String,
     command: String,
     state: TerminalState,
+    generation: u64,
     output: String,
     styled_output: Vec<TerminalStyledLine>,
+    cursor: Option<TerminalCursor>,
     runtime: Option<EmbeddedTerminal>,
 }
 
@@ -209,20 +253,41 @@ impl ArborWindow {
     fn sync_running_terminals(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
         let follow_output = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        let active_terminal_id = self.active_terminal_id;
+        let target_grid_size =
+            terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
 
         for session in &mut self.terminals {
             let Some(runtime) = session.runtime.as_ref() else {
                 continue;
             };
 
+            if active_terminal_id == Some(session.id)
+                && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
+                && let Err(error) = runtime.resize(rows, cols, pixel_width, pixel_height)
+            {
+                self.notice = Some(format!("failed to resize terminal: {error}"));
+            }
+
+            let generation = runtime.generation();
+            if generation == session.generation {
+                continue;
+            }
+
             let snapshot = runtime.snapshot();
             let output = snapshot.output;
             let styled_output = snapshot.styled_lines;
-            if output != session.output || styled_output != session.styled_output {
+            let cursor = snapshot.cursor;
+            if output != session.output
+                || styled_output != session.styled_output
+                || cursor != session.cursor
+            {
                 session.output = output;
                 session.styled_output = styled_output;
+                session.cursor = cursor;
                 changed = true;
             }
+            session.generation = generation;
 
             if let Some(exit_code) = snapshot.exit_code
                 && session.state == TerminalState::Running
@@ -681,22 +746,27 @@ impl ArborWindow {
             title: format!("term-{session_id}"),
             command: String::new(),
             state: TerminalState::Running,
+            generation: 0,
             output: String::new(),
             styled_output: Vec::new(),
+            cursor: None,
             runtime: None,
         };
 
         match terminal_backend::launch_backend(backend_kind, &cwd) {
             Ok(TerminalLaunch::Embedded(runtime)) => {
                 session.command = "embedded shell".to_owned();
+                session.generation = runtime.generation();
                 session.runtime = Some(runtime);
                 session.output = String::new();
                 session.styled_output = Vec::new();
+                session.cursor = None;
             },
             Ok(TerminalLaunch::External(result)) => {
                 session.command = result.command;
                 session.output = trim_to_last_lines(result.output, 120);
                 session.styled_output = Vec::new();
+                session.cursor = None;
                 session.state = if result.success {
                     TerminalState::Completed
                 } else {
@@ -713,6 +783,7 @@ impl ArborWindow {
                 session.command = "launch backend".to_owned();
                 session.output = error.clone();
                 session.styled_output = Vec::new();
+                session.cursor = None;
                 session.state = TerminalState::Failed;
                 self.notice = Some(format!("terminal session failed: {error}"));
             },
@@ -1018,7 +1089,7 @@ impl ArborWindow {
             .h_full()
             .min_w_0()
             .min_h_0()
-            .bg(rgb(theme.center_bg))
+            .bg(rgb(theme.terminal_bg))
             .border_l_1()
             .border_r_1()
             .border_color(rgb(if terminal_is_focused {
@@ -1204,7 +1275,7 @@ impl ArborWindow {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .bg(rgb(theme.center_bg))
+                    .bg(rgb(theme.terminal_bg))
                     .when(active_terminal.is_none(), |this| {
                         this.child(
                             div()
@@ -1247,6 +1318,8 @@ impl ArborWindow {
                     .when_some(active_terminal, |this, session| {
                         let styled_lines =
                             styled_lines_for_session(&session, theme, terminal_is_focused);
+                        let mono_font = terminal_mono_font(cx);
+                        let cell_width = terminal_cell_width_px(cx);
 
                         this.child(
                             div()
@@ -1255,8 +1328,9 @@ impl ArborWindow {
                                 .min_w_0()
                                 .min_h_0()
                                 .overflow_hidden()
-                                .font_family(FONT_MONO)
-                                .text_sm()
+                                .font(mono_font.clone())
+                                .text_size(px(TERMINAL_FONT_SIZE_PX))
+                                .line_height(px(TERMINAL_CELL_HEIGHT_PX))
                                 .px_2()
                                 .pt_1()
                                 .flex()
@@ -1281,11 +1355,14 @@ impl ArborWindow {
                                                 .flex()
                                                 .flex_col()
                                                 .gap_0()
-                                                .children(
-                                                    styled_lines.into_iter().map(|line| {
-                                                        render_terminal_line(line, theme)
-                                                    }),
-                                                ),
+                                                .children(styled_lines.into_iter().map(|line| {
+                                                    render_terminal_line(
+                                                        line,
+                                                        theme,
+                                                        cell_width,
+                                                        mono_font.clone(),
+                                                    )
+                                                })),
                                         ),
                                 ),
                         )
@@ -2016,70 +2093,322 @@ fn styled_lines_for_session(
         plain_lines_to_styled(lines_for_display(&session.output), theme)
     };
 
-    if show_cursor && session.state == TerminalState::Running {
-        let cursor_run = TerminalStyledRun {
-            text: "█".to_owned(),
-            fg: theme.accent,
-        };
-
-        if let Some(last_line) = lines.last_mut() {
-            if !last_line.runs.is_empty() {
-                last_line.runs.push(TerminalStyledRun {
-                    text: " ".to_owned(),
-                    fg: theme.text_primary,
-                });
-            }
-            last_line.runs.push(cursor_run);
-        } else {
-            lines.push(TerminalStyledLine {
-                runs: vec![cursor_run],
-            });
+    for line in &mut lines {
+        if line.cells.is_empty() && !line.runs.is_empty() {
+            line.cells = cells_from_runs(&line.runs);
+        } else if line.runs.is_empty() && !line.cells.is_empty() {
+            line.runs = runs_from_cells(&line.cells);
         }
     }
 
+    if show_cursor
+        && session.state == TerminalState::Running
+        && let Some(cursor) = session.cursor
+    {
+        apply_cursor_to_lines(&mut lines, cursor, theme);
+    }
+
     lines
+}
+
+fn apply_cursor_to_lines(
+    lines: &mut Vec<TerminalStyledLine>,
+    cursor: TerminalCursor,
+    theme: ThemePalette,
+) {
+    while lines.len() <= cursor.line {
+        lines.push(TerminalStyledLine {
+            cells: Vec::new(),
+            runs: Vec::new(),
+        });
+    }
+
+    if let Some(line) = lines.get_mut(cursor.line) {
+        if line.cells.is_empty() && !line.runs.is_empty() {
+            line.cells = cells_from_runs(&line.runs);
+        }
+
+        let insert_index = line
+            .cells
+            .iter()
+            .position(|cell| cell.column >= cursor.column)
+            .unwrap_or(line.cells.len());
+
+        if line
+            .cells
+            .get(insert_index)
+            .is_none_or(|cell| cell.column != cursor.column)
+        {
+            line.cells.insert(insert_index, TerminalStyledCell {
+                column: cursor.column,
+                text: " ".to_owned(),
+                fg: theme.text_primary,
+                bg: theme.terminal_bg,
+            });
+        }
+
+        if let Some(cell) = line.cells.get_mut(insert_index) {
+            if cell.text.is_empty() {
+                cell.text = " ".to_owned();
+            }
+
+            if cell.text.chars().all(|character| character == ' ') {
+                cell.fg = theme.text_primary;
+            }
+            cell.bg = theme.terminal_cursor;
+        }
+
+        line.runs = runs_from_cells(&line.cells);
+    }
+}
+
+fn cells_from_runs(runs: &[TerminalStyledRun]) -> Vec<TerminalStyledCell> {
+    let mut cells = Vec::new();
+    let mut column = 0_usize;
+    for run in runs {
+        for character in run.text.chars() {
+            cells.push(TerminalStyledCell {
+                column,
+                text: character.to_string(),
+                fg: run.fg,
+                bg: run.bg,
+            });
+            column = column.saturating_add(1);
+        }
+    }
+    cells
+}
+
+fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
+    let mut runs = Vec::new();
+    let mut current_fg = None;
+    let mut current_bg = None;
+    let mut current_text = String::new();
+    let mut next_expected_column: Option<usize> = None;
+    let mut current_contains_complex_cell = false;
+
+    for cell in cells {
+        let cell_is_complex = cell.text.chars().count() != 1;
+        let style_changed = current_fg != Some(cell.fg) || current_bg != Some(cell.bg);
+        let gap_breaks_run = next_expected_column != Some(cell.column);
+        let complex_breaks_run = current_contains_complex_cell || cell_is_complex;
+        if style_changed || gap_breaks_run || complex_breaks_run {
+            if let (Some(fg), Some(bg)) = (current_fg.take(), current_bg.take())
+                && !current_text.is_empty()
+            {
+                runs.push(TerminalStyledRun {
+                    text: std::mem::take(&mut current_text),
+                    fg,
+                    bg,
+                });
+            }
+
+            current_fg = Some(cell.fg);
+            current_bg = Some(cell.bg);
+            current_contains_complex_cell = cell_is_complex;
+        }
+
+        current_text.push_str(&cell.text);
+        next_expected_column = Some(cell.column.saturating_add(1));
+    }
+
+    if let (Some(fg), Some(bg)) = (current_fg, current_bg)
+        && !current_text.is_empty()
+    {
+        runs.push(TerminalStyledRun {
+            text: current_text,
+            fg,
+            bg,
+        });
+    }
+
+    runs
+}
+
+#[derive(Clone)]
+struct PositionedTerminalRun {
+    text: String,
+    fg: u32,
+    bg: u32,
+    start_column: usize,
+    cell_count: usize,
+    force_cell_width: bool,
+}
+
+fn positioned_runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<PositionedTerminalRun> {
+    let mut runs = Vec::new();
+    let mut current_fg: Option<u32> = None;
+    let mut current_bg: Option<u32> = None;
+    let mut current_start_column = 0_usize;
+    let mut current_text = String::new();
+    let mut next_expected_column: Option<usize> = None;
+    let mut current_contains_complex_cell = false;
+    let mut current_cell_count = 0_usize;
+
+    for cell in cells {
+        let cell_is_complex = cell.text.chars().count() != 1;
+        let style_changed = current_fg != Some(cell.fg) || current_bg != Some(cell.bg);
+        let gap_breaks_run = next_expected_column != Some(cell.column);
+        let complex_breaks_run = current_contains_complex_cell || cell_is_complex;
+        if style_changed || gap_breaks_run || complex_breaks_run {
+            if let (Some(fg), Some(bg)) = (current_fg.take(), current_bg.take())
+                && !current_text.is_empty()
+            {
+                runs.push(PositionedTerminalRun {
+                    text: std::mem::take(&mut current_text),
+                    fg,
+                    bg,
+                    start_column: current_start_column,
+                    cell_count: current_cell_count,
+                    force_cell_width: !current_contains_complex_cell,
+                });
+            }
+
+            current_fg = Some(cell.fg);
+            current_bg = Some(cell.bg);
+            current_start_column = cell.column;
+            current_contains_complex_cell = cell_is_complex;
+            current_cell_count = 0;
+        }
+
+        current_text.push_str(&cell.text);
+        current_cell_count = current_cell_count.saturating_add(1);
+        current_contains_complex_cell |= cell_is_complex;
+        next_expected_column = Some(cell.column.saturating_add(1));
+    }
+
+    if let (Some(fg), Some(bg)) = (current_fg, current_bg)
+        && !current_text.is_empty()
+    {
+        runs.push(PositionedTerminalRun {
+            text: current_text,
+            fg,
+            bg,
+            start_column: current_start_column,
+            cell_count: current_cell_count,
+            force_cell_width: !current_contains_complex_cell,
+        });
+    }
+
+    runs
 }
 
 fn plain_lines_to_styled(lines: Vec<String>, theme: ThemePalette) -> Vec<TerminalStyledLine> {
     lines
         .into_iter()
-        .map(|line| TerminalStyledLine {
-            runs: vec![TerminalStyledRun {
-                text: line,
-                fg: theme.text_primary,
-            }],
+        .map(|line| {
+            let cells: Vec<TerminalStyledCell> = line
+                .chars()
+                .enumerate()
+                .map(|(column, character)| TerminalStyledCell {
+                    column,
+                    text: character.to_string(),
+                    fg: theme.text_primary,
+                    bg: theme.terminal_bg,
+                })
+                .collect();
+
+            let runs = if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![TerminalStyledRun {
+                    text: line,
+                    fg: theme.text_primary,
+                    bg: theme.terminal_bg,
+                }]
+            };
+
+            TerminalStyledLine { cells, runs }
         })
         .collect()
 }
 
-fn render_terminal_line(line: TerminalStyledLine, theme: ThemePalette) -> Div {
-    if line.runs.is_empty() {
+fn render_terminal_line(
+    line: TerminalStyledLine,
+    theme: ThemePalette,
+    cell_width: f32,
+    mono_font: gpui::Font,
+) -> Div {
+    let cells = if line.cells.is_empty() {
+        cells_from_runs(&line.runs)
+    } else {
+        line.cells
+    };
+
+    if cells.is_empty() {
         return div()
             .flex_none()
             .w_full()
             .min_w_0()
+            .h(px(TERMINAL_CELL_HEIGHT_PX))
             .overflow_x_hidden()
             .whitespace_nowrap()
-            .font_family(FONT_MONO)
-            .text_sm()
+            .font(mono_font)
+            .text_size(px(TERMINAL_FONT_SIZE_PX))
+            .line_height(px(TERMINAL_CELL_HEIGHT_PX))
+            .bg(rgb(theme.terminal_bg))
             .text_color(rgb(theme.text_primary))
             .child(" ");
     }
+
+    let line_height = px(TERMINAL_CELL_HEIGHT_PX);
+    let font_size = px(TERMINAL_FONT_SIZE_PX);
+    let positioned_runs = positioned_runs_from_cells(&cells);
 
     div()
         .flex_none()
         .w_full()
         .min_w_0()
-        .overflow_x_hidden()
-        .whitespace_nowrap()
-        .font_family(FONT_MONO)
-        .flex()
-        .items_center()
-        .gap_0()
-        .children(
-            line.runs
-                .into_iter()
-                .map(|run| div().text_sm().text_color(rgb(run.fg)).child(run.text)),
+        .h(line_height)
+        .overflow_hidden()
+        .bg(rgb(theme.terminal_bg))
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    for run in &positioned_runs {
+                        if run.text.is_empty() {
+                            continue;
+                        }
+
+                        if run.cell_count > 0 {
+                            let background_origin = point(
+                                bounds.origin.x + px(run.start_column as f32 * cell_width),
+                                bounds.origin.y,
+                            );
+                            let background_size =
+                                size(px(run.cell_count as f32 * cell_width), line_height);
+                            window.paint_quad(fill(
+                                Bounds::new(background_origin, background_size),
+                                rgb(run.bg),
+                            ));
+                        }
+
+                        let shaped_line = window.text_system().shape_line(
+                            run.text.clone().into(),
+                            font_size,
+                            &[TextRun {
+                                len: run.text.len(),
+                                font: mono_font.clone(),
+                                color: rgb(run.fg).into(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            run.force_cell_width.then_some(px(cell_width)),
+                        );
+
+                        let run_x = bounds.origin.x + px(run.start_column as f32 * cell_width);
+                        let _ = shaped_line.paint(
+                            point(run_x, bounds.origin.y),
+                            line_height,
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            )
+            .size_full(),
         )
 }
 
@@ -2115,6 +2444,62 @@ fn terminal_scroll_is_near_bottom(scroll_handle: &ScrollHandle) -> bool {
     let offset = scroll_handle.offset();
     let distance_from_bottom = (offset.y + max_offset.height).abs();
     distance_from_bottom <= px(6.)
+}
+
+fn terminal_grid_size_from_scroll_handle(
+    scroll_handle: &ScrollHandle,
+    cx: &App,
+) -> Option<(u16, u16, u16, u16)> {
+    let bounds = scroll_handle.bounds();
+    let width = (bounds.size.width.to_f64() as f32 - TERMINAL_SCROLLBAR_WIDTH_PX).max(1.);
+    let height = bounds.size.height.to_f64() as f32;
+    let cell_width = terminal_cell_width_px(cx);
+    let (rows, cols) =
+        terminal_grid_size_for_viewport(width, height, cell_width, TERMINAL_CELL_HEIGHT_PX)?;
+    let pixel_width = width.floor().clamp(1., f32::from(u16::MAX)) as u16;
+    let pixel_height = height.floor().clamp(1., f32::from(u16::MAX)) as u16;
+    Some((rows, cols, pixel_width, pixel_height))
+}
+
+fn terminal_cell_width_px(cx: &App) -> f32 {
+    let text_system = cx.text_system();
+    let mono_font = terminal_mono_font(cx);
+    let font_id = text_system.resolve_font(&mono_font);
+
+    if let Ok(width) = text_system.ch_advance(font_id, px(TERMINAL_FONT_SIZE_PX)) {
+        let width = width.to_f64() as f32;
+        if width.is_finite() && width > 0. {
+            return width;
+        }
+    }
+
+    text_system
+        .advance(font_id, px(TERMINAL_FONT_SIZE_PX), 'm')
+        .map(|size| size.width.to_f64() as f32)
+        .ok()
+        .filter(|width| width.is_finite() && *width > 0.)
+        .unwrap_or(TERMINAL_CELL_WIDTH_PX)
+}
+
+fn terminal_grid_size_for_viewport(
+    width: f32,
+    height: f32,
+    cell_width: f32,
+    cell_height: f32,
+) -> Option<(u16, u16)> {
+    if width <= 0. || height <= 0. || cell_width <= 0. || cell_height <= 0. {
+        return None;
+    }
+
+    let cols = (width / cell_width).floor() as i32;
+    let rows = (height / cell_height).floor() as i32;
+    if cols <= 0 || rows <= 0 {
+        return None;
+    }
+
+    let cols = cols.clamp(2, i32::from(u16::MAX)) as u16;
+    let rows = rows.clamp(1, i32::from(u16::MAX)) as u16;
+    Some((rows, cols))
 }
 
 fn should_auto_follow_terminal_output(changed: bool, was_near_bottom: bool) -> bool {
@@ -2288,6 +2673,49 @@ fn main() {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use crate::{
+        TerminalSession, TerminalState, styled_lines_for_session,
+        terminal_backend::{
+            TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+        },
+        theme::ThemeKind,
+    };
+
+    fn session_with_styled_line(
+        text: &str,
+        fg: u32,
+        bg: u32,
+        cursor: Option<TerminalCursor>,
+    ) -> TerminalSession {
+        TerminalSession {
+            id: 1,
+            title: "term-1".to_owned(),
+            command: "zsh".to_owned(),
+            state: TerminalState::Running,
+            generation: 0,
+            output: text.to_owned(),
+            styled_output: vec![TerminalStyledLine {
+                cells: text
+                    .chars()
+                    .enumerate()
+                    .map(|(column, character)| TerminalStyledCell {
+                        column,
+                        text: character.to_string(),
+                        fg,
+                        bg,
+                    })
+                    .collect(),
+                runs: vec![TerminalStyledRun {
+                    text: text.to_owned(),
+                    fg,
+                    bg,
+                }],
+            }],
+            cursor,
+            runtime: None,
+        }
+    }
+
     #[test]
     fn sanitizes_worktree_name_for_branch_and_path() {
         let sanitized = crate::sanitize_worktree_name("  Remote SSH / Demo  ");
@@ -2310,5 +2738,97 @@ mod tests {
     #[test]
     fn auto_follow_is_disabled_without_new_output() {
         assert!(!crate::should_auto_follow_terminal_output(false, false));
+    }
+
+    #[test]
+    fn computes_terminal_grid_size_from_viewport() {
+        let result = crate::terminal_grid_size_for_viewport(
+            900.,
+            380.,
+            crate::TERMINAL_CELL_WIDTH_PX,
+            crate::TERMINAL_CELL_HEIGHT_PX,
+        );
+        assert_eq!(result, Some((20, 100)));
+    }
+
+    #[test]
+    fn cursor_is_painted_at_terminal_column_instead_of_line_end() {
+        let theme = ThemeKind::OneDark.palette();
+        let session = session_with_styled_line(
+            "abcdef",
+            0x112233,
+            0x445566,
+            Some(TerminalCursor { line: 0, column: 2 }),
+        );
+
+        let lines = styled_lines_for_session(&session, theme, true);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].runs.len(), 3);
+        assert_eq!(lines[0].runs[0].text, "ab");
+        assert_eq!(lines[0].runs[1].text, "c");
+        assert_eq!(lines[0].runs[1].fg, 0x112233);
+        assert_eq!(lines[0].runs[1].bg, theme.terminal_cursor);
+        assert_eq!(lines[0].runs[2].text, "def");
+    }
+
+    #[test]
+    fn cursor_pads_to_column_when_it_is_after_line_content() {
+        let theme = ThemeKind::OneDark.palette();
+        let session = session_with_styled_line(
+            "abc",
+            0x112233,
+            0x445566,
+            Some(TerminalCursor { line: 0, column: 5 }),
+        );
+
+        let lines = styled_lines_for_session(&session, theme, true);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].runs.len(), 2);
+        assert_eq!(lines[0].runs[0].text, "abc");
+        assert_eq!(lines[0].runs[1].text, " ");
+        assert_eq!(lines[0].runs[1].fg, theme.text_primary);
+        assert_eq!(lines[0].runs[1].bg, theme.terminal_cursor);
+        assert!(lines[0].cells.iter().any(|cell| {
+            cell.column == 5 && cell.text == " " && cell.bg == theme.terminal_cursor
+        }));
+    }
+
+    #[test]
+    fn positioned_runs_split_cells_with_zero_width_sequences() {
+        let cells = vec![
+            TerminalStyledCell {
+                column: 0,
+                text: "A".to_owned(),
+                fg: 0x112233,
+                bg: 0x445566,
+            },
+            TerminalStyledCell {
+                column: 1,
+                text: "☀️".to_owned(),
+                fg: 0x112233,
+                bg: 0x445566,
+            },
+            TerminalStyledCell {
+                column: 2,
+                text: "B".to_owned(),
+                fg: 0x112233,
+                bg: 0x445566,
+            },
+        ];
+
+        let runs = crate::positioned_runs_from_cells(&cells);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].text, "A");
+        assert_eq!(runs[0].start_column, 0);
+        assert_eq!(runs[0].cell_count, 1);
+        assert!(runs[0].force_cell_width);
+        assert_eq!(runs[1].text, "☀️");
+        assert_eq!(runs[1].start_column, 1);
+        assert_eq!(runs[1].cell_count, 1);
+        assert!(!runs[1].force_cell_width);
+        assert_eq!(runs[2].text, "B");
+        assert_eq!(runs[2].start_column, 2);
+        assert_eq!(runs[2].cell_count, 1);
+        assert!(runs[2].force_cell_width);
     }
 }
