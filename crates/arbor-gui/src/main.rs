@@ -14,6 +14,7 @@ use {
         fill, font, point, prelude::*, px, rgb, size,
     },
     std::{
+        collections::HashMap,
         env, fs,
         path::{Path, PathBuf},
         sync::Mutex,
@@ -29,8 +30,8 @@ use {
 const FONT_UI: &str = ".ZedSans";
 const FONT_MONO: &str = "CaskaydiaMono Nerd Font Mono";
 const TERMINAL_FONT_FAMILIES: [&str; 6] = [
-    ".ZedMono",
     FONT_MONO,
+    ".ZedMono",
     "SF Mono",
     "Menlo",
     "Monaco",
@@ -38,7 +39,7 @@ const TERMINAL_FONT_FAMILIES: [&str; 6] = [
 ];
 const TERMINAL_CELL_WIDTH_PX: f32 = 9.0;
 const TERMINAL_CELL_HEIGHT_PX: f32 = 19.0;
-const TERMINAL_FONT_SIZE_PX: f32 = 14.0;
+const TERMINAL_FONT_SIZE_PX: f32 = 15.0;
 const TERMINAL_SCROLLBAR_WIDTH_PX: f32 = 12.0;
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -101,6 +102,7 @@ struct WorktreeSummary {
 #[derive(Clone)]
 struct TerminalSession {
     id: u64,
+    worktree_path: PathBuf,
     title: String,
     command: String,
     state: TerminalState,
@@ -154,13 +156,14 @@ struct ArborWindow {
     active_worktree_index: Option<usize>,
     changed_files: Vec<ChangedFile>,
     terminals: Vec<TerminalSession>,
-    active_terminal_id: Option<u64>,
+    active_terminal_by_worktree: HashMap<PathBuf, u64>,
     next_terminal_id: u64,
     active_backend_kind: TerminalBackendKind,
     theme_kind: ThemeKind,
     terminal_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
     create_worktree_modal: Option<CreateWorktreeModal>,
+    focus_terminal_on_next_render: bool,
     notice: Option<String>,
 }
 
@@ -176,13 +179,14 @@ impl ArborWindow {
                     active_worktree_index: None,
                     changed_files: Vec::new(),
                     terminals: Vec::new(),
-                    active_terminal_id: None,
+                    active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     active_backend_kind: TerminalBackendKind::Embedded,
                     theme_kind: ThemeKind::OneDark,
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
                     create_worktree_modal: None,
+                    focus_terminal_on_next_render: true,
                     notice: Some(format!("failed to read current directory: {error}")),
                 };
             },
@@ -198,13 +202,14 @@ impl ArborWindow {
                     active_worktree_index: None,
                     changed_files: Vec::new(),
                     terminals: Vec::new(),
-                    active_terminal_id: None,
+                    active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     active_backend_kind: TerminalBackendKind::Embedded,
                     theme_kind: ThemeKind::OneDark,
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
                     create_worktree_modal: None,
+                    focus_terminal_on_next_render: true,
                     notice: Some(format!("failed to resolve git repository root: {error}")),
                 };
             },
@@ -217,18 +222,19 @@ impl ArborWindow {
             active_worktree_index: None,
             changed_files: Vec::new(),
             terminals: Vec::new(),
-            active_terminal_id: None,
+            active_terminal_by_worktree: HashMap::new(),
             next_terminal_id: 1,
             active_backend_kind: TerminalBackendKind::Embedded,
             theme_kind: ThemeKind::OneDark,
             terminal_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
             create_worktree_modal: None,
+            focus_terminal_on_next_render: true,
             notice: None,
         };
 
         app.refresh_worktrees(cx);
-        let _ = app.spawn_terminal_session_inner(false);
+        let _ = app.ensure_selected_worktree_terminal();
         app.start_terminal_poller(cx);
         app
     }
@@ -253,7 +259,7 @@ impl ArborWindow {
     fn sync_running_terminals(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
         let follow_output = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
-        let active_terminal_id = self.active_terminal_id;
+        let active_terminal_id = self.active_terminal_id_for_selected_worktree();
         let target_grid_size =
             terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
 
@@ -331,9 +337,15 @@ impl ArborWindow {
                             .position(|worktree| worktree.path == path)
                     })
                     .or_else(|| (!self.worktrees.is_empty()).then_some(0));
+                self.active_terminal_by_worktree.retain(|path, _| {
+                    self.worktrees
+                        .iter()
+                        .any(|worktree| worktree.path.as_path() == path.as_path())
+                });
                 self.notice = None;
                 self.refresh_worktree_diff_summaries(cx);
                 self.reload_changed_files();
+                let _ = self.ensure_selected_worktree_terminal();
             },
             Err(error) => {
                 self.worktree_stats_loading = false;
@@ -392,6 +404,60 @@ impl ArborWindow {
             .and_then(|index| self.worktrees.get(index))
     }
 
+    fn active_terminal_id_for_worktree(&self, worktree_path: &Path) -> Option<u64> {
+        self.active_terminal_by_worktree
+            .get(worktree_path)
+            .copied()
+            .filter(|session_id| {
+                self.terminals.iter().any(|session| {
+                    session.id == *session_id && session.worktree_path.as_path() == worktree_path
+                })
+            })
+            .or_else(|| {
+                self.terminals
+                    .iter()
+                    .find(|session| session.worktree_path.as_path() == worktree_path)
+                    .map(|session| session.id)
+            })
+    }
+
+    fn active_terminal_id_for_selected_worktree(&self) -> Option<u64> {
+        let worktree_path = self.selected_worktree_path()?;
+        self.active_terminal_id_for_worktree(worktree_path)
+    }
+
+    fn selected_worktree_terminals(&self) -> Vec<&TerminalSession> {
+        let Some(worktree_path) = self.selected_worktree_path() else {
+            return Vec::new();
+        };
+
+        self.terminals
+            .iter()
+            .filter(|session| session.worktree_path.as_path() == worktree_path)
+            .collect()
+    }
+
+    fn ensure_selected_worktree_terminal(&mut self) -> bool {
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            return false;
+        };
+
+        let has_terminal = self
+            .terminals
+            .iter()
+            .any(|session| session.worktree_path == worktree_path);
+        if !has_terminal {
+            return self.spawn_terminal_session_inner(false);
+        }
+
+        if let Some(session_id) = self.active_terminal_id_for_worktree(&worktree_path) {
+            self.active_terminal_by_worktree
+                .insert(worktree_path, session_id);
+        }
+
+        true
+    }
+
     fn active_backend_descriptor(&self) -> terminal_backend::TerminalBackendDescriptor {
         terminal_backend::descriptor_for_kind(self.active_backend_kind)
     }
@@ -400,13 +466,13 @@ impl ArborWindow {
         self.theme_kind.palette()
     }
 
-    fn select_worktree(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.active_worktree_index == Some(index) {
-            return;
-        }
-
+    fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active_worktree_index = Some(index);
         self.reload_changed_files();
+        let _ = self.ensure_selected_worktree_terminal();
+        self.terminal_scroll_handle.scroll_to_bottom();
+        window.focus(&self.terminal_focus);
+        self.focus_terminal_on_next_render = false;
         cx.notify();
     }
 
@@ -573,6 +639,9 @@ impl ArborWindow {
                         {
                             this.active_worktree_index = Some(index);
                             this.reload_changed_files();
+                            let _ = this.ensure_selected_worktree_terminal();
+                            this.terminal_scroll_handle.scroll_to_bottom();
+                            this.focus_terminal_on_next_render = true;
                         }
                     },
                     Err(error) => {
@@ -739,10 +808,12 @@ impl ArborWindow {
         let backend_kind = self.active_backend_kind;
         let session_id = self.next_terminal_id;
         self.next_terminal_id += 1;
-        self.active_terminal_id = Some(session_id);
+        self.active_terminal_by_worktree
+            .insert(cwd.clone(), session_id);
 
         let mut session = TerminalSession {
             id: session_id,
+            worktree_path: cwd.clone(),
             title: format!("term-{session_id}"),
             command: String::new(),
             state: TerminalState::Running,
@@ -801,26 +872,36 @@ impl ArborWindow {
 
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
+        self.focus_terminal_on_next_render = false;
         cx.notify();
     }
 
     fn select_terminal(&mut self, session_id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_terminal_id == Some(session_id) {
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            return;
+        };
+
+        if self.active_terminal_id_for_selected_worktree() == Some(session_id) {
             window.focus(&self.terminal_focus);
+            self.focus_terminal_on_next_render = false;
             return;
         }
 
-        self.active_terminal_id = Some(session_id);
+        self.active_terminal_by_worktree
+            .insert(worktree_path, session_id);
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
+        self.focus_terminal_on_next_render = false;
         cx.notify();
     }
 
     fn active_terminal(&self) -> Option<&TerminalSession> {
-        let session_id = self.active_terminal_id?;
-        self.terminals
-            .iter()
-            .find(|session| session.id == session_id)
+        let worktree_path = self.selected_worktree_path()?;
+        let session_id = self.active_terminal_id_for_worktree(worktree_path)?;
+
+        self.terminals.iter().find(|session| {
+            session.id == session_id && session.worktree_path.as_path() == worktree_path
+        })
     }
 
     fn active_terminal_runtime(&self) -> Option<EmbeddedTerminal> {
@@ -868,6 +949,7 @@ impl ArborWindow {
         _: &mut Context<Self>,
     ) {
         window.focus(&self.terminal_focus);
+        self.focus_terminal_on_next_render = false;
     }
 
     fn render_top_bar(&self) -> impl IntoElement {
@@ -983,9 +1065,9 @@ impl ArborWindow {
                             .bg(rgb(theme.panel_bg))
                             .p_2()
                             .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.select_worktree(index, cx)),
-                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_worktree(index, window, cx)
+                            }))
                             .child(
                                 div()
                                     .flex()
@@ -1078,10 +1160,13 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = self.theme();
-        let active_terminal = self.active_terminal().cloned();
-        let active_terminal_index = self
-            .active_terminal_id
-            .and_then(|session_id| self.terminals.iter().position(|term| term.id == session_id));
+        let terminals = self.selected_worktree_terminals();
+        let active_terminal_id = self.active_terminal_id_for_selected_worktree();
+        let active_terminal = active_terminal_id
+            .and_then(|session_id| terminals.iter().find(|term| term.id == session_id).copied())
+            .cloned();
+        let active_terminal_index = active_terminal_id
+            .and_then(|session_id| terminals.iter().position(|term| term.id == session_id));
         let terminal_is_focused = self.terminal_focus.is_focused(window);
 
         div()
@@ -1116,7 +1201,7 @@ impl ArborWindow {
                             .flex()
                             .items_center()
                             .overflow_hidden()
-                            .when(self.terminals.is_empty(), |this| {
+                            .when(terminals.is_empty(), |this| {
                                 this.child(
                                     div()
                                         .px_3()
@@ -1125,10 +1210,10 @@ impl ArborWindow {
                                         .child("No terminal tabs"),
                                 )
                             })
-                            .children(self.terminals.iter().enumerate().map(|(index, session)| {
-                                let is_active = self.active_terminal_id == Some(session.id);
+                            .children(terminals.iter().enumerate().map(|(index, session)| {
+                                let is_active = active_terminal_id == Some(session.id);
                                 let session_id = session.id;
-                                let terminal_count = self.terminals.len();
+                                let terminal_count = terminals.len();
                                 let relation = active_terminal_index
                                     .map(|active_index| index.cmp(&active_index));
 
@@ -1320,6 +1405,7 @@ impl ArborWindow {
                             styled_lines_for_session(&session, theme, terminal_is_focused);
                         let mono_font = terminal_mono_font(cx);
                         let cell_width = terminal_cell_width_px(cx);
+                        let line_height = terminal_line_height_px(cx);
 
                         this.child(
                             div()
@@ -1330,7 +1416,7 @@ impl ArborWindow {
                                 .overflow_hidden()
                                 .font(mono_font.clone())
                                 .text_size(px(TERMINAL_FONT_SIZE_PX))
-                                .line_height(px(TERMINAL_CELL_HEIGHT_PX))
+                                .line_height(px(line_height))
                                 .px_2()
                                 .pt_1()
                                 .flex()
@@ -1360,6 +1446,7 @@ impl ArborWindow {
                                                         line,
                                                         theme,
                                                         cell_width,
+                                                        line_height,
                                                         mono_font.clone(),
                                                     )
                                                 })),
@@ -1492,6 +1579,12 @@ impl ArborWindow {
             .map(|entry| entry.label.clone())
             .unwrap_or_else(|| "none".to_owned());
         let backend = self.active_backend_descriptor().label;
+        let terminal_count = self.selected_worktree_path().map_or(0, |worktree_path| {
+            self.terminals
+                .iter()
+                .filter(|session| session.worktree_path.as_path() == worktree_path)
+                .count()
+        });
 
         div()
             .h(px(26.))
@@ -1524,10 +1617,7 @@ impl ArborWindow {
                         format!("changes {}", self.changed_files.len()),
                     ))
                     .child(status_text(theme, "•"))
-                    .child(status_text(
-                        theme,
-                        format!("terminals {}", self.terminals.len()),
-                    ))
+                    .child(status_text(theme, format!("terminals {terminal_count}")))
                     .child(status_text(theme, "ready")),
             )
     }
@@ -1766,6 +1856,11 @@ impl WorktreeSummary {
 
 impl Render for ArborWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_terminal_on_next_render && self.active_terminal().is_some() {
+            window.focus(&self.terminal_focus);
+            self.focus_terminal_on_next_render = false;
+        }
+
         let theme = self.theme();
         div()
             .size_full()
@@ -2186,13 +2281,21 @@ fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
     let mut current_text = String::new();
     let mut next_expected_column: Option<usize> = None;
     let mut current_contains_complex_cell = false;
+    let mut current_contains_decorative_cell = false;
 
     for cell in cells {
         let cell_is_complex = cell.text.chars().count() != 1;
+        let cell_is_powerline = cell
+            .text
+            .chars()
+            .next()
+            .is_some_and(is_terminal_powerline_character)
+            && cell.text.chars().count() == 1;
         let style_changed = current_fg != Some(cell.fg) || current_bg != Some(cell.bg);
         let gap_breaks_run = next_expected_column != Some(cell.column);
         let complex_breaks_run = current_contains_complex_cell || cell_is_complex;
-        if style_changed || gap_breaks_run || complex_breaks_run {
+        let decorative_breaks_run = current_contains_decorative_cell || cell_is_powerline;
+        if style_changed || gap_breaks_run || complex_breaks_run || decorative_breaks_run {
             if let (Some(fg), Some(bg)) = (current_fg.take(), current_bg.take())
                 && !current_text.is_empty()
             {
@@ -2206,10 +2309,12 @@ fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
             current_fg = Some(cell.fg);
             current_bg = Some(cell.bg);
             current_contains_complex_cell = cell_is_complex;
+            current_contains_decorative_cell = cell_is_powerline;
         }
 
         current_text.push_str(&cell.text);
         next_expected_column = Some(cell.column.saturating_add(1));
+        current_contains_decorative_cell |= cell_is_powerline;
     }
 
     if let (Some(fg), Some(bg)) = (current_fg, current_bg)
@@ -2243,14 +2348,22 @@ fn positioned_runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<PositionedTer
     let mut current_text = String::new();
     let mut next_expected_column: Option<usize> = None;
     let mut current_contains_complex_cell = false;
+    let mut current_contains_decorative_cell = false;
     let mut current_cell_count = 0_usize;
 
     for cell in cells {
         let cell_is_complex = cell.text.chars().count() != 1;
+        let cell_is_powerline = cell
+            .text
+            .chars()
+            .next()
+            .is_some_and(is_terminal_powerline_character)
+            && cell.text.chars().count() == 1;
         let style_changed = current_fg != Some(cell.fg) || current_bg != Some(cell.bg);
         let gap_breaks_run = next_expected_column != Some(cell.column);
         let complex_breaks_run = current_contains_complex_cell || cell_is_complex;
-        if style_changed || gap_breaks_run || complex_breaks_run {
+        let decorative_breaks_run = current_contains_decorative_cell || cell_is_powerline;
+        if style_changed || gap_breaks_run || complex_breaks_run || decorative_breaks_run {
             if let (Some(fg), Some(bg)) = (current_fg.take(), current_bg.take())
                 && !current_text.is_empty()
             {
@@ -2260,7 +2373,8 @@ fn positioned_runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<PositionedTer
                     bg,
                     start_column: current_start_column,
                     cell_count: current_cell_count,
-                    force_cell_width: !current_contains_complex_cell,
+                    force_cell_width: !current_contains_complex_cell
+                        && !current_contains_decorative_cell,
                 });
             }
 
@@ -2268,12 +2382,14 @@ fn positioned_runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<PositionedTer
             current_bg = Some(cell.bg);
             current_start_column = cell.column;
             current_contains_complex_cell = cell_is_complex;
+            current_contains_decorative_cell = cell_is_powerline;
             current_cell_count = 0;
         }
 
         current_text.push_str(&cell.text);
         current_cell_count = current_cell_count.saturating_add(1);
         current_contains_complex_cell |= cell_is_complex;
+        current_contains_decorative_cell |= cell_is_powerline;
         next_expected_column = Some(cell.column.saturating_add(1));
     }
 
@@ -2286,11 +2402,15 @@ fn positioned_runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<PositionedTer
             bg,
             start_column: current_start_column,
             cell_count: current_cell_count,
-            force_cell_width: !current_contains_complex_cell,
+            force_cell_width: !current_contains_complex_cell && !current_contains_decorative_cell,
         });
     }
 
     runs
+}
+
+fn is_terminal_powerline_character(ch: char) -> bool {
+    matches!(ch as u32, 0xE0B0..=0xE0D7)
 }
 
 fn plain_lines_to_styled(lines: Vec<String>, theme: ThemePalette) -> Vec<TerminalStyledLine> {
@@ -2327,6 +2447,7 @@ fn render_terminal_line(
     line: TerminalStyledLine,
     theme: ThemePalette,
     cell_width: f32,
+    line_height: f32,
     mono_font: gpui::Font,
 ) -> Div {
     let cells = if line.cells.is_empty() {
@@ -2340,18 +2461,18 @@ fn render_terminal_line(
             .flex_none()
             .w_full()
             .min_w_0()
-            .h(px(TERMINAL_CELL_HEIGHT_PX))
+            .h(px(line_height))
             .overflow_x_hidden()
             .whitespace_nowrap()
             .font(mono_font)
             .text_size(px(TERMINAL_FONT_SIZE_PX))
-            .line_height(px(TERMINAL_CELL_HEIGHT_PX))
+            .line_height(px(line_height))
             .bg(rgb(theme.terminal_bg))
             .text_color(rgb(theme.text_primary))
             .child(" ");
     }
 
-    let line_height = px(TERMINAL_CELL_HEIGHT_PX);
+    let line_height = px(line_height);
     let font_size = px(TERMINAL_FONT_SIZE_PX);
     let positioned_runs = positioned_runs_from_cells(&cells);
 
@@ -2366,23 +2487,37 @@ fn render_terminal_line(
             canvas(
                 |_, _, _| {},
                 move |bounds, _, window, cx| {
+                    let scale_factor = window.scale_factor();
                     for run in &positioned_runs {
                         if run.text.is_empty() {
                             continue;
                         }
 
                         if run.cell_count > 0 {
-                            let background_origin = point(
+                            let start_x = snap_pixels_floor(
                                 bounds.origin.x + px(run.start_column as f32 * cell_width),
-                                bounds.origin.y,
+                                scale_factor,
                             );
-                            let background_size =
-                                size(px(run.cell_count as f32 * cell_width), line_height);
+                            let end_x = snap_pixels_ceil(
+                                bounds.origin.x
+                                    + px((run.start_column + run.cell_count) as f32 * cell_width),
+                                scale_factor,
+                            );
+                            let background_origin = point(start_x, bounds.origin.y);
+                            let background_size = size((end_x - start_x).max(px(0.)), line_height);
                             window.paint_quad(fill(
                                 Bounds::new(background_origin, background_size),
                                 rgb(run.bg),
                             ));
                         }
+
+                        let is_powerline = should_force_powerline(run);
+                        let force_cell_width = run.force_cell_width || is_powerline;
+                        let force_width = if force_cell_width {
+                            Some(px(cell_width))
+                        } else {
+                            None
+                        };
 
                         let shaped_line = window.text_system().shape_line(
                             run.text.clone().into(),
@@ -2395,10 +2530,16 @@ fn render_terminal_line(
                                 underline: None,
                                 strikethrough: None,
                             }],
-                            run.force_cell_width.then_some(px(cell_width)),
+                            force_width,
                         );
 
-                        let run_x = bounds.origin.x + px(run.start_column as f32 * cell_width);
+                        let run_origin = bounds.origin.x + px(run.start_column as f32 * cell_width);
+                        let run_x = if is_powerline || force_cell_width {
+                            run_origin
+                        } else {
+                            run_origin.floor()
+                        };
+
                         let _ = shaped_line.paint(
                             point(run_x, bounds.origin.y),
                             line_height,
@@ -2410,6 +2551,33 @@ fn render_terminal_line(
             )
             .size_full(),
         )
+}
+
+fn should_force_powerline(run: &PositionedTerminalRun) -> bool {
+    run.text.chars().count() == 1
+        && run
+            .text
+            .chars()
+            .next()
+            .is_some_and(is_terminal_powerline_character)
+}
+
+fn snap_pixels_floor(value: gpui::Pixels, scale_factor: f32) -> gpui::Pixels {
+    if !(scale_factor.is_finite() && scale_factor > 0.) {
+        return value.floor();
+    }
+
+    let scaled = value.to_f64() as f32 * scale_factor;
+    px(scaled.floor() / scale_factor)
+}
+
+fn snap_pixels_ceil(value: gpui::Pixels, scale_factor: f32) -> gpui::Pixels {
+    if !(scale_factor.is_finite() && scale_factor > 0.) {
+        return value.ceil();
+    }
+
+    let scaled = value.to_f64() as f32 * scale_factor;
+    px(scaled.ceil() / scale_factor)
 }
 
 fn lines_for_display(text: &str) -> Vec<String> {
@@ -2454,8 +2622,8 @@ fn terminal_grid_size_from_scroll_handle(
     let width = (bounds.size.width.to_f64() as f32 - TERMINAL_SCROLLBAR_WIDTH_PX).max(1.);
     let height = bounds.size.height.to_f64() as f32;
     let cell_width = terminal_cell_width_px(cx);
-    let (rows, cols) =
-        terminal_grid_size_for_viewport(width, height, cell_width, TERMINAL_CELL_HEIGHT_PX)?;
+    let line_height = terminal_line_height_px(cx);
+    let (rows, cols) = terminal_grid_size_for_viewport(width, height, cell_width, line_height)?;
     let pixel_width = width.floor().clamp(1., f32::from(u16::MAX)) as u16;
     let pixel_height = height.floor().clamp(1., f32::from(u16::MAX)) as u16;
     Some((rows, cols, pixel_width, pixel_height))
@@ -2466,19 +2634,33 @@ fn terminal_cell_width_px(cx: &App) -> f32 {
     let mono_font = terminal_mono_font(cx);
     let font_id = text_system.resolve_font(&mono_font);
 
-    if let Ok(width) = text_system.ch_advance(font_id, px(TERMINAL_FONT_SIZE_PX)) {
-        let width = width.to_f64() as f32;
-        if width.is_finite() && width > 0. {
-            return width;
-        }
-    }
-
     text_system
         .advance(font_id, px(TERMINAL_FONT_SIZE_PX), 'm')
         .map(|size| size.width.to_f64() as f32)
         .ok()
         .filter(|width| width.is_finite() && *width > 0.)
         .unwrap_or(TERMINAL_CELL_WIDTH_PX)
+}
+
+fn terminal_line_height_px(cx: &App) -> f32 {
+    let text_system = cx.text_system();
+    let mono_font = terminal_mono_font(cx);
+    let font_id = text_system.resolve_font(&mono_font);
+    let font_size = px(TERMINAL_FONT_SIZE_PX);
+
+    let ascent = text_system.ascent(font_id, font_size).to_f64() as f32;
+    let descent = text_system.descent(font_id, font_size).to_f64() as f32;
+    let measured_height = if descent.is_sign_negative() {
+        ascent - descent
+    } else {
+        ascent + descent
+    };
+
+    if measured_height.is_finite() && measured_height > 0. {
+        return measured_height.ceil().max(TERMINAL_FONT_SIZE_PX).max(1.);
+    }
+
+    TERMINAL_CELL_HEIGHT_PX
 }
 
 fn terminal_grid_size_for_viewport(
@@ -2689,6 +2871,7 @@ mod tests {
     ) -> TerminalSession {
         TerminalSession {
             id: 1,
+            worktree_path: std::path::PathBuf::from("/tmp/worktree"),
             title: "term-1".to_owned(),
             command: "zsh".to_owned(),
             state: TerminalState::Running,
@@ -2830,5 +3013,67 @@ mod tests {
         assert_eq!(runs[2].start_column, 2);
         assert_eq!(runs[2].cell_count, 1);
         assert!(runs[2].force_cell_width);
+    }
+
+    #[test]
+    fn positioned_runs_do_not_force_cell_width_for_powerline_symbols() {
+        let cells = vec![
+            TerminalStyledCell {
+                column: 0,
+                text: "\u{e0b0}".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+            TerminalStyledCell {
+                column: 1,
+                text: "X".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+        ];
+
+        let runs = crate::positioned_runs_from_cells(&cells);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "\u{e0b0}");
+        assert!(!runs[0].force_cell_width);
+        assert_eq!(runs[1].text, "X");
+        assert!(runs[1].force_cell_width);
+    }
+
+    #[test]
+    fn positioned_runs_keep_cell_width_for_box_drawing_symbols() {
+        let cells = vec![
+            TerminalStyledCell {
+                column: 0,
+                text: "│".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+            TerminalStyledCell {
+                column: 1,
+                text: "X".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+        ];
+
+        let runs = crate::positioned_runs_from_cells(&cells);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "│X");
+        assert!(runs[0].force_cell_width);
+    }
+
+    #[test]
+    fn powerline_glyph_is_forced_to_cell_width() {
+        let run = crate::PositionedTerminalRun {
+            text: "\u{e0b6}".to_owned(),
+            fg: 0,
+            bg: 0,
+            start_column: 7,
+            cell_count: 1,
+            force_cell_width: false,
+        };
+
+        assert!(crate::should_force_powerline(&run));
     }
 }
