@@ -3924,9 +3924,11 @@ impl ArborWindow {
 
                                 div()
                                     .id(tab_id)
+                                    .group("tab")
+                                    .relative()
                                     .h_full()
                                     .cursor_pointer()
-                                    .min_w(px(122.))
+                                    .w(px(160.))
                                     .px_4()
                                     .flex()
                                     .items_center()
@@ -3951,13 +3953,56 @@ impl ArborWindow {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_sm()
                                             .text_color(rgb(if is_active {
                                                 theme.text_primary
                                             } else {
                                                 theme.text_muted
                                             }))
                                             .child(tab_label),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(match tab {
+                                                CenterTab::Terminal(id) => ("tab-close-terminal", id),
+                                                CenterTab::Diff(id) => ("tab-close-diff", id),
+                                            })
+                                            .absolute()
+                                            .right(px(4.))
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(24.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(24.))
+                                            .text_color(rgb(theme.text_muted))
+                                            .invisible()
+                                            .group_hover("tab", |s| s.visible())
+                                            .child("×")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                                    cx.stop_propagation();
+                                                    match tab {
+                                                        CenterTab::Terminal(session_id) => {
+                                                            if this.close_terminal_session_by_id(session_id) {
+                                                                this.sync_daemon_session_store(cx);
+                                                                this.terminal_scroll_handle.scroll_to_bottom();
+                                                                window.focus(&this.terminal_focus);
+                                                                this.focus_terminal_on_next_render = false;
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                        CenterTab::Diff(diff_id) => {
+                                                            if this.close_diff_session_by_id(diff_id) {
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                    }
+                                                }),
+                                            ),
                                     )
                                     .when(index + 1 == tab_count, |this| this.border_r_1())
                                     .map(|this| match relation {
