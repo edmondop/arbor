@@ -11,7 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 arbor-core = { path = "../arbor-core" }
-alacritty_terminal = { workspace = true }
+arbor-mosh = { path = "../arbor-mosh" }
+arbor-ssh = { path = "../arbor-ssh" }
+arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 config = { workspace = true }
 gix-diff = { workspace = true, features = ["blob-experimental"] }
 gpui = { workspace = true }
