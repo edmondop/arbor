@@ -2520,6 +2520,11 @@ impl ArborWindow {
     }
 
     fn spawn_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(outpost_index) = self.active_outpost_index {
+            self.spawn_outpost_terminal(outpost_index, window, cx);
+            return;
+        }
+
         if !self.spawn_terminal_session_inner(true) {
             cx.notify();
             return;
