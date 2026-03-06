@@ -4280,10 +4280,7 @@ fn terminal_output_tail_for_metadata(
 }
 
 fn current_unix_timestamp_millis() -> Option<u64> {
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
-    u64::try_from(duration.as_millis()).ok()
+    daemon::current_unix_timestamp_millis()
 }
 
 fn daemon_base_url_from_config(raw: Option<&str>) -> String {
@@ -4294,16 +4291,7 @@ fn daemon_base_url_from_config(raw: Option<&str>) -> String {
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    let left_canonical = left.canonicalize().ok();
-    let right_canonical = right.canonicalize().ok();
-
-    left_canonical
-        .zip(right_canonical)
-        .is_some_and(|(left, right)| left == right)
+    worktree::paths_equivalent(left, right)
 }
 
 fn daemon_error_is_connection_refused(message: &str) -> bool {
@@ -5696,10 +5684,7 @@ fn repository_display_name(path: &Path) -> String {
 }
 
 fn short_branch(value: &str) -> String {
-    value
-        .strip_prefix("refs/heads/")
-        .unwrap_or(value)
-        .to_owned()
+    worktree::short_branch(value)
 }
 
 fn expand_home_path(path: &str) -> Result<PathBuf, String> {

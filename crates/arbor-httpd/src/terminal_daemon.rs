@@ -12,7 +12,6 @@ use {
         path::PathBuf,
         sync::{Arc, Mutex, MutexGuard},
         thread,
-        time::{SystemTime, UNIX_EPOCH},
     },
     thiserror::Error,
     tokio::sync::broadcast,
@@ -547,8 +546,7 @@ fn default_shell() -> String {
 }
 
 fn current_unix_timestamp_millis() -> Option<u64> {
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
-    u64::try_from(duration.as_millis()).ok()
+    arbor_core::daemon::current_unix_timestamp_millis()
 }
 
 fn trim_to_last_lines(text: &str, max_lines: usize) -> String {
