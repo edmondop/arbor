@@ -10,17 +10,24 @@ name = "Arbor"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 arbor-core = { path = "../arbor-core" }
 alacritty_terminal = { workspace = true }
 config = { workspace = true }
+futures = { workspace = true }
 gix-diff = { workspace = true, features = ["blob-experimental"] }
 gpui = { workspace = true }
+gpui_http_client = { workspace = true }
 imara-diff = { workspace = true }
 portable-pty = { workspace = true }
 ropey = { workspace = true }
 serde = { workspace = true }
+smol = { workspace = true }
 serde_json = { workspace = true }
 syntect = { workspace = true }
+tracing = { workspace = true }
+ureq = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
