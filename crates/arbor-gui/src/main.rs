@@ -3155,7 +3155,7 @@ impl ArborWindow {
             .relative()
             .flex()
             .items_center()
-            // Left group: back/forward navigation (offset to clear macOS traffic lights)
+            // Left group: sidebar toggle + back/forward navigation (offset to clear macOS traffic lights)
             .child(
                 div()
                     .absolute()
@@ -3164,20 +3164,42 @@ impl ArborWindow {
                     .bottom_0()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_2()
                     .px_2()
+                    .child(
+                        div()
+                            .id("toggle-sidebar")
+                            .cursor_pointer()
+                            .font_family(FONT_MONO)
+                            .text_size(px(20.))
+                            .text_color(rgb(if sidebar_hidden {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            }))
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.action_toggle_left_pane(&ToggleLeftPane, window, cx);
+                            }))
+                            .child("\u{f0c9}"),
+                    )
                     .child(
                         div()
                             .id("nav-back")
                             .cursor_pointer()
                             .font_family(FONT_MONO)
-                            .text_size(px(12.))
+                            .text_size(px(20.))
                             .text_color(rgb(if back_enabled {
                                 theme.text_primary
                             } else {
                                 theme.text_disabled
                             }))
-
                             .when(back_enabled, |this| {
                                 this.on_click(cx.listener(|this, _, window, cx| {
                                     this.action_navigate_worktree_back(
@@ -3194,13 +3216,12 @@ impl ArborWindow {
                             .id("nav-forward")
                             .cursor_pointer()
                             .font_family(FONT_MONO)
-                            .text_size(px(12.))
+                            .text_size(px(20.))
                             .text_color(rgb(if forward_enabled {
                                 theme.text_primary
                             } else {
                                 theme.text_disabled
                             }))
-
                             .when(forward_enabled, |this| {
                                 this.on_click(cx.listener(|this, _, window, cx| {
                                     this.action_navigate_worktree_forward(
@@ -3229,44 +3250,129 @@ impl ArborWindow {
                             .child(centered_title),
                     ),
             )
-            // Right group: sidebar toggle
-            .child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .top_0()
-                    .bottom_0()
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .child(
-                        div()
-                            .id("toggle-sidebar")
-                            .cursor_pointer()
-                            .font_family(FONT_MONO)
-                            .text_size(px(14.))
-                            .text_color(rgb(if sidebar_hidden {
-                                theme.accent
-                            } else {
-                                theme.text_muted
-                            }))
-
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.action_toggle_left_pane(&ToggleLeftPane, window, cx);
-                            }))
-                            .child("\u{f0c9}"),
-                    ),
-            )
     }
 
     fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.left_pane_visible {
-            return div().w_0().h_full().flex_none();
+            let theme = self.theme();
+            let repositories = self.repositories.clone();
+            let worktrees = self.worktrees.clone();
+            let mut pane = div()
+                .id("collapsed-left-pane")
+                .w(px(40.))
+                .h_full()
+                .flex_none()
+                .bg(rgb(theme.sidebar_bg))
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt_2()
+                .gap_1()
+                .overflow_y_scroll();
+
+            for (repo_index, repository) in repositories.iter().enumerate() {
+                let repo_worktrees: Vec<(usize, &WorktreeSummary)> = worktrees
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, w)| w.repo_root == repository.root)
+                    .collect();
+
+                // Add spacing between repo groups (not before the first)
+                if repo_index > 0 {
+                    pane = pane.child(div().h(px(4.)));
+                }
+
+                // Repo icon row: circular avatar or GitHub icon
+                let repo_icon = if let Some(url) = repository.avatar_url.clone() {
+                    div()
+                        .size(px(24.))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .child(
+                            img(url)
+                                .size_full()
+                                .with_fallback(move || {
+                                    div()
+                                        .size_full()
+                                        .font_family(FONT_MONO)
+                                        .text_size(px(14.))
+                                        .text_color(rgb(theme.text_muted))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child("\u{f09b}")
+                                        .into_any_element()
+                                }),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .size(px(24.))
+                        .font_family(FONT_MONO)
+                        .text_size(px(14.))
+                        .text_color(rgb(theme.text_muted))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("\u{f09b}")
+                        .into_any_element()
+                };
+                pane = pane.child(repo_icon);
+
+                for (wt_index, worktree) in repo_worktrees {
+                    let is_active = self.active_worktree_index == Some(wt_index);
+                    let first_char: String = worktree
+                        .label
+                        .chars()
+                        .next()
+                        .unwrap_or('?')
+                        .to_uppercase()
+                        .collect();
+
+                    pane = pane.child(
+                        div()
+                            .id(("collapsed-worktree", wt_index))
+                            .cursor_pointer()
+                            .size(px(30.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(if is_active {
+                                theme.accent
+                            } else {
+                                theme.border
+                            }))
+                            .bg(rgb(if is_active {
+                                theme.panel_active_bg
+                            } else {
+                                theme.panel_bg
+                            }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(if is_active {
+                                theme.text_primary
+                            } else {
+                                theme.text_muted
+                            }))
+                            .child(first_char)
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.select_worktree(wt_index, window, cx);
+                                }),
+                            ),
+                    );
+                }
+            }
+
+            return pane;
         }
         let theme = self.theme();
         let repositories = self.repositories.clone();
         let worktrees = self.worktrees.clone();
         div()
+            .id("left-pane")
             .w(px(self.left_pane_width))
             .h_full()
             .bg(rgb(theme.sidebar_bg))
@@ -3852,14 +3958,15 @@ impl ArborWindow {
                                             }))
                                             .child(tab_label),
                                     )
-                                    .when(index == 0, |this| this.border_l_1())
                                     .when(index + 1 == tab_count, |this| this.border_r_1())
                                     .map(|this| match relation {
                                         Some(std::cmp::Ordering::Equal) => {
-                                            this.border_l_1().border_r_1()
+                                            let el = this.border_r_1();
+                                            if index == 0 { el } else { el.border_l_1() }
                                         },
                                         Some(std::cmp::Ordering::Less) => {
-                                            this.border_l_1().border_b_1()
+                                            let el = this.border_b_1();
+                                            if index == 0 { el } else { el.border_l_1() }
                                         },
                                         Some(std::cmp::Ordering::Greater) => {
                                             this.border_r_1().border_b_1()
@@ -4616,11 +4723,13 @@ impl Render for ArborWindow {
                     .flex_row()
                     .on_drag_move(cx.listener(Self::handle_pane_divider_drag_move))
                     .child(self.render_left_pane(cx))
-                    .child(self.render_pane_resize_handle(
-                        "left-pane-resize",
-                        DraggedPaneDivider::Left,
-                        theme,
-                    ))
+                    .when(self.left_pane_visible, |this| {
+                        this.child(self.render_pane_resize_handle(
+                            "left-pane-resize",
+                            DraggedPaneDivider::Left,
+                            theme,
+                        ))
+                    })
                     .child(self.render_center_pane(window, cx))
                     .child(self.render_pane_resize_handle(
                         "right-pane-resize",
