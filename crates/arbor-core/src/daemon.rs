@@ -3,6 +3,7 @@ use {
     std::{
         env, fs,
         path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
     },
     thiserror::Error,
 };
@@ -247,6 +248,11 @@ impl DaemonSessionStore for JsonDaemonSessionStore {
 
 pub fn default_daemon_session_store() -> JsonDaemonSessionStore {
     JsonDaemonSessionStore::default()
+}
+
+pub fn current_unix_timestamp_millis() -> Option<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(duration.as_millis()).ok()
 }
 
 #[cfg(test)]
