@@ -137,8 +137,10 @@ dependencies = [
 name = "arbor-gui"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
  "arbor-core",
+ "arbor-mosh",
+ "arbor-ssh",
+ "arbor-terminal-emulator",
  "config",
  "gix-diff",
  "gpui",
@@ -165,6 +167,33 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower-http",
+]
+
+[[package]]
+name = "arbor-mosh"
+version = "0.1.0"
+dependencies = [
+ "arbor-core",
+ "arbor-ssh",
+ "arbor-terminal-emulator",
+ "portable-pty",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "arbor-ssh"
+version = "0.1.0"
+dependencies = [
+ "arbor-core",
+ "libssh-rs",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "arbor-terminal-emulator"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
 ]
 
 [[package]]
@@ -4498,6 +4527,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "libssh-rs"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3066e110d6bb95a5addbd9c2ee595efdaeecaddd4793f3803dfee2968a74c685"
+dependencies = [
+ "bitflags 1.3.2",
+ "libc",
+ "libssh-rs-sys",
+ "openssl-sys",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "libssh-rs-sys"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01d528ea9ac190fa364ff12193da82222dfc645e7ab28666ae91493bd288a1a0"
+dependencies = [
+ "cc",
+ "openssl-sys",
+ "pkg-config",
+]
+
+[[package]]
 name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5266,6 +5319,18 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.111"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "option-ext"
@@ -8103,6 +8168,12 @@ dependencies = [
  "sval_ref",
  "sval_serde",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

@@ -13,6 +13,17 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # terminal_backend = "embedded" # embedded | alacritty | ghostty
 # theme = "one-dark"            # one-dark | ayu-dark | gruvbox-dark
 # daemon_url = "http://127.0.0.1:8787" # arbor-httpd base URL
+
+# [[remote_hosts]]
+# name = "build-server"
+# hostname = "build.example.com"
+# user = "dev"
+# port = 22
+# identity_file = "~/.ssh/id_ed25519"
+# remote_base_path = "~/arbor-outposts"
+# daemon_port = 8787
+# mosh = true                     # use mosh for interactive shells
+# mosh_server_path = "/usr/bin/mosh-server"  # optional custom path
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -21,6 +32,30 @@ pub struct ArborConfig {
     pub terminal_backend: Option<String>,
     pub theme: Option<String>,
     pub daemon_url: Option<String>,
+    pub remote_hosts: Vec<RemoteHostConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteHostConfig {
+    pub name: String,
+    pub hostname: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub user: String,
+    pub identity_file: Option<String>,
+    #[serde(default = "default_remote_base_path")]
+    pub remote_base_path: String,
+    pub daemon_port: Option<u16>,
+    pub mosh: Option<bool>,
+    pub mosh_server_path: Option<String>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_remote_base_path() -> String {
+    "~/arbor-outposts".to_owned()
 }
 
 pub struct LoadedArborConfig {

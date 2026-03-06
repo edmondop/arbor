@@ -4,6 +4,9 @@ members = [
     "crates/arbor-core",
     "crates/arbor-gui",
     "crates/arbor-httpd",
+    "crates/arbor-mosh",
+    "crates/arbor-ssh",
+    "crates/arbor-terminal-emulator",
     "crates/arbor-web-ui",
 ]
 resolver = "2"

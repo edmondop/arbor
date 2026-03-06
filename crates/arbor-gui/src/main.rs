@@ -183,9 +183,19 @@ enum TerminalState {
 }
 
 #[derive(Clone)]
+enum OutpostTerminalRuntime {
+    RemoteDaemon {
+        daemon: HttpTerminalDaemon,
+    },
+    SshShell,
+    MoshShell(arbor_mosh::MoshShell),
+}
+
+#[derive(Clone)]
 enum TerminalRuntime {
     Embedded(EmbeddedTerminal),
     Daemon,
+    Outpost(OutpostTerminalRuntime),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +258,35 @@ struct TerminalSelection {
     session_id: u64,
     anchor: TerminalGridPosition,
     head: TerminalGridPosition,
+}
+
+#[derive(Debug, Clone)]
+struct OutpostSummary {
+    outpost_id: String,
+    repo_root: PathBuf,
+    remote_path: String,
+    label: String,
+    branch: String,
+    host_name: String,
+    hostname: String,
+    status: arbor_core::outpost::OutpostStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateOutpostField {
+    HostSelector,
+    CloneUrl,
+    OutpostName,
+}
+
+#[derive(Debug, Clone)]
+struct CreateOutpostModal {
+    host_index: usize,
+    clone_url: String,
+    outpost_name: String,
+    active_field: CreateOutpostField,
+    is_creating: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +352,12 @@ struct ArborWindow {
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
     create_worktree_modal: Option<CreateWorktreeModal>,
+    outposts: Vec<OutpostSummary>,
+    outpost_store: Box<dyn arbor_core::outpost_store::OutpostStore>,
+    active_outpost_index: Option<usize>,
+    remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
+    ssh_connection_pool: Arc<arbor_ssh::connection::SshConnectionPool>,
+    create_outpost_modal: Option<CreateOutpostModal>,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     last_persisted_ui_state: ui_state_store::UiState,
@@ -380,6 +425,12 @@ impl ArborWindow {
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_worktree_modal: None,
+                    outposts: Vec::new(),
+                    outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
+                    active_outpost_index: None,
+                    remote_hosts: Vec::new(),
+                    ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+                    create_outpost_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     last_persisted_ui_state: startup_ui_state,
@@ -431,6 +482,12 @@ impl ArborWindow {
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_worktree_modal: None,
+                    outposts: Vec::new(),
+                    outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
+                    active_outpost_index: None,
+                    remote_hosts: Vec::new(),
+                    ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+                    create_outpost_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     last_persisted_ui_state: startup_ui_state,
@@ -511,6 +568,26 @@ impl ArborWindow {
             }
         }
 
+        let remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded_config
+            .config
+            .remote_hosts
+            .iter()
+            .map(|host_config| arbor_core::outpost::RemoteHost {
+                name: host_config.name.clone(),
+                hostname: host_config.hostname.clone(),
+                port: host_config.port,
+                user: host_config.user.clone(),
+                identity_file: host_config.identity_file.clone(),
+                remote_base_path: host_config.remote_base_path.clone(),
+                daemon_port: host_config.daemon_port,
+                mosh: host_config.mosh,
+                mosh_server_path: host_config.mosh_server_path.clone(),
+            })
+            .collect();
+
+        let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
+        let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
+
         let active_backend_kind =
             match parse_terminal_backend_kind(loaded_config.config.terminal_backend.as_deref()) {
                 Ok(kind) => kind,
@@ -568,6 +645,12 @@ impl ArborWindow {
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
             create_worktree_modal: None,
+            outposts,
+            outpost_store,
+            active_outpost_index: None,
+            remote_hosts,
+            ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+            create_outpost_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             last_persisted_ui_state: startup_ui_state,
@@ -1075,6 +1158,127 @@ impl ArborWindow {
                         },
                     }
                 },
+                TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon { ref daemon }) => {
+                    let (session_id, daemon_session_id, previous_cols, previous_rows, title) = {
+                        let session = &self.terminals[index];
+                        (
+                            session.id,
+                            session.daemon_session_id.clone(),
+                            session.cols,
+                            session.rows,
+                            session.title.clone(),
+                        )
+                    };
+
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, ..)) = target_grid_size
+                        && (cols != previous_cols || rows != previous_rows)
+                    {
+                        match daemon.resize(ResizeRequest {
+                            session_id: daemon_session_id.clone(),
+                            cols,
+                            rows,
+                        }) {
+                            Ok(()) => {
+                                let session = &mut self.terminals[index];
+                                session.cols = cols;
+                                session.rows = rows;
+                                changed = true;
+                            },
+                            Err(error) => {
+                                self.notice = Some(format!("failed to resize outpost terminal: {error}"));
+                            },
+                        }
+                    }
+
+                    match daemon.snapshot(SnapshotRequest {
+                        session_id: daemon_session_id,
+                        max_lines: 220,
+                    }) {
+                        Ok(Some(snapshot)) => {
+                            let session = &mut self.terminals[index];
+                            let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
+                            if session.output != snapshot.output_tail {
+                                session.output = snapshot.output_tail;
+                                session.styled_output.clear();
+                                session.cursor = None;
+                                changed = true;
+                            }
+                            if session.state != snapshot_state {
+                                session.state = snapshot_state;
+                                changed = true;
+                            }
+                            if session.exit_code != snapshot.exit_code {
+                                session.exit_code = snapshot.exit_code;
+                                changed = true;
+                            }
+                            if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
+                                session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
+                                changed = true;
+                            }
+                        },
+                        Ok(None) => {
+                            sessions_to_close.push(session_id);
+                        },
+                        Err(error) => {
+                            self.notice = Some(format!(
+                                "failed to load outpost daemon snapshot for terminal `{title}`: {error}"
+                            ));
+                        },
+                    }
+                },
+                TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell) => {
+                    // SSH shell snapshot polling -- not yet wired
+                },
+                TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh)) => {
+                    let session_id = self.terminals[index].id;
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
+                        && let Err(error) = mosh.resize(rows, cols, pixel_width, pixel_height)
+                    {
+                        self.notice = Some(format!("failed to resize mosh terminal: {error}"));
+                    }
+
+                    let generation = mosh.generation();
+                    if generation == self.terminals[index].generation {
+                        continue;
+                    }
+
+                    let snapshot = mosh.snapshot();
+                    let session = &mut self.terminals[index];
+                    let output = snapshot.output;
+                    let styled_output = snapshot.styled_lines;
+                    let cursor = snapshot.cursor;
+                    if output != session.output
+                        || styled_output != session.styled_output
+                        || cursor != session.cursor
+                    {
+                        session.output = output;
+                        session.styled_output = styled_output;
+                        session.cursor = cursor;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        changed = true;
+                    }
+                    session.generation = generation;
+
+                    if let Some(exit_code) = snapshot.exit_code
+                        && session.state == TerminalState::Running
+                    {
+                        session.exit_code = Some(exit_code);
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        if exit_code == 0 {
+                            sessions_to_close.push(session.id);
+                        } else {
+                            session.state = TerminalState::Failed;
+                            session.runtime = None;
+                            changed = true;
+                            self.notice = Some(format!(
+                                "mosh terminal tab `{}` exited with code {exit_code}",
+                                session.title,
+                            ));
+                        }
+                    }
+                },
             };
         }
 
@@ -1460,22 +1664,37 @@ impl ArborWindow {
             return false;
         };
 
-        if let Some(session) = self.terminals.get(index)
-            && matches!(session.runtime, Some(TerminalRuntime::Daemon))
-            && let Some(daemon) = self.terminal_daemon.as_ref()
-        {
-            let result = if session.state == TerminalState::Running {
-                daemon.kill(KillRequest {
-                    session_id: session.daemon_session_id.clone(),
-                })
-            } else {
-                daemon.detach(DetachRequest {
-                    session_id: session.daemon_session_id.clone(),
-                })
-            };
+        if let Some(session) = self.terminals.get(index) {
+            match &session.runtime {
+                Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(mosh))) => {
+                    mosh.close();
+                },
+                runtime => {
+                    let daemon_to_use = match runtime {
+                        Some(TerminalRuntime::Daemon) => self.terminal_daemon.as_ref(),
+                        Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon {
+                            daemon,
+                        })) => Some(daemon),
+                        _ => None,
+                    };
 
-            if let Err(error) = result {
-                self.notice = Some(format!("failed to close terminal session: {error}"));
+                    if let Some(daemon) = daemon_to_use {
+                        let result = if session.state == TerminalState::Running {
+                            daemon.kill(KillRequest {
+                                session_id: session.daemon_session_id.clone(),
+                            })
+                        } else {
+                            daemon.detach(DetachRequest {
+                                session_id: session.daemon_session_id.clone(),
+                            })
+                        };
+
+                        if let Err(error) = result {
+                            self.notice =
+                                Some(format!("failed to close terminal session: {error}"));
+                        }
+                    }
+                },
             }
         }
 
@@ -1707,6 +1926,7 @@ impl ArborWindow {
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active_worktree_index = Some(index);
+        self.active_outpost_index = None;
         self.active_diff_session_id = None;
         self.sync_active_repository_from_selected_worktree();
         let _ = self.reload_changed_files();
@@ -1716,6 +1936,44 @@ impl ArborWindow {
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
+        cx.notify();
+    }
+
+    fn select_outpost(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_outpost_index = Some(index);
+        self.active_worktree_index = None;
+        self.changed_files.clear();
+        self.selected_changed_file = None;
+        cx.notify();
+    }
+
+    fn remove_outpost(&mut self, outpost_index: usize, cx: &mut Context<Self>) {
+        let Some(outpost) = self.outposts.get(outpost_index) else {
+            return;
+        };
+
+        let outpost_id = outpost.outpost_id.clone();
+        if let Err(error) = self.outpost_store.remove(&outpost_id) {
+            self.notice = Some(format!("failed to remove outpost: {error}"));
+            cx.notify();
+            return;
+        }
+
+        self.outposts.remove(outpost_index);
+
+        if self.active_outpost_index == Some(outpost_index) {
+            self.active_outpost_index = None;
+        } else if let Some(active) = self.active_outpost_index {
+            if active > outpost_index {
+                self.active_outpost_index = Some(active - 1);
+            }
+        }
+
         cx.notify();
     }
 
@@ -2275,6 +2533,118 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn spawn_outpost_terminal(
+        &mut self,
+        outpost_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(outpost) = self.outposts.get(outpost_index) else {
+            return;
+        };
+
+        let host = self
+            .remote_hosts
+            .iter()
+            .find(|host| host.name == outpost.host_name)
+            .cloned();
+        let Some(host) = host else {
+            self.notice = Some(format!(
+                "no remote host config found for `{}`",
+                outpost.host_name,
+            ));
+            cx.notify();
+            return;
+        };
+
+        let worktree_path = outpost.repo_root.clone();
+        let session_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        self.active_terminal_by_worktree
+            .insert(worktree_path.clone(), session_id);
+
+        let title = format!("mosh-{}", outpost.label);
+        let mut session = TerminalSession {
+            id: session_id,
+            daemon_session_id: session_id.to_string(),
+            worktree_path,
+            title,
+            last_command: None,
+            pending_command: String::new(),
+            command: String::new(),
+            state: TerminalState::Running,
+            exit_code: None,
+            updated_at_unix_ms: current_unix_timestamp_millis(),
+            cols: 120,
+            rows: 35,
+            generation: 0,
+            output: String::new(),
+            styled_output: Vec::new(),
+            cursor: None,
+            runtime: None,
+        };
+
+        let mut launched = false;
+
+        if host.mosh == Some(true) && arbor_mosh::detect::local_mosh_client_available() {
+            let pool = self.ssh_connection_pool.clone();
+            match pool.get_or_connect(&host) {
+                Ok(conn_slot) => {
+                    let mosh_result: Result<arbor_mosh::MoshShell, String> = (|| {
+                        let guard = conn_slot
+                            .lock()
+                            .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                        let connection = guard
+                            .as_ref()
+                            .ok_or_else(|| "SSH connection not available".to_owned())?;
+                        let handshake = arbor_mosh::handshake::start_mosh_server(connection, &host)
+                            .map_err(|error| {
+                                format!("mosh handshake failed, falling back to SSH: {error}")
+                            })?;
+                        arbor_mosh::MoshShell::spawn(handshake, 120, 35).map_err(|error| {
+                            format!("mosh-client failed, falling back to SSH: {error}")
+                        })
+                    })();
+
+                    match mosh_result {
+                        Ok(mosh) => {
+                            session.command = "mosh".to_owned();
+                            session.generation = mosh.generation();
+                            session.runtime = Some(TerminalRuntime::Outpost(
+                                OutpostTerminalRuntime::MoshShell(mosh),
+                            ));
+                            launched = true;
+                        },
+                        Err(error) => {
+                            self.notice = Some(error);
+                        },
+                    }
+                },
+                Err(error) => {
+                    self.notice = Some(format!(
+                        "SSH connection failed for mosh handshake: {error}",
+                    ));
+                },
+            }
+        } else if host.mosh == Some(true) {
+            self.notice =
+                Some("mosh-client not found locally, falling back to SSH shell".to_owned());
+        }
+
+        if !launched {
+            session.command = "ssh shell (not yet wired)".to_owned();
+            session.runtime = Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell));
+        }
+
+        self.terminals.push(session);
+        self.sync_daemon_session_store(cx);
+        self.active_diff_session_id = None;
+        self.terminal_scroll_handle.scroll_to_bottom();
+        window.focus(&self.terminal_focus);
+        self.focus_terminal_on_next_render = false;
+        cx.notify();
+    }
+
     fn select_terminal(&mut self, session_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
             return;
@@ -2517,6 +2887,35 @@ impl ArborWindow {
                         })
                         .map_err(|error| error.to_string())?;
                 }
+                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+                Ok(())
+            },
+            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon { ref daemon })) => {
+                let daemon_session_id = self.terminals[index].daemon_session_id.clone();
+                if input == [0x03] {
+                    daemon
+                        .signal(SignalRequest {
+                            session_id: daemon_session_id,
+                            signal: TerminalSignal::Interrupt,
+                        })
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    daemon
+                        .write(WriteRequest {
+                            session_id: daemon_session_id,
+                            bytes: input.to_vec(),
+                        })
+                        .map_err(|error| error.to_string())?;
+                }
+                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+                Ok(())
+            },
+            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell)) => {
+                // SSH shell write handled via arbor_ssh::SshShell -- not yet wired
+                Ok(())
+            },
+            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh))) => {
+                mosh.write_input(input)?;
                 self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
                 Ok(())
             },
@@ -3119,6 +3518,13 @@ impl ArborWindow {
                                 .enumerate()
                                 .filter(|(_, worktree)| worktree.repo_root == repository.root)
                                 .collect();
+                            let repo_outposts: Vec<(usize, OutpostSummary)> = self
+                                .outposts
+                                .iter()
+                                .cloned()
+                                .enumerate()
+                                .filter(|(_, outpost)| outpost.repo_root == repository.root)
+                                .collect();
 
                             div()
                                 .id(("repository-group", repository_index))
@@ -3467,6 +3873,93 @@ impl ArborWindow {
                                             }),
                                         ),
                                 )
+                                .when(!repo_outposts.is_empty(), |group| {
+                                    group.child(
+                                        div()
+                                            .pl(px(8.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .children(
+                                                repo_outposts.into_iter().map(|(outpost_index, outpost)| {
+                                                    let is_active = self.active_outpost_index == Some(outpost_index);
+                                                    let status_color = match outpost.status {
+                                                        arbor_core::outpost::OutpostStatus::Available => theme.accent,
+                                                        arbor_core::outpost::OutpostStatus::Unreachable => 0xeb6f92,
+                                                        arbor_core::outpost::OutpostStatus::NotCloned | arbor_core::outpost::OutpostStatus::Provisioning => theme.text_muted,
+                                                    };
+                                                    div()
+                                                        .id(("outpost-row", outpost_index))
+                                                        .font_family(FONT_MONO)
+                                                        .cursor_pointer()
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(rgb(if is_active { theme.accent } else { theme.border }))
+                                                        .bg(rgb(theme.panel_bg))
+                                                        .px_2()
+                                                        .py_1()
+                                                        .h(px(40.))
+                                                        .flex()
+                                                        .flex_col()
+                                                        .justify_center()
+                                                        .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                                            this.select_outpost(outpost_index, window, cx);
+                                                        }))
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(status_color))
+                                                                        .child("\u{f0ac}"),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .flex_1()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
+                                                                        .text_xs()
+                                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                                        .text_color(rgb(theme.text_primary))
+                                                                        .child(outpost.label.clone()),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .pl(px(14.))
+                                                                .min_w_0()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_between()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(theme.text_disabled))
+                                                                        .child(outpost.branch.clone()),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .flex_none()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .child(format!("@{}", outpost.hostname)),
+                                                                ),
+                                                        )
+                                                }),
+                                            ),
+                                    )
+                                })
                         },
                     )),
             )
@@ -4311,6 +4804,38 @@ fn daemon_error_is_connection_refused(message: &str) -> bool {
     lower.contains("connection refused")
         || lower.contains("failed to connect")
         || lower.contains("actively refused")
+}
+
+fn load_outpost_summaries(
+    store: &dyn arbor_core::outpost_store::OutpostStore,
+    remote_hosts: &[arbor_core::outpost::RemoteHost],
+) -> Vec<OutpostSummary> {
+    let records = match store.load() {
+        Ok(records) => records,
+        Err(_) => return Vec::new(),
+    };
+
+    records
+        .into_iter()
+        .map(|record| {
+            let hostname = remote_hosts
+                .iter()
+                .find(|host| host.name == record.host_name)
+                .map(|host| host.hostname.clone())
+                .unwrap_or_else(|| record.host_name.clone());
+
+            OutpostSummary {
+                outpost_id: record.id,
+                repo_root: PathBuf::from(&record.local_repo_root),
+                remote_path: record.remote_path,
+                label: record.label,
+                branch: record.branch,
+                host_name: record.host_name,
+                hostname,
+                status: arbor_core::outpost::OutpostStatus::default(),
+            }
+        })
+        .collect()
 }
 
 impl WorktreeSummary {
