@@ -4085,8 +4085,11 @@ impl ArborWindow {
                             .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                     this.select_changed_file(file_path.clone(), cx);
+                                    if event.click_count == 2 {
+                                        this.open_diff_tab_for_selected_file(cx);
+                                    }
                                 }),
                             )
                             .child(
