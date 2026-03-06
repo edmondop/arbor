@@ -1,5 +1,7 @@
 mod app_config;
+mod log_layer;
 mod repository_store;
+mod simple_http_client;
 mod terminal_backend;
 mod terminal_daemon_http;
 mod terminal_keys;
@@ -34,7 +36,7 @@ use {
         env, fs,
         path::{Path, PathBuf},
         process::{Command, Stdio},
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::{Duration, Instant, SystemTime},
     },
     terminal_backend::{
@@ -86,8 +88,9 @@ const DIFF_FONT_SIZE_PX: f32 = 12.0;
 const DIFF_HUNK_CONTEXT_LINES: usize = 3;
 const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
+const TAB_ICON_LOGS: &str = "\u{f4ed}";
+const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 
-static QUIT_ARMED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn terminal_mono_font(cx: &App) -> gpui::Font {
     let fallbacks = FontFallbacks::from_fonts(
@@ -136,7 +139,8 @@ actions!(arbor, [
     ToggleLeftPane,
     NavigateWorktreeBack,
     NavigateWorktreeForward,
-    CollapseAllRepositories
+    CollapseAllRepositories,
+    ViewLogs
 ]);
 
 #[derive(Debug, Clone)]
@@ -197,6 +201,7 @@ enum TerminalRuntime {
 enum CenterTab {
     Terminal(u64),
     Diff(u64),
+    Logs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,22 +350,32 @@ struct ArborWindow {
     collapsed_repositories: HashSet<usize>,
     worktree_nav_back: Vec<usize>,
     worktree_nav_forward: Vec<usize>,
+    log_buffer: log_layer::LogBuffer,
+    log_entries: Vec<log_layer::LogEntry>,
+    log_generation: u64,
+    log_scroll_handle: ScrollHandle,
+    log_auto_scroll: bool,
+    logs_tab_open: bool,
+    logs_tab_active: bool,
+    quit_overlay_until: Option<Instant>,
 }
 
 impl ArborWindow {
     fn load_with_daemon_store<S>(
         startup_ui_state: ui_state_store::UiState,
+        log_buffer: log_layer::LogBuffer,
         cx: &mut Context<Self>,
     ) -> Self
     where
         S: daemon::DaemonSessionStore + Default + 'static,
     {
-        Self::load(Box::new(S::default()), startup_ui_state, cx)
+        Self::load(Box::new(S::default()), startup_ui_state, log_buffer, cx)
     }
 
     fn load(
         daemon_session_store: Box<dyn daemon::DaemonSessionStore>,
         startup_ui_state: ui_state_store::UiState,
+        log_buffer: log_layer::LogBuffer,
         cx: &mut Context<Self>,
     ) -> Self {
         let repository_store = repository_store::default_repository_store();
@@ -420,6 +435,14 @@ impl ArborWindow {
                     collapsed_repositories: HashSet::new(),
                     worktree_nav_back: Vec::new(),
                     worktree_nav_forward: Vec::new(),
+                    log_buffer: log_buffer.clone(),
+                    log_entries: Vec::new(),
+                    log_generation: 0,
+                    log_scroll_handle: ScrollHandle::new(),
+                    log_auto_scroll: true,
+                    logs_tab_open: false,
+                    logs_tab_active: false,
+                    quit_overlay_until: None,
                 };
             },
         };
@@ -479,22 +502,34 @@ impl ArborWindow {
                     collapsed_repositories: HashSet::new(),
                     worktree_nav_back: Vec::new(),
                     worktree_nav_forward: Vec::new(),
+                    log_buffer: log_buffer.clone(),
+                    log_entries: Vec::new(),
+                    log_generation: 0,
+                    log_scroll_handle: ScrollHandle::new(),
+                    log_auto_scroll: true,
+                    logs_tab_open: false,
+                    logs_tab_active: false,
+                    quit_overlay_until: None,
                 };
             },
         };
 
+        tracing::info!(config = %config_path.display(), "loading configuration");
         let loaded_config = app_config::load_or_create_config();
         let mut notice_parts = loaded_config.notices;
         let config_last_modified = app_config::config_last_modified(&config_path);
 
         if let Err(error) = daemon_session_store.load() {
+            tracing::warn!(%error, "failed to load daemon session metadata");
             notice_parts.push(format!("failed to load daemon session metadata: {error}"));
         }
         let daemon_base_url =
             daemon_base_url_from_config(loaded_config.config.daemon_url.as_deref());
+        tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
         let mut terminal_daemon = match HttpTerminalDaemon::new(&daemon_base_url) {
             Ok(client) => Some(client),
             Err(error) => {
+                tracing::error!(%error, url = %daemon_base_url, "invalid daemon URL");
                 notice_parts.push(format!("invalid daemon_url `{daemon_base_url}`: {error}"));
                 None
             },
@@ -506,6 +541,7 @@ impl ArborWindow {
                     Err(error) => {
                         let error_text = error.to_string();
                         if daemon_error_is_connection_refused(&error_text) {
+                            tracing::debug!("daemon not running (connection refused)");
                             terminal_daemon = None;
                             (Vec::new(), false)
                         } else {
@@ -624,6 +660,14 @@ impl ArborWindow {
             file_tree_entries: Vec::new(),
             expanded_dirs: HashSet::new(),
             selected_file_tree_entry: None,
+            log_buffer,
+            log_entries: Vec::new(),
+            log_generation: 0,
+            log_scroll_handle: ScrollHandle::new(),
+            log_auto_scroll: true,
+            logs_tab_open: false,
+            logs_tab_active: false,
+            quit_overlay_until: None,
         };
 
         app.refresh_worktrees(cx);
@@ -631,6 +675,7 @@ impl ArborWindow {
         let _ = app.ensure_selected_worktree_terminal();
         app.sync_daemon_session_store(cx);
         app.start_terminal_poller(cx);
+        app.start_log_poller(cx);
         app.start_worktree_auto_refresh(cx);
         app.start_github_pr_auto_refresh(cx);
         app.start_config_auto_refresh(cx);
@@ -646,6 +691,34 @@ impl ArborWindow {
                 .await;
 
                 let updated = this.update(cx, |this, cx| this.sync_running_terminals(cx));
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn start_log_poller(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async move {
+                    std::thread::sleep(LOG_POLLER_INTERVAL);
+                })
+                .await;
+
+                let updated = this.update(cx, |this, cx| {
+                    let current_generation = this.log_buffer.generation();
+                    if current_generation == this.log_generation {
+                        return;
+                    }
+                    this.log_generation = current_generation;
+                    this.log_entries = this.log_buffer.snapshot();
+                    if this.log_auto_scroll && this.logs_tab_active {
+                        this.log_scroll_handle.scroll_to_bottom();
+                    }
+                    cx.notify();
+                });
                 if updated.is_err() {
                     break;
                 }
@@ -1143,6 +1216,7 @@ impl ArborWindow {
     }
 
     fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
+        tracing::debug!("refreshing worktrees");
         let previously_selected = self.selected_worktree_path().map(Path::to_path_buf);
         let previous_summaries: HashMap<PathBuf, changes::DiffLineSummary> = self
             .worktrees
@@ -1468,6 +1542,10 @@ impl ArborWindow {
     }
 
     fn active_center_tab_for_selected_worktree(&self) -> Option<CenterTab> {
+        if self.logs_tab_active {
+            return Some(CenterTab::Logs);
+        }
+
         if let Some(diff_id) = self.active_diff_session_id {
             let worktree_path = self.selected_worktree_path()?;
             if self.diff_sessions.iter().any(|session| {
@@ -1503,6 +1581,7 @@ impl ArborWindow {
     }
 
     fn close_terminal_session_by_id(&mut self, session_id: u64) -> bool {
+        tracing::info!(session_id, "closing terminal session");
         let Some(index) = self
             .terminals
             .iter()
@@ -1595,6 +1674,11 @@ impl ArborWindow {
                 if self.close_diff_session_by_id(diff_session_id) {
                     cx.notify();
                 }
+            },
+            Some(CenterTab::Logs) => {
+                self.logs_tab_open = false;
+                self.logs_tab_active = false;
+                cx.notify();
             },
             None => {},
         }
@@ -1753,6 +1837,9 @@ impl ArborWindow {
     }
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(worktree) = self.worktrees.get(index) {
+            tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
+        }
         if let Some(old) = self.active_worktree_index
             && old != index
         {
@@ -2339,6 +2426,40 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn action_request_quit(&mut self, _: &RequestQuit, _: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if self
+            .quit_overlay_until
+            .is_some_and(|until| now < until)
+        {
+            cx.quit();
+            return;
+        }
+
+        let deadline = now + QUIT_ARM_WINDOW;
+        self.quit_overlay_until = Some(deadline);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(QUIT_ARM_WINDOW);
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.quit_overlay_until = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn action_view_logs(&mut self, _: &ViewLogs, _: &mut Window, cx: &mut Context<Self>) {
+        self.logs_tab_open = true;
+        self.logs_tab_active = true;
+        self.active_diff_session_id = None;
+        cx.notify();
+    }
+
     fn spawn_terminal_session_inner(&mut self, show_notice_on_missing_worktree: bool) -> bool {
         let Some(cwd) = self.selected_worktree_path().map(Path::to_path_buf) else {
             if show_notice_on_missing_worktree {
@@ -2347,6 +2468,7 @@ impl ArborWindow {
             return false;
         };
 
+        tracing::info!(cwd = %cwd.display(), "spawning terminal session");
         let backend_kind = self.active_backend_kind;
         let session_id = self.next_terminal_id;
         self.next_terminal_id += 1;
@@ -2497,6 +2619,7 @@ impl ArborWindow {
         self.active_terminal_by_worktree
             .insert(worktree_path, session_id);
         self.active_diff_session_id = None;
+        self.logs_tab_active = false;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
@@ -2529,6 +2652,7 @@ impl ArborWindow {
             self.notice = Some("select a worktree before opening a diff".to_owned());
             return;
         };
+        tracing::info!(worktree = %worktree_path.display(), "opening diff tab");
         let Some(selected_file_path) = self
             .selected_changed_file()
             .map(|change| change.path.clone())
@@ -2668,10 +2792,11 @@ impl ArborWindow {
     }
 
     fn select_diff_tab(&mut self, session_id: u64, cx: &mut Context<Self>) {
-        if self.active_diff_session_id == Some(session_id) {
+        if self.active_diff_session_id == Some(session_id) && !self.logs_tab_active {
             return;
         }
         self.active_diff_session_id = Some(session_id);
+        self.logs_tab_active = false;
         if let Some(selected_path) = self.selected_changed_file.clone()
             && !self.scroll_diff_to_file(selected_path.as_path())
         {
@@ -3405,10 +3530,10 @@ impl ArborWindow {
                 // Repo icon row: circular avatar or GitHub icon
                 let repo_icon = if let Some(url) = repository.avatar_url.clone() {
                     div()
-                        .size(px(24.))
-                        .rounded_full()
+                        .size(px(32.))
+                        .rounded_md()
                         .overflow_hidden()
-                        .child(img(url).size_full().with_fallback(move || {
+                        .child(img(url).size_full().rounded_md().with_fallback(move || {
                             div()
                                 .size_full()
                                 .font_family(FONT_MONO)
@@ -3541,7 +3666,7 @@ impl ArborWindow {
                                         }))
                                         .px_2()
                                         .py_1()
-                                        .h(px(28.))
+                                        .h(px(32.))
                                         .flex()
                                         .items_center()
                                         .justify_between()
@@ -3560,17 +3685,16 @@ impl ArborWindow {
                                                     div()
                                                         .id(("repo-chevron", repository_index))
                                                         .cursor_pointer()
-                                                        .font_family(FONT_MONO)
-                                                        .text_size(px(10.))
+                                                        .text_size(px(16.))
                                                         .text_color(rgb(theme.text_muted))
-                                                        .w(px(12.))
+                                                        .w(px(14.))
                                                         .flex()
                                                         .items_center()
                                                         .justify_center()
                                                         .child(if is_collapsed {
-                                                            "\u{f054}"
+                                                            "\u{25B8}"
                                                         } else {
-                                                            "\u{f078}"
+                                                            "\u{25BE}"
                                                         })
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
@@ -3595,12 +3719,13 @@ impl ArborWindow {
                                                         repository_avatar_url.clone()
                                                     {
                                                         div()
-                                                            .size(px(14.))
-                                                            .rounded_full()
+                                                            .size(px(20.))
+                                                            .rounded_sm()
                                                             .overflow_hidden()
                                                             .child(
                                                                 img(url)
                                                                     .size_full()
+                                                                    .rounded_sm()
                                                                     .with_fallback(move || {
                                                                         div()
                                                                             .size_full()
@@ -3633,7 +3758,8 @@ impl ArborWindow {
                                                         .overflow_hidden()
                                                         .whitespace_nowrap()
                                                         .text_ellipsis()
-                                                        .text_xs()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::MEDIUM)
                                                         .text_color(rgb(theme.text_primary))
                                                         .child(repository.label.clone()),
                                                 )
@@ -3936,6 +4062,9 @@ impl ArborWindow {
                 .iter()
                 .map(|session| CenterTab::Diff(session.id)),
         );
+        if self.logs_tab_open {
+            tabs.push(CenterTab::Logs);
+        }
 
         let mut active_tab = self.active_center_tab_for_selected_worktree();
         if active_tab.is_some_and(|tab| !tabs.contains(&tab)) {
@@ -4029,10 +4158,16 @@ impl ArborWindow {
                                             .unwrap_or_else(|| "diff".to_owned()),
                                         false,
                                     ),
+                                    CenterTab::Logs => (
+                                        TAB_ICON_LOGS,
+                                        "Logs".to_owned(),
+                                        true,
+                                    ),
                                 };
                                 let tab_id = match tab {
                                     CenterTab::Terminal(id) => ("center-tab-terminal", id),
                                     CenterTab::Diff(id) => ("center-tab-diff", id),
+                                    CenterTab::Logs => ("center-tab-logs", 0),
                                 };
 
                                 div()
@@ -4079,6 +4214,7 @@ impl ArborWindow {
                                             .id(match tab {
                                                 CenterTab::Terminal(id) => ("tab-close-terminal", id),
                                                 CenterTab::Diff(id) => ("tab-close-diff", id),
+                                                CenterTab::Logs => ("tab-close-logs", 0),
                                             })
                                             .absolute()
                                             .right(px(4.))
@@ -4113,6 +4249,11 @@ impl ArborWindow {
                                                                 cx.notify();
                                                             }
                                                         },
+                                                        CenterTab::Logs => {
+                                                            this.logs_tab_open = false;
+                                                            this.logs_tab_active = false;
+                                                            cx.notify();
+                                                        },
                                                     }
                                                 }),
                                             ),
@@ -4134,10 +4275,17 @@ impl ArborWindow {
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| match tab {
                                         CenterTab::Terminal(session_id) => {
+                                            this.logs_tab_active = false;
                                             this.select_terminal(session_id, window, cx);
                                         },
                                         CenterTab::Diff(diff_id) => {
+                                            this.logs_tab_active = false;
                                             this.select_diff_tab(diff_id, cx);
+                                        },
+                                        CenterTab::Logs => {
+                                            this.logs_tab_active = true;
+                                            this.active_diff_session_id = None;
+                                            cx.notify();
                                         },
                                     }))
                             })),
@@ -4180,7 +4328,7 @@ impl ArborWindow {
                     .min_h_0()
                     .bg(rgb(theme.terminal_bg))
                     .when(
-                        active_terminal.is_none() && active_diff_session.is_none(),
+                        active_terminal.is_none() && active_diff_session.is_none() && active_tab != Some(CenterTab::Logs),
                         |this| {
                             this.child(
                                 div()
@@ -4297,8 +4445,115 @@ impl ArborWindow {
                             mono_font,
                             diff_cell_width,
                         ))
+                    })
+                    .when(active_tab == Some(CenterTab::Logs), |this| {
+                        this.child(self.render_logs_content(cx))
                     }),
             )
+    }
+
+    fn render_logs_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let entry_count = self.log_entries.len();
+        let auto_scroll = self.log_auto_scroll;
+
+        div()
+            .h_full()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.tab_bg))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(format!("{entry_count} entries")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("log-copy-all")
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Copy All")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            let text = this
+                                                .log_entries
+                                                .iter()
+                                                .map(format_log_entry)
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("log-auto-scroll-toggle")
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(if auto_scroll {
+                                        theme.accent
+                                    } else {
+                                        theme.text_muted
+                                    }))
+                                    .child(if auto_scroll {
+                                        "Auto-scroll: ON"
+                                    } else {
+                                        "Auto-scroll: OFF"
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.log_auto_scroll = !this.log_auto_scroll;
+                                            cx.notify();
+                                        }),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().child(if entry_count > 0 {
+                let entries = self.log_entries.clone();
+                div()
+                    .id("log-entries")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.log_scroll_handle)
+                    .children(
+                        entries
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, entry)| render_log_row(entry, ix, theme)),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(rgb(theme.text_muted))
+                    .child("No log entries yet")
+                    .into_any_element()
+            }))
     }
 
     fn render_center_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4996,6 +5251,8 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_navigate_worktree_back))
             .on_action(cx.listener(Self::action_navigate_worktree_forward))
             .on_action(cx.listener(Self::action_collapse_all_repositories))
+            .on_action(cx.listener(Self::action_view_logs))
+            .on_action(cx.listener(Self::action_request_quit))
             .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
             .child(div().when_some(self.notice.clone(), |this, notice| {
@@ -5033,6 +5290,28 @@ impl Render for ArborWindow {
             )
             .child(self.render_status_bar())
             .child(self.render_create_worktree_modal(cx))
+            .when(self.quit_overlay_until.is_some_and(|until| Instant::now() < until), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(theme.chrome_bg))
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .text_sm()
+                                .text_color(rgb(theme.text_primary))
+                                .child("Hold ⌘Q to quit"),
+                        ),
+                )
+            })
     }
 }
 
@@ -5428,6 +5707,115 @@ fn rope_display_line(rope: &Rope, line_index: usize) -> String {
         let _ = text.pop();
     }
     text.replace('\t', "    ")
+}
+
+fn format_log_entry(entry: &log_layer::LogEntry) -> String {
+    let timestamp = entry
+        .timestamp
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = timestamp.as_secs();
+    let millis = timestamp.subsec_millis();
+    let hours = (total_secs / 3600) % 24;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    let level_str = match entry.level {
+        tracing::Level::ERROR => "ERROR",
+        tracing::Level::WARN => "WARN ",
+        tracing::Level::INFO => "INFO ",
+        tracing::Level::DEBUG => "DEBUG",
+        tracing::Level::TRACE => "TRACE",
+    };
+    let message = if entry.fields.is_empty() {
+        entry.message.clone()
+    } else {
+        let fields_str: Vec<String> = entry
+            .fields
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        format!("{} {}", entry.message, fields_str.join(" "))
+    };
+    format!(
+        "{hours:02}:{minutes:02}:{seconds:02}.{millis:03} {level_str} {} {message}",
+        entry.target
+    )
+}
+
+fn render_log_row(entry: &log_layer::LogEntry, index: usize, theme: ThemePalette) -> Div {
+    let timestamp = entry
+        .timestamp
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = timestamp.as_secs();
+    let millis = timestamp.subsec_millis();
+    let hours = (total_secs / 3600) % 24;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    let time_str = format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}");
+
+    let (level_str, level_color) = match entry.level {
+        tracing::Level::ERROR => ("ERROR", 0xf38ba8_u32),
+        tracing::Level::WARN => ("WARN ", 0xf9e2af),
+        tracing::Level::INFO => ("INFO ", 0xa6e3a1),
+        tracing::Level::DEBUG => ("DEBUG", 0x89b4fa),
+        tracing::Level::TRACE => ("TRACE", 0x9399b2),
+    };
+
+    let target = truncate_with_ellipsis(&entry.target, 30);
+    let bg = if index.is_multiple_of(2) {
+        theme.terminal_bg
+    } else {
+        theme.sidebar_bg
+    };
+
+    div()
+        .py(px(2.))
+        .w_full()
+        .flex()
+        .items_start()
+        .gap_2()
+        .px_2()
+        .font_family(FONT_MONO)
+        .text_size(px(DIFF_FONT_SIZE_PX))
+        .bg(rgb(bg))
+        .child(
+            div()
+                .flex_none()
+                .text_color(rgb(theme.text_muted))
+                .child(time_str),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(40.))
+                .text_color(rgb(level_color))
+                .child(level_str),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(200.))
+                .text_color(rgb(theme.text_muted))
+                .overflow_hidden()
+                .child(target),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(rgb(theme.text_primary))
+                .child(if entry.fields.is_empty() {
+                    entry.message.clone()
+                } else {
+                    let fields_str: Vec<String> = entry
+                        .fields
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect();
+                    format!("{} {}", entry.message, fields_str.join(" "))
+                }),
+        )
 }
 
 fn render_diff_session(
@@ -6210,7 +6598,7 @@ fn github_repo_slug_for_repo(repo_root: &Path) -> Option<String> {
 
 fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
     let (owner, _) = repo_slug.split_once('/')?;
-    Some(format!("https://github.com/{owner}.png?size=40"))
+    Some(format!("https://avatars.githubusercontent.com/{owner}?size=96"))
 }
 
 fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
@@ -7313,29 +7701,6 @@ fn parse_theme_kind(theme: Option<&str>) -> Result<ThemeKind, String> {
     }
 }
 
-fn request_quit(_: &RequestQuit, cx: &mut App) {
-    let now = Instant::now();
-    let mut guard = match QUIT_ARMED_AT.lock() {
-        Ok(lock) => lock,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    let should_quit = guard
-        .as_ref()
-        .is_some_and(|armed_at| now.duration_since(*armed_at) <= QUIT_ARM_WINDOW);
-
-    if should_quit {
-        *guard = None;
-        cx.quit();
-        return;
-    }
-
-    *guard = Some(now);
-    eprintln!(
-        "press Cmd-Q again within {}ms to quit Arbor",
-        QUIT_ARM_WINDOW.as_millis(),
-    );
-}
 
 fn open_arbor_window(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
@@ -7356,6 +7721,7 @@ fn open_arbor_window(cx: &mut App) {
             cx.new(|cx| {
                 ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
                     ui_state_store::UiState::default(),
+                    log_layer::LogBuffer::new(),
                     cx,
                 )
             })
@@ -7370,7 +7736,6 @@ fn new_window(_: &NewWindow, cx: &mut App) {
 }
 
 fn install_app_menu_and_keys(cx: &mut App) {
-    cx.on_action(request_quit);
     cx.on_action(new_window);
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewWindow, None),
@@ -7390,6 +7755,7 @@ fn install_app_menu_and_keys(cx: &mut App) {
         KeyBinding::new("cmd-\\", ToggleLeftPane, None),
         KeyBinding::new("cmd-[", NavigateWorktreeBack, None),
         KeyBinding::new("cmd-]", NavigateWorktreeForward, None),
+        KeyBinding::new("cmd-shift-l", ViewLogs, None),
     ]);
     cx.set_menus(vec![
         Menu {
@@ -7436,6 +7802,8 @@ fn install_app_menu_and_keys(cx: &mut App) {
             items: vec![
                 MenuItem::action("Toggle Sidebar", ToggleLeftPane),
                 MenuItem::action("Collapse All Repositories", CollapseAllRepositories),
+                MenuItem::separator(),
+                MenuItem::action("View Logs", ViewLogs),
             ],
         },
         Menu {
@@ -7475,7 +7843,25 @@ fn bounds_from_window_geometry(
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    let log_buffer = log_layer::LogBuffer::new();
+
+    {
+        use tracing_subscriber::{
+            EnvFilter, Layer, Registry, layer::SubscriberExt, util::SubscriberInitExt,
+        };
+
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let in_memory_layer =
+            log_layer::InMemoryLayer::new(log_buffer.clone()).with_filter(env_filter);
+
+        Registry::default().with(in_memory_layer).init();
+    }
+
+    tracing::info!("Arbor starting");
+
+    Application::new().run(move |cx: &mut App| {
+        cx.set_http_client(simple_http_client::create_http_client());
         install_app_menu_and_keys(cx);
         let startup_ui_state = ui_state_store::load_startup_state();
         let default_bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
@@ -7484,6 +7870,7 @@ fn main() {
             .and_then(bounds_from_window_geometry)
             .unwrap_or(default_bounds);
         let startup_ui_state_for_window = startup_ui_state.clone();
+        let log_buffer_for_window = log_buffer.clone();
 
         if let Err(error) = cx.open_window(
             WindowOptions {
@@ -7500,9 +7887,11 @@ fn main() {
             },
             move |_, cx| {
                 let startup_ui_state = startup_ui_state_for_window.clone();
+                let log_buffer = log_buffer_for_window.clone();
                 cx.new(move |cx| {
                     ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
                         startup_ui_state,
+                        log_buffer,
                         cx,
                     )
                 })
