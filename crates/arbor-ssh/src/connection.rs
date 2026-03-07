@@ -3,15 +3,19 @@ use {
         outpost::RemoteHost,
         remote::{RemoteCommandOutput, RemoteError, RemoteTransport},
     },
-    libssh_rs::{AuthStatus, Channel, Session, SshOption},
+    libssh_rs::{AuthStatus, Session, SshOption},
     std::{
         collections::HashMap,
-        io::{Read, Write},
-        os::unix::net::UnixStream,
+        io::Read,
         sync::{Arc, Mutex},
         time::Duration,
     },
     thiserror::Error,
+};
+#[cfg(unix)]
+use {
+    libssh_rs::Channel,
+    std::{io::Write, os::unix::net::UnixStream},
 };
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -75,6 +79,7 @@ impl SshConnection {
     /// Proxies agent channel data between the remote and the local
     /// `SSH_AUTH_SOCK` socket so that commands like `git clone` can
     /// authenticate via the local SSH agent.
+    #[cfg(unix)]
     pub fn run_command_with_agent_forwarding(
         &self,
         command: &str,

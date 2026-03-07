@@ -47,9 +47,12 @@ impl RemoteProvisioner for SshProvisioner<'_> {
                 "GIT_SSH_COMMAND='ssh -F /dev/null' \
                  git clone --branch {branch} --single-branch {clone_url} {remote_path}"
             );
+            #[cfg(unix)]
             let clone_output = self
                 .connection
                 .run_command_with_agent_forwarding(&clone_cmd)?;
+            #[cfg(not(unix))]
+            let clone_output = self.connection.run_command(&clone_cmd)?;
             if clone_output.exit_code != Some(0) {
                 return Err(RemoteError::Command(format!(
                     "git clone failed: {}",
