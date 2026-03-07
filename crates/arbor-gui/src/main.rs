@@ -10080,6 +10080,12 @@ fn current_unix_timestamp_millis() -> Option<u64> {
 }
 
 fn daemon_base_url_from_config(raw: Option<&str>) -> String {
+    if let Ok(env_url) = env::var("ARBOR_DAEMON_URL") {
+        let trimmed = env_url.trim().to_owned();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_DAEMON_BASE_URL)
@@ -10165,8 +10171,13 @@ fn try_auto_start_daemon(daemon_base_url: &str) -> Option<HttpTerminalDaemon> {
         },
     };
 
+    let bind_addr = daemon_base_url
+        .strip_prefix("http://")
+        .unwrap_or("127.0.0.1:8787");
+
     let mut cmd = Command::new(&binary);
-    cmd.stdin(Stdio::null())
+    cmd.env("ARBOR_HTTPD_BIND", bind_addr)
+        .stdin(Stdio::null())
         .stdout(stdout_file)
         .stderr(stderr_file);
 
