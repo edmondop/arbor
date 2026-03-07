@@ -144,6 +144,16 @@ Push a tag in `YYYYMMDD.NN` format (example: `20260301.01`) to trigger an automa
   - Linux `tar.gz` bundles (`x86_64` and `aarch64`)
   - Windows `.zip` bundle (`x86_64`)
 
+## Similar Tools
+
+- [Superset](https://superset.sh) — terminal-based worktree manager
+- [Jean](https://jean.build) — dev environment for AI agents with isolated worktrees and chat sessions
+- [Conductor](https://www.conductor.build) — macOS app to orchestrate multiple AI coding agents in parallel worktrees
+
+## Acknowledgements
+
+Thanks to [Zed](https://zed.dev) for building and open-sourcing [GPUI](https://gpui.rs), the GPU-accelerated UI framework that powers Arbor.
+
 ## Changelog
 
 This repo uses [`git-cliff`](https://git-cliff.org/) for changelog generation.

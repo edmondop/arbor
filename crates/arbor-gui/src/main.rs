@@ -41,6 +41,7 @@ use {
         sync::{Arc, Mutex, OnceLock},
         time::{Duration, Instant, SystemTime},
     },
+    syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet},
     terminal_backend::{
         EMBEDDED_TERMINAL_DEFAULT_BG, EMBEDDED_TERMINAL_DEFAULT_FG, EmbeddedTerminal,
         TerminalBackendKind, TerminalCursor, TerminalLaunch, TerminalStyledCell,
@@ -70,7 +71,7 @@ const QUIT_ARM_WINDOW: Duration = Duration::from_millis(1200);
 const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
-const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 28;
+const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
 const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_LEFT_PANE_WIDTH: f32 = 290.;
 const DEFAULT_RIGHT_PANE_WIDTH: f32 = 340.;
@@ -91,6 +92,7 @@ const DIFF_HUNK_CONTEXT_LINES: usize = 3;
 const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
 const TAB_ICON_LOGS: &str = "\u{f4ed}";
+const TAB_ICON_FILE: &str = "\u{f15c}";
 const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
 const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
 const GIT_ACTION_ICON_PR: &str = "\u{f126}";
@@ -165,6 +167,7 @@ struct WorktreeSummary {
     pr_url: Option<String>,
     diff_summary: Option<changes::DiffLineSummary>,
     agent_state: Option<AgentState>,
+    agent_task: Option<String>,
     last_activity_unix_ms: Option<u64>,
 }
 
@@ -360,6 +363,7 @@ enum TerminalRuntime {
 enum CenterTab {
     Terminal(u64),
     Diff(u64),
+    FileView(u64),
     Logs,
 }
 
@@ -459,6 +463,32 @@ enum GitActionKind {
     CreatePullRequest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeQuickAction {
+    OpenFinder,
+    CopyPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickActionSubmenu {
+    Ide,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalLauncherKind {
+    Command(&'static str),
+    MacApp(&'static str),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExternalLauncher {
+    label: &'static str,
+    icon: &'static str,
+    icon_color: u32,
+    kind: ExternalLauncherKind,
+}
+
 #[derive(Debug, Clone)]
 struct FileTreeEntry {
     path: PathBuf,
@@ -496,6 +526,39 @@ struct DiffSession {
     file_row_indices: HashMap<PathBuf, usize>,
     wrapped_columns: usize,
     is_loading: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FileViewSpan {
+    text: String,
+    color: u32,
+}
+
+#[derive(Debug, Clone)]
+enum FileViewContent {
+    Text {
+        highlighted: Arc<[Vec<FileViewSpan>]>,
+        raw_lines: Vec<String>,
+        dirty: bool,
+    },
+    Image(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileViewCursor {
+    line: usize,
+    col: usize,
+}
+
+#[derive(Debug, Clone)]
+struct FileViewSession {
+    id: u64,
+    worktree_path: PathBuf,
+    file_path: PathBuf,
+    title: String,
+    content: FileViewContent,
+    is_loading: bool,
+    cursor: FileViewCursor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,6 +722,11 @@ struct ArborWindow {
     terminals: Vec<TerminalSession>,
     diff_sessions: Vec<DiffSession>,
     active_diff_session_id: Option<u64>,
+    file_view_sessions: Vec<FileViewSession>,
+    active_file_view_session_id: Option<u64>,
+    next_file_view_session_id: u64,
+    file_view_scroll_handle: UniformListScrollHandle,
+    file_view_editing: bool,
     active_terminal_by_worktree: HashMap<PathBuf, u64>,
     next_terminal_id: u64,
     next_diff_session_id: u64,
@@ -668,6 +736,7 @@ struct ArborWindow {
     right_pane_width: f32,
     terminal_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
+    center_tabs_scroll_handle: ScrollHandle,
     diff_scroll_handle: UniformListScrollHandle,
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
@@ -685,6 +754,10 @@ struct ArborWindow {
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
+    top_bar_quick_actions_open: bool,
+    top_bar_quick_actions_submenu: Option<QuickActionSubmenu>,
+    ide_launchers: Vec<ExternalLauncher>,
+    terminal_launchers: Vec<ExternalLauncher>,
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
     notifications_enabled: bool,
@@ -693,6 +766,8 @@ struct ArborWindow {
     theme_toast: Option<String>,
     theme_toast_generation: u64,
     right_pane_tab: RightPaneTab,
+    right_pane_search: String,
+    right_pane_search_active: bool,
     file_tree_entries: Vec<FileTreeEntry>,
     expanded_dirs: HashSet<PathBuf>,
     selected_file_tree_entry: Option<PathBuf>,
@@ -756,6 +831,11 @@ impl ArborWindow {
                     terminals: Vec::new(),
                     diff_sessions: Vec::new(),
                     active_diff_session_id: None,
+                    file_view_sessions: Vec::new(),
+                    active_file_view_session_id: None,
+                    next_file_view_session_id: 1,
+                    file_view_scroll_handle: UniformListScrollHandle::new(),
+                    file_view_editing: false,
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
@@ -769,6 +849,7 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    center_tabs_scroll_handle: ScrollHandle::new(),
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
@@ -786,6 +867,10 @@ impl ArborWindow {
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
+                    top_bar_quick_actions_open: false,
+                    top_bar_quick_actions_submenu: None,
+                    ide_launchers: Vec::new(),
+                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notifications_enabled: true,
@@ -794,6 +879,8 @@ impl ArborWindow {
                     theme_toast: None,
                     theme_toast_generation: 0,
                     right_pane_tab: RightPaneTab::Changes,
+                    right_pane_search: String::new(),
+                    right_pane_search_active: false,
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
@@ -839,6 +926,11 @@ impl ArborWindow {
                     terminals: Vec::new(),
                     diff_sessions: Vec::new(),
                     active_diff_session_id: None,
+                    file_view_sessions: Vec::new(),
+                    active_file_view_session_id: None,
+                    next_file_view_session_id: 1,
+                    file_view_scroll_handle: UniformListScrollHandle::new(),
+                    file_view_editing: false,
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
@@ -852,6 +944,7 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    center_tabs_scroll_handle: ScrollHandle::new(),
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
@@ -869,6 +962,10 @@ impl ArborWindow {
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
+                    top_bar_quick_actions_open: false,
+                    top_bar_quick_actions_submenu: None,
+                    ide_launchers: Vec::new(),
+                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notifications_enabled: true,
@@ -877,6 +974,8 @@ impl ArborWindow {
                     theme_toast: None,
                     theme_toast_generation: 0,
                     right_pane_tab: RightPaneTab::Changes,
+                    right_pane_search: String::new(),
+                    right_pane_search_active: false,
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
@@ -1035,6 +1134,11 @@ impl ArborWindow {
             terminals: Vec::new(),
             diff_sessions: Vec::new(),
             active_diff_session_id: None,
+            file_view_sessions: Vec::new(),
+            active_file_view_session_id: None,
+            next_file_view_session_id: 1,
+            file_view_scroll_handle: UniformListScrollHandle::new(),
+            file_view_editing: false,
             active_terminal_by_worktree: HashMap::new(),
             next_terminal_id: 1,
             next_diff_session_id: 1,
@@ -1048,6 +1152,7 @@ impl ArborWindow {
                 .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
             terminal_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
+            center_tabs_scroll_handle: ScrollHandle::new(),
             diff_scroll_handle: UniformListScrollHandle::new(),
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
@@ -1065,6 +1170,10 @@ impl ArborWindow {
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
+            top_bar_quick_actions_open: false,
+            top_bar_quick_actions_submenu: None,
+            ide_launchers: Vec::new(),
+            terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
             worktree_nav_back: Vec::new(),
@@ -1077,6 +1186,8 @@ impl ArborWindow {
             theme_toast: None,
             theme_toast_generation: 0,
             right_pane_tab: RightPaneTab::Changes,
+            right_pane_search: String::new(),
+            right_pane_search_active: false,
             file_tree_entries: Vec::new(),
             expanded_dirs: HashSet::new(),
             selected_file_tree_entry: None,
@@ -1501,9 +1612,9 @@ impl ArborWindow {
             .map(|worktree| worktree.path.clone())
     }
 
-    fn maybe_notify(&self, title: &str, body: &str) {
+    fn maybe_notify(&self, title: &str, body: &str, play_sound: bool) {
         if self.notifications_enabled && !self.window_is_active {
-            notifications::send(title, body);
+            notifications::send(title, body, play_sound);
         }
     }
 
@@ -1515,7 +1626,7 @@ impl ArborWindow {
             terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
         let daemon = self.terminal_daemon.clone();
         let mut sessions_to_close = Vec::new();
-        let mut pending_notifications: Vec<(String, String)> = Vec::new();
+        let mut pending_notifications: Vec<(String, String, bool)> = Vec::new();
 
         for index in 0..self.terminals.len() {
             let Some(runtime) = self
@@ -1567,6 +1678,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1576,6 +1688,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "terminal tab `{}` exited with code {exit_code}",
@@ -1652,6 +1765,7 @@ impl ArborWindow {
                                     pending_notifications.push((
                                         "Terminal completed".to_owned(),
                                         format!("`{title}` completed successfully"),
+                                        true,
                                     ));
                                     sessions_to_close.push(session.id);
                                 } else if session.state == TerminalState::Failed {
@@ -1660,6 +1774,7 @@ impl ArborWindow {
                                     pending_notifications.push((
                                         "Terminal failed".to_owned(),
                                         format!("`{title}` failed with code {exit_code}"),
+                                        false,
                                     ));
                                     self.notice = Some(format!(
                                         "terminal tab `{title}` exited with code {exit_code}",
@@ -1799,6 +1914,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "SSH terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1808,6 +1924,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "SSH terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "SSH terminal tab `{}` exited with code {exit_code}",
@@ -1856,6 +1973,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Mosh terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1865,6 +1983,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Mosh terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "mosh terminal tab `{}` exited with code {exit_code}",
@@ -1876,8 +1995,8 @@ impl ArborWindow {
             };
         }
 
-        for (title, body) in pending_notifications {
-            self.maybe_notify(&title, &body);
+        for (title, body, play_sound) in pending_notifications {
+            self.maybe_notify(&title, &body, play_sound);
         }
 
         for session_id in sessions_to_close {
@@ -1933,6 +2052,16 @@ impl ArborWindow {
                     .map(|state| (worktree.path.clone(), state))
             })
             .collect();
+        let previous_agent_tasks: HashMap<PathBuf, String> = self
+            .worktrees
+            .iter()
+            .filter_map(|worktree| {
+                worktree
+                    .agent_task
+                    .as_ref()
+                    .map(|task| (worktree.path.clone(), task.clone()))
+            })
+            .collect();
         let previous_activity: HashMap<PathBuf, u64> = self
             .worktrees
             .iter()
@@ -1966,6 +2095,7 @@ impl ArborWindow {
             worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
             worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
             worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
+            worktree.agent_task = previous_agent_tasks.get(&worktree.path).cloned();
             // Take the max of fresh git-based timestamp and previous value
             // (which may include agent activity).
             let prev = previous_activity.get(&worktree.path).copied();
@@ -2039,6 +2169,7 @@ impl ArborWindow {
         }
 
         self.refresh_worktree_diff_summaries(cx);
+        self.refresh_agent_tasks(cx);
         self.refresh_worktree_pull_requests(cx);
         let changed_files_changed = self.reload_changed_files();
         let created_terminal = self.ensure_selected_worktree_terminal();
@@ -2090,6 +2221,48 @@ impl ArborWindow {
                 if this.worktree_stats_loading {
                     this.worktree_stats_loading = false;
                     changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_agent_tasks(&mut self, cx: &mut Context<Self>) {
+        let worktree_paths: Vec<PathBuf> = self
+            .worktrees
+            .iter()
+            .filter(|wt| wt.agent_task.is_none())
+            .map(|wt| wt.path.clone())
+            .collect();
+        if worktree_paths.is_empty() {
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_spawn(async move {
+                    worktree_paths
+                        .into_iter()
+                        .map(|path| {
+                            let task = arbor_core::session::extract_agent_task(&path);
+                            (path, task)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
+                for (path, task) in results {
+                    if let Some(task) = task
+                        && let Some(wt) = this.worktrees.iter_mut().find(|wt| wt.path == path)
+                    {
+                        wt.agent_task = Some(task);
+                        changed = true;
+                    }
                 }
                 if changed {
                     cx.notify();
@@ -2327,6 +2500,11 @@ impl ArborWindow {
             .map(|worktree| worktree.path.as_path())
     }
 
+    fn selected_local_worktree_path(&self) -> Option<&Path> {
+        self.active_worktree()
+            .map(|worktree| worktree.path.as_path())
+    }
+
     fn can_run_local_git_actions(&self) -> bool {
         self.active_outpost_index.is_none() && self.selected_worktree_path().is_some()
     }
@@ -2428,6 +2606,17 @@ impl ArborWindow {
                 session.id == diff_id && session.worktree_path.as_path() == worktree_path
             }) {
                 return Some(CenterTab::Diff(diff_id));
+            }
+        }
+
+        if let Some(fv_id) = self.active_file_view_session_id {
+            let worktree_path = self.selected_worktree_path()?;
+            if self
+                .file_view_sessions
+                .iter()
+                .any(|s| s.id == fv_id && s.worktree_path.as_path() == worktree_path)
+            {
+                return Some(CenterTab::FileView(fv_id));
             }
         }
 
@@ -2559,6 +2748,159 @@ impl ArborWindow {
         true
     }
 
+    fn selected_worktree_file_view_sessions(&self) -> Vec<&FileViewSession> {
+        let Some(worktree_path) = self.selected_worktree_path() else {
+            return Vec::new();
+        };
+
+        self.file_view_sessions
+            .iter()
+            .filter(|session| session.worktree_path.as_path() == worktree_path)
+            .collect()
+    }
+
+    fn open_file_view_tab(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            return;
+        };
+
+        // If a session already exists for this file+worktree, just activate it.
+        if let Some(existing) = self
+            .file_view_sessions
+            .iter()
+            .find(|s| s.worktree_path == worktree_path && s.file_path == file_path)
+        {
+            self.active_file_view_session_id = Some(existing.id);
+            self.active_diff_session_id = None;
+            self.logs_tab_active = false;
+            cx.notify();
+            return;
+        }
+
+        let session_id = self.next_file_view_session_id;
+        self.next_file_view_session_id += 1;
+
+        let title = file_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file_path.to_string_lossy().into_owned());
+
+        let full_path = worktree_path.join(&file_path);
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let is_image = matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "svg" | "tiff" | "tif"
+        );
+
+        if is_image {
+            self.file_view_sessions.push(FileViewSession {
+                id: session_id,
+                worktree_path: worktree_path.clone(),
+                file_path: file_path.clone(),
+                title,
+                content: FileViewContent::Image(full_path),
+                is_loading: false,
+                cursor: FileViewCursor { line: 0, col: 0 },
+            });
+            self.active_file_view_session_id = Some(session_id);
+            self.active_diff_session_id = None;
+            self.logs_tab_active = false;
+            cx.notify();
+            return;
+        }
+
+        self.file_view_sessions.push(FileViewSession {
+            id: session_id,
+            worktree_path: worktree_path.clone(),
+            file_path: file_path.clone(),
+            title,
+            content: FileViewContent::Text {
+                highlighted: Arc::from([]),
+                raw_lines: Vec::new(),
+                dirty: false,
+            },
+            is_loading: true,
+            cursor: FileViewCursor { line: 0, col: 0 },
+        });
+        self.active_file_view_session_id = Some(session_id);
+        self.active_diff_session_id = None;
+        self.logs_tab_active = false;
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let default_color: u32 = 0xc8ccd4;
+                    match fs::read_to_string(&full_path) {
+                        Ok(content) => {
+                            let raw: Vec<String> = content.lines().map(String::from).collect();
+                            let highlighted =
+                                highlight_lines_with_syntect(&raw, &ext, default_color);
+                            (raw, highlighted)
+                        },
+                        Err(error) => {
+                            let msg = format!("Error reading file: {error}");
+                            (vec![msg.clone()], vec![vec![FileViewSpan {
+                                text: msg,
+                                color: default_color,
+                            }]])
+                        },
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if let Some(session) = this
+                    .file_view_sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id)
+                {
+                    session.content = FileViewContent::Text {
+                        highlighted: Arc::from(result.1),
+                        raw_lines: result.0,
+                        dirty: false,
+                    };
+                    session.is_loading = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    fn select_file_view_tab(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if self.active_file_view_session_id == Some(session_id) && !self.logs_tab_active {
+            return;
+        }
+        self.active_file_view_session_id = Some(session_id);
+        self.active_diff_session_id = None;
+        self.logs_tab_active = false;
+        cx.notify();
+    }
+
+    fn close_file_view_session_by_id(&mut self, session_id: u64) -> bool {
+        let Some(index) = self
+            .file_view_sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return false;
+        };
+
+        self.file_view_sessions.remove(index);
+        if self.active_file_view_session_id == Some(session_id) {
+            self.active_file_view_session_id = None;
+            self.file_view_editing = false;
+        }
+        true
+    }
+
     fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_center_tab_for_selected_worktree() {
             Some(CenterTab::Terminal(session_id)) => {
@@ -2572,6 +2914,11 @@ impl ArborWindow {
             },
             Some(CenterTab::Diff(diff_session_id)) => {
                 if self.close_diff_session_by_id(diff_session_id) {
+                    cx.notify();
+                }
+            },
+            Some(CenterTab::FileView(session_id)) => {
+                if self.close_file_view_session_by_id(session_id) {
                     cx.notify();
                 }
             },
@@ -2645,6 +2992,7 @@ impl ArborWindow {
         self.worktree_stats_loading = false;
         self.worktree_prs_loading = false;
         self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
         self.active_worktree_index = self
             .worktrees
             .iter()
@@ -2736,6 +3084,111 @@ impl ArborWindow {
         cx.open_url(url);
     }
 
+    fn close_top_bar_worktree_quick_actions(&mut self) {
+        self.top_bar_quick_actions_open = false;
+        self.top_bar_quick_actions_submenu = None;
+    }
+
+    fn refresh_top_bar_external_launchers(&mut self) {
+        self.ide_launchers = detect_ide_launchers();
+        self.terminal_launchers = detect_terminal_launchers();
+    }
+
+    fn toggle_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) {
+        if self.selected_local_worktree_path().is_none() {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        }
+
+        if self.top_bar_quick_actions_open {
+            self.close_top_bar_worktree_quick_actions();
+        } else {
+            self.top_bar_quick_actions_open = true;
+            self.top_bar_quick_actions_submenu = None;
+            self.refresh_top_bar_external_launchers();
+        }
+        cx.notify();
+    }
+
+    fn toggle_top_bar_worktree_quick_actions_submenu(
+        &mut self,
+        submenu: QuickActionSubmenu,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.top_bar_quick_actions_open {
+            return;
+        }
+
+        self.top_bar_quick_actions_submenu = if self.top_bar_quick_actions_submenu == Some(submenu)
+        {
+            None
+        } else {
+            Some(submenu)
+        };
+        cx.notify();
+    }
+
+    fn run_worktree_quick_action(&mut self, action: WorktreeQuickAction, cx: &mut Context<Self>) {
+        let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let result = match action {
+            WorktreeQuickAction::OpenFinder => open_worktree_in_file_manager(&worktree_path),
+            WorktreeQuickAction::CopyPath => {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    worktree_path.display().to_string(),
+                ));
+                Ok("copied worktree path to clipboard".to_owned())
+            },
+        };
+
+        self.close_top_bar_worktree_quick_actions();
+        self.notice = Some(match result {
+            Ok(message) => message,
+            Err(error) => error,
+        });
+        cx.notify();
+    }
+
+    fn run_worktree_external_launcher(
+        &mut self,
+        submenu: QuickActionSubmenu,
+        launcher_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let launcher = match submenu {
+            QuickActionSubmenu::Ide => self.ide_launchers.get(launcher_index).copied(),
+            QuickActionSubmenu::Terminal => self.terminal_launchers.get(launcher_index).copied(),
+        };
+        let Some(launcher) = launcher else {
+            self.notice = Some("launcher no longer available".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let result = open_worktree_with_external_launcher(&worktree_path, launcher);
+        self.close_top_bar_worktree_quick_actions();
+        self.notice = Some(match result {
+            Ok(message) => message,
+            Err(error) => error,
+        });
+        cx.notify();
+    }
+
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
@@ -2746,6 +3199,7 @@ impl ArborWindow {
             self.worktree_nav_back.push(old);
             self.worktree_nav_forward.clear();
         }
+        self.close_top_bar_worktree_quick_actions();
         self.active_worktree_index = Some(index);
         self.active_outpost_index = None;
         self.active_diff_session_id = None;
@@ -2767,6 +3221,7 @@ impl ArborWindow {
     }
 
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        self.close_top_bar_worktree_quick_actions();
         self.active_outpost_index = Some(index);
         self.active_worktree_index = None;
         self.changed_files.clear();
@@ -3157,7 +3612,41 @@ impl ArborWindow {
     }
 
     fn select_file_tree_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.selected_file_tree_entry = Some(path);
+        self.selected_file_tree_entry = Some(path.clone());
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let is_image = matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "svg" | "tiff" | "tif"
+        );
+
+        if !is_image
+            && let Ok(editor) = env::var("EDITOR")
+            && let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf)
+        {
+            let full_path = worktree_path.join(&path);
+            if is_gui_editor(&editor) {
+                if let Err(error) = Command::new(&editor)
+                    .arg(&full_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    self.notice = Some(format!("Failed to open $EDITOR ({editor}): {error}"));
+                }
+            } else {
+                self.open_editor_in_terminal(&editor, &full_path, cx);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.open_file_view_tab(path, cx);
         cx.notify();
     }
 
@@ -3166,6 +3655,8 @@ impl ArborWindow {
             return;
         }
         self.right_pane_tab = tab;
+        self.right_pane_search.clear();
+        self.right_pane_search_active = false;
         if tab == RightPaneTab::FileTree && self.file_tree_entries.is_empty() {
             self.rebuild_file_tree();
         }
@@ -3991,6 +4482,37 @@ impl ArborWindow {
             return;
         }
 
+        if self.right_pane_search_active {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.right_pane_search.clear();
+                    self.right_pane_search_active = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                },
+                "backspace" => {
+                    self.right_pane_search.pop();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+            if event.keystroke.modifiers.platform
+                || event.keystroke.modifiers.control
+                || event.keystroke.modifiers.alt
+            {
+                return;
+            }
+            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                self.right_pane_search.push_str(key_char);
+                cx.notify();
+                cx.stop_propagation();
+            }
+            return;
+        }
+
         if self.delete_modal.is_some() {
             if event.keystroke.modifiers.platform {
                 return;
@@ -4607,6 +5129,43 @@ impl ArborWindow {
         true
     }
 
+    fn open_editor_in_terminal(&mut self, editor: &str, file_path: &Path, cx: &mut Context<Self>) {
+        if !self.spawn_terminal_session_inner(true) {
+            cx.notify();
+            return;
+        }
+
+        // Find the session we just spawned, set its title, and send the editor command
+        let session_id = self.next_terminal_id - 1;
+        let editor_basename = Path::new(editor)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(editor);
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        if let Some(session) = self.terminals.iter_mut().find(|s| s.id == session_id) {
+            session.title = format!("{editor_basename}: {file_name}");
+        }
+        let cmd = format!(
+            "{} {}; exit\n",
+            shell_escape(editor),
+            shell_escape(&file_path.to_string_lossy()),
+        );
+        if let Err(error) = self.write_input_to_terminal(session_id, cmd.as_bytes()) {
+            self.notice = Some(format!("Failed to send command to terminal: {error}"));
+        }
+
+        self.sync_daemon_session_store(cx);
+        self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
+        self.file_view_editing = false;
+        self.logs_tab_active = false;
+        self.terminal_scroll_handle.scroll_to_bottom();
+        self.focus_terminal_on_next_render = true;
+    }
+
     fn spawn_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(outpost_index) = self.active_outpost_index {
             self.spawn_outpost_terminal(outpost_index, window, cx);
@@ -4620,6 +5179,9 @@ impl ArborWindow {
 
         self.sync_daemon_session_store(cx);
         self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
+        self.file_view_editing = false;
+        self.logs_tab_active = false;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
@@ -4789,6 +5351,7 @@ impl ArborWindow {
         self.active_terminal_by_worktree
             .insert(worktree_path, session_id);
         self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
         self.logs_tab_active = false;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
@@ -4966,6 +5529,7 @@ impl ArborWindow {
             return;
         }
         self.active_diff_session_id = Some(session_id);
+        self.active_file_view_session_id = None;
         self.logs_tab_active = false;
         if let Some(selected_path) = self.selected_changed_file.clone()
             && !self.scroll_diff_to_file(selected_path.as_path())
@@ -5329,9 +5893,17 @@ impl ArborWindow {
             return;
         }
 
-        let Some(CenterTab::Terminal(active_terminal_id)) =
-            self.active_center_tab_for_selected_worktree()
-        else {
+        let active_tab = self.active_center_tab_for_selected_worktree();
+
+        // Handle file view editing before terminal input
+        if matches!(active_tab, Some(CenterTab::FileView(_))) {
+            if self.handle_file_view_key_down(event, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        let Some(CenterTab::Terminal(active_terminal_id)) = active_tab else {
             return;
         };
 
@@ -5369,8 +5941,223 @@ impl ArborWindow {
         window: &mut Window,
         _: &mut Context<Self>,
     ) {
+        self.right_pane_search_active = false;
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
+    }
+
+    fn handle_file_view_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        // Always handle Cmd+S for save, even when not in editing mode
+        if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "s" {
+            self.save_active_file_view(cx);
+            return true;
+        }
+        if !self.file_view_editing {
+            return false;
+        }
+        let Some(session_id) = self.active_file_view_session_id else {
+            return false;
+        };
+        let Some(session) = self
+            .file_view_sessions
+            .iter_mut()
+            .find(|s| s.id == session_id)
+        else {
+            return false;
+        };
+        let FileViewContent::Text {
+            raw_lines, dirty, ..
+        } = &mut session.content
+        else {
+            return false;
+        };
+        if raw_lines.is_empty() {
+            return false;
+        }
+
+        let cursor = &mut session.cursor;
+
+        // Skip platform combos (Cmd+S handled above)
+        if event.keystroke.modifiers.platform {
+            return false;
+        }
+
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.file_view_editing = false;
+                cx.notify();
+                return true;
+            },
+            "backspace" => {
+                if cursor.col > 0 {
+                    let line = &mut raw_lines[cursor.line];
+                    let byte_pos = char_to_byte_offset(line, cursor.col);
+                    let prev_byte = char_to_byte_offset(line, cursor.col - 1);
+                    line.replace_range(prev_byte..byte_pos, "");
+                    cursor.col -= 1;
+                } else if cursor.line > 0 {
+                    let removed = raw_lines.remove(cursor.line);
+                    cursor.line -= 1;
+                    cursor.col = raw_lines[cursor.line].chars().count();
+                    raw_lines[cursor.line].push_str(&removed);
+                }
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "delete" => {
+                let line_char_count = raw_lines[cursor.line].chars().count();
+                if cursor.col < line_char_count {
+                    let line = &mut raw_lines[cursor.line];
+                    let byte_pos = char_to_byte_offset(line, cursor.col);
+                    let next_byte = char_to_byte_offset(line, cursor.col + 1);
+                    line.replace_range(byte_pos..next_byte, "");
+                } else if cursor.line + 1 < raw_lines.len() {
+                    let next = raw_lines.remove(cursor.line + 1);
+                    raw_lines[cursor.line].push_str(&next);
+                }
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "enter" | "return" => {
+                let line = &raw_lines[cursor.line];
+                let byte_pos = char_to_byte_offset(line, cursor.col);
+                let rest = line[byte_pos..].to_owned();
+                raw_lines[cursor.line].truncate(byte_pos);
+                cursor.line += 1;
+                cursor.col = 0;
+                raw_lines.insert(cursor.line, rest);
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "left" => {
+                if cursor.col > 0 {
+                    cursor.col -= 1;
+                } else if cursor.line > 0 {
+                    cursor.line -= 1;
+                    cursor.col = raw_lines[cursor.line].chars().count();
+                }
+                cx.notify();
+                return true;
+            },
+            "right" => {
+                let line_len = raw_lines[cursor.line].chars().count();
+                if cursor.col < line_len {
+                    cursor.col += 1;
+                } else if cursor.line + 1 < raw_lines.len() {
+                    cursor.line += 1;
+                    cursor.col = 0;
+                }
+                cx.notify();
+                return true;
+            },
+            "up" => {
+                if cursor.line > 0 {
+                    cursor.line -= 1;
+                    let line_len = raw_lines[cursor.line].chars().count();
+                    cursor.col = cursor.col.min(line_len);
+                }
+                cx.notify();
+                return true;
+            },
+            "down" => {
+                if cursor.line + 1 < raw_lines.len() {
+                    cursor.line += 1;
+                    let line_len = raw_lines[cursor.line].chars().count();
+                    cursor.col = cursor.col.min(line_len);
+                }
+                cx.notify();
+                return true;
+            },
+            "tab" => {
+                let line = &mut raw_lines[cursor.line];
+                let byte_pos = char_to_byte_offset(line, cursor.col);
+                line.insert_str(byte_pos, "    ");
+                cursor.col += 4;
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "home" => {
+                cursor.col = 0;
+                cx.notify();
+                return true;
+            },
+            "end" => {
+                cursor.col = raw_lines[cursor.line].chars().count();
+                cx.notify();
+                return true;
+            },
+            _ => {},
+        }
+
+        if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+            return false;
+        }
+
+        // Character input
+        if let Some(key_char) = event.keystroke.key_char.as_ref() {
+            let line = &mut raw_lines[cursor.line];
+            let byte_pos = char_to_byte_offset(line, cursor.col);
+            line.insert_str(byte_pos, key_char);
+            cursor.col += key_char.chars().count();
+            *dirty = true;
+            cx.notify();
+            return true;
+        }
+
+        false
+    }
+
+    fn save_active_file_view(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.active_file_view_session_id else {
+            return;
+        };
+        let Some(session) = self.file_view_sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        let FileViewContent::Text {
+            raw_lines, dirty, ..
+        } = &session.content
+        else {
+            return;
+        };
+        if !dirty {
+            return;
+        }
+        let content = raw_lines.join("\n");
+        let full_path = session.worktree_path.join(&session.file_path);
+        let ext = session
+            .file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let raw_clone = raw_lines.clone();
+        match fs::write(&full_path, &content) {
+            Ok(()) => {
+                let highlighted = highlight_lines_with_syntect(&raw_clone, &ext, 0xc8ccd4);
+                if let Some(s) = self
+                    .file_view_sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id)
+                    && let FileViewContent::Text {
+                        highlighted: h,
+                        dirty: d,
+                        ..
+                    } = &mut s.content
+                {
+                    *h = Arc::from(highlighted);
+                    *d = false;
+                }
+            },
+            Err(error) => {
+                self.notice = Some(format!("Failed to save: {error}"));
+            },
+        }
+        cx.notify();
     }
 
     fn clamp_pane_widths_for_workspace(&mut self, workspace_width: f32) {
@@ -5595,6 +6382,9 @@ impl ArborWindow {
         let back_enabled = !self.worktree_nav_back.is_empty();
         let forward_enabled = !self.worktree_nav_forward.is_empty();
         let sidebar_hidden = !self.left_pane_visible;
+        let worktree_quick_actions_enabled = self.selected_local_worktree_path().is_some();
+        let worktree_quick_actions_open =
+            worktree_quick_actions_enabled && self.top_bar_quick_actions_open;
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -5698,7 +6488,7 @@ impl ArborWindow {
                             .child(centered_title),
                     ),
             )
-            // Right group: report issue button
+            // Right group: worktree quick actions + report issue button
             .child(
                 div()
                     .absolute()
@@ -5707,6 +6497,55 @@ impl ArborWindow {
                     .bottom_0()
                     .flex()
                     .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("worktree-quick-actions")
+                            .h(px(22.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(if worktree_quick_actions_enabled {
+                                theme.text_muted
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(worktree_quick_actions_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(rgb(theme.panel_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_menu(cx);
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .child("\u{f0e7}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .child("Action"),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(9.))
+                                    .child(if worktree_quick_actions_open {
+                                        "\u{f077}"
+                                    } else {
+                                        "\u{f078}"
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .id("report-issue")
@@ -5720,7 +6559,8 @@ impl ArborWindow {
                             .rounded_sm()
                             .border_1()
                             .border_color(rgb(theme.border))
-                            .on_click(cx.listener(|_this, _, _window, cx| {
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.close_top_bar_worktree_quick_actions();
                                 cx.open_url("https://github.com/penso/arbor/issues/new");
                             }))
                             .child(
@@ -5735,6 +6575,372 @@ impl ArborWindow {
                                     .child("Report issue"),
                             ),
                     ),
+            )
+    }
+
+    fn render_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let menu_open =
+            self.top_bar_quick_actions_open && self.selected_local_worktree_path().is_some();
+
+        if !menu_open {
+            return div();
+        }
+
+        let ide_has_launchers = !self.ide_launchers.is_empty();
+        let terminal_has_launchers = !self.terminal_launchers.is_empty();
+        let submenu = self.top_bar_quick_actions_submenu;
+        let ide_row_active = submenu == Some(QuickActionSubmenu::Ide);
+        let terminal_row_active = submenu == Some(QuickActionSubmenu::Terminal);
+
+        let mut overlay = div()
+            .absolute()
+            .right(px(16.))
+            .top(px(TITLEBAR_HEIGHT))
+            .mt(px(4.))
+            .child(
+                div()
+                    .w(px(192.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("quick-action-open-finder")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_worktree_quick_action(WorktreeQuickAction::OpenFinder, cx);
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(0xe5c07b))
+                                    .child("\u{f07b}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Open in Finder"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("quick-action-open-ide-submenu")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .text_color(rgb(if ide_has_launchers {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(ide_has_launchers, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_submenu(
+                                            QuickActionSubmenu::Ide,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(ide_row_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(12.))
+                                            .text_color(rgb(0x39a0ed))
+                                            .child("\u{f121}"),
+                                    )
+                                    .child(div().text_size(px(11.)).child("IDE")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if ide_has_launchers {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child("\u{f054}"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("quick-action-open-terminal-submenu")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .text_color(rgb(if terminal_has_launchers {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(terminal_has_launchers, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_submenu(
+                                            QuickActionSubmenu::Terminal,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(terminal_row_active, |this| {
+                                this.bg(rgb(theme.panel_active_bg))
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(12.))
+                                            .text_color(rgb(0x68c38d))
+                                            .child("\u{f120}"),
+                                    )
+                                    .child(div().text_size(px(11.)).child("Terminal")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if terminal_has_launchers {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child("\u{f054}"),
+                            ),
+                    )
+                    .child(div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(rgb(theme.border)))
+                    .child(
+                        div()
+                            .id("quick-action-copy-path")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_worktree_quick_action(WorktreeQuickAction::CopyPath, cx);
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("\u{f0c5}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Copy path"),
+                            ),
+                    ),
+            );
+
+        if let Some(submenu) = submenu {
+            let launchers: &[ExternalLauncher] = match submenu {
+                QuickActionSubmenu::Ide => &self.ide_launchers,
+                QuickActionSubmenu::Terminal => &self.terminal_launchers,
+            };
+            if launchers.is_empty() {
+                return overlay;
+            }
+            let submenu_top = match submenu {
+                QuickActionSubmenu::Ide => px(28.),
+                QuickActionSubmenu::Terminal => px(52.),
+            };
+
+            overlay = overlay.child(
+                div()
+                    .id("quick-action-launcher-submenu")
+                    .absolute()
+                    .right(px(200.))
+                    .top(submenu_top)
+                    .w(px(220.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .children(launchers.iter().enumerate().map(|(index, launcher)| {
+                        let launcher = *launcher;
+                        div()
+                            .id(ElementId::NamedInteger(
+                                "quick-action-launcher-item".into(),
+                                index as u64,
+                            ))
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_worktree_external_launcher(submenu, index, cx);
+                            }))
+                            .child(
+                                div()
+                                    .w(px(20.))
+                                    .flex_none()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_center()
+                                    .text_color(rgb(launcher.icon_color))
+                                    .child(launcher.icon),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(launcher.label),
+                            )
+                    })),
+            );
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.close_top_bar_worktree_quick_actions();
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(overlay)
+    }
+
+    fn render_notice_toast(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(notice) = self.notice.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let is_error = notice_looks_like_error(&notice);
+        let background = if is_error {
+            theme.notice_bg
+        } else {
+            theme.chrome_bg
+        };
+        let text_color = if is_error {
+            theme.notice_text
+        } else {
+            theme.text_primary
+        };
+        let border_color = if is_error {
+            0xb95d5d
+        } else {
+            theme.accent
+        };
+        let icon = if is_error {
+            "\u{f06a}"
+        } else {
+            "\u{f05a}"
+        };
+        let icon_color = if is_error {
+            theme.notice_text
+        } else {
+            theme.accent
+        };
+
+        div()
+            .absolute()
+            .right(px(16.))
+            .bottom(px(36.))
+            .w(px(420.))
+            .max_w(px(420.))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(border_color))
+            .bg(rgb(background))
+            .px_2()
+            .py(px(8.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(12.))
+                            .text_color(rgb(icon_color))
+                            .child(icon),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(text_color))
+                            .child(notice),
+                    ),
+            )
+            .child(
+                div()
+                    .id("notice-toast-dismiss")
+                    .cursor_pointer()
+                    .font_family(FONT_MONO)
+                    .text_size(px(11.))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.notice = None;
+                        cx.notify();
+                    }))
+                    .child("\u{f00d}"),
             )
     }
 
@@ -5804,7 +7010,7 @@ impl ArborWindow {
                 for (wt_index, worktree) in repo_worktrees {
                     let is_active = self.active_worktree_index == Some(wt_index);
                     let first_char: String = worktree
-                        .label
+                        .branch
                         .chars()
                         .next()
                         .unwrap_or('?')
@@ -6212,7 +7418,7 @@ impl ArborWindow {
                                                                     .text_xs()
                                                                     .font_weight(FontWeight::SEMIBOLD)
                                                                     .text_color(rgb(theme.text_primary))
-                                                                    .child(worktree.label.clone()),
+                                                                    .child(worktree.branch.clone()),
                                                             )
                                                             // Right side: [+- lines] [time ago]
                                                             .child({
@@ -6280,7 +7486,7 @@ impl ArborWindow {
                                                                 right
                                                             }),
                                                     )
-                                                    // Line 2: [branch name] ... [PR number]
+                                                    // Line 2: [agent task or dir name] ... [PR number]
                                                     .child(
                                                         div()
                                                             .pl(px(22.))
@@ -6296,7 +7502,12 @@ impl ArborWindow {
                                                                     .text_ellipsis()
                                                                     .text_xs()
                                                                     .text_color(rgb(theme.text_disabled))
-                                                                    .child(worktree.branch.clone()),
+                                                                    .child(
+                                                                        worktree
+                                                                            .agent_task
+                                                                            .clone()
+                                                                            .unwrap_or_else(|| worktree.label.clone()),
+                                                                    ),
                                                             )
                                                             .when_some(pr_number, |this, pr_num| {
                                                                 let pr_text = format!("#{pr_num}");
@@ -6522,6 +7733,7 @@ impl ArborWindow {
         let theme = self.theme();
         let terminals = self.selected_worktree_terminals();
         let diff_sessions = self.selected_worktree_diff_sessions();
+        let file_view_sessions = self.selected_worktree_file_view_sessions();
         let mut tabs: Vec<CenterTab> = terminals
             .iter()
             .map(|session| CenterTab::Terminal(session.id))
@@ -6530,6 +7742,11 @@ impl ArborWindow {
             diff_sessions
                 .iter()
                 .map(|session| CenterTab::Diff(session.id)),
+        );
+        tabs.extend(
+            file_view_sessions
+                .iter()
+                .map(|session| CenterTab::FileView(session.id)),
         );
         if self.logs_tab_open {
             tabs.push(CenterTab::Logs);
@@ -6545,10 +7762,17 @@ impl ArborWindow {
                 Some(CenterTab::Diff(diff_id)) => Some(diff_id),
                 _ => None,
             };
+            self.active_file_view_session_id = match active_tab {
+                Some(CenterTab::FileView(fv_id)) => Some(fv_id),
+                _ => None,
+            };
         }
 
         let active_tab_index =
             active_tab.and_then(|tab| tabs.iter().position(|entry| *entry == tab));
+        if let Some(index) = active_tab_index {
+            self.center_tabs_scroll_handle.scroll_to_item(index);
+        }
         let active_terminal = match active_tab {
             Some(CenterTab::Terminal(session_id)) => self
                 .terminals
@@ -6627,8 +7851,11 @@ impl ArborWindow {
                     .justify_between()
                     .child(
                         div()
+                            .id("center-tabs-scroll")
+                            .track_scroll(&self.center_tabs_scroll_handle)
                             .h_full()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .child(
@@ -6858,7 +8085,7 @@ impl ArborWindow {
                     .min_h_0()
                     .bg(rgb(theme.terminal_bg))
                     .when(
-                        active_terminal.is_none() && active_diff_session.is_none() && active_tab != Some(CenterTab::Logs),
+                        active_terminal.is_none() && active_diff_session.is_none() && active_file_view_session.is_none() && active_tab != Some(CenterTab::Logs),
                         |this| {
                             this.child(
                                 div()
@@ -6974,6 +8201,18 @@ impl ArborWindow {
                             &self.diff_scroll_handle,
                             mono_font,
                             diff_cell_width,
+                        ))
+                    })
+                    .when_some(active_file_view_session, |this, session| {
+                        let mono_font = terminal_mono_font(cx);
+                        let editing = self.file_view_editing;
+                        this.child(render_file_view_session(
+                            session,
+                            theme,
+                            &self.file_view_scroll_handle,
+                            mono_font,
+                            editing,
+                            cx,
                         ))
                     })
                     .when(active_tab == Some(CenterTab::Logs), |this| {
@@ -7106,6 +8345,8 @@ impl ArborWindow {
             RightPaneTab::FileTree => self.render_file_tree(cx),
             RightPaneTab::Presets => self.render_presets_content(cx),
         };
+        let search_active = self.right_pane_search_active;
+        let search_text = self.right_pane_search.clone();
 
         div()
             .w(px(self.right_pane_width))
@@ -7115,6 +8356,47 @@ impl ArborWindow {
             .flex()
             .flex_col()
             .child(self.render_right_pane_tabs(cx))
+            .child(
+                div()
+                    .id("right-pane-search")
+                    .h(px(28.))
+                    .mx_1()
+                    .my(px(4.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(if search_active {
+                        theme.accent
+                    } else {
+                        theme.border
+                    }))
+                    .bg(rgb(theme.panel_bg))
+                    .cursor_text()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.right_pane_search_active = true;
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_xs()
+                            .text_color(rgb(if search_text.is_empty() {
+                                theme.text_disabled
+                            } else {
+                                theme.text_primary
+                            }))
+                            .child(if search_text.is_empty() {
+                                "Filter files…".to_owned()
+                            } else {
+                                search_text
+                            }),
+                    ),
+            )
             .child(content)
     }
 
@@ -7177,6 +8459,20 @@ impl ArborWindow {
         let commit_enabled = can_run_actions && !is_busy && !self.changed_files.is_empty();
         let push_enabled = can_run_actions && !is_busy;
         let pr_enabled = can_run_actions && !is_busy;
+        let search_lower = self.right_pane_search.to_lowercase();
+        let filtered_changes: Vec<_> = self
+            .changed_files
+            .iter()
+            .filter(|change| {
+                search_lower.is_empty()
+                    || change
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&search_lower)
+            })
+            .cloned()
+            .collect();
 
         div()
             .flex_1()
@@ -7257,7 +8553,7 @@ impl ArborWindow {
                     .flex_col()
                     .font_family(FONT_MONO)
                     .p_1()
-                    .children(self.changed_files.iter().map(|change| {
+                    .children(filtered_changes.iter().map(|change| {
                         let is_selected = selected_path
                             .as_ref()
                             .is_some_and(|selected| selected.as_path() == change.path.as_path());
@@ -7352,6 +8648,25 @@ impl ArborWindow {
         let theme = self.theme();
         let selected_entry = self.selected_file_tree_entry.clone();
         let expanded_dirs = &self.expanded_dirs;
+        let search_lower = self.right_pane_search.to_lowercase();
+        let is_filtering = !search_lower.is_empty();
+        let filtered_entries: Vec<_> = self
+            .file_tree_entries
+            .iter()
+            .filter(|entry| {
+                if !is_filtering {
+                    return true;
+                }
+                if entry.is_dir {
+                    return false;
+                }
+                entry
+                    .path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&search_lower)
+            })
+            .collect();
 
         div().flex_1().min_h_0().flex().flex_col().child(
             div()
@@ -7364,11 +8679,15 @@ impl ArborWindow {
                 .flex_col()
                 .font_family(FONT_MONO)
                 .p_1()
-                .children(self.file_tree_entries.iter().map(|entry| {
+                .children(filtered_entries.iter().map(|entry| {
                     let is_selected = selected_entry
                         .as_ref()
                         .is_some_and(|selected| selected == &entry.path);
-                    let indent = entry.depth as f32 * 16. + 4.;
+                    let indent = if is_filtering {
+                        4.
+                    } else {
+                        entry.depth as f32 * 16. + 4.
+                    };
                     let entry_path = entry.path.clone();
                     let is_dir = entry.is_dir;
 
@@ -7436,7 +8755,11 @@ impl ArborWindow {
                                 .text_xs()
                                 .text_color(rgb(icon_color))
                                 .when(is_dir, |this| this.font_weight(FontWeight::SEMIBOLD))
-                                .child(entry.name.clone()),
+                                .child(if is_filtering {
+                                    entry.path.to_string_lossy().into_owned()
+                                } else {
+                                    entry.name.clone()
+                                }),
                         )
                 })),
         )
@@ -8969,6 +10292,7 @@ impl WorktreeSummary {
             pr_url: None,
             diff_summary: None,
             agent_state: None,
+            agent_task: None,
             last_activity_unix_ms,
         }
     }
@@ -9034,14 +10358,6 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
-            .child(div().when_some(self.notice.clone(), |this, notice| {
-                this.px_3()
-                    .py_2()
-                    .bg(rgb(theme.notice_bg))
-                    .text_color(rgb(theme.notice_text))
-                    .text_xs()
-                    .child(notice)
-            }))
             .child(
                 div()
                     .flex_1()
@@ -9068,6 +10384,8 @@ impl Render for ArborWindow {
                     .child(self.render_right_pane(cx)),
             )
             .child(self.render_status_bar())
+            .child(self.render_top_bar_worktree_quick_actions_menu(cx))
+            .child(self.render_notice_toast(cx))
             .child(self.render_create_modal(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
@@ -9326,15 +10644,19 @@ fn format_relative_time(unix_ms: u64) -> String {
 }
 
 fn terminal_tab_title(session: &TerminalSession) -> String {
-    let Some(last_command) = session
+    if let Some(last_command) = session
         .last_command
         .as_ref()
         .filter(|command| !command.trim().is_empty())
-    else {
-        return String::new();
-    };
+    {
+        return truncate_with_ellipsis(last_command.trim(), TERMINAL_TAB_COMMAND_MAX_CHARS);
+    }
 
-    truncate_with_ellipsis(last_command.trim(), TERMINAL_TAB_COMMAND_MAX_CHARS)
+    if !session.title.is_empty() && !session.title.starts_with("term-") {
+        return truncate_with_ellipsis(&session.title, TERMINAL_TAB_COMMAND_MAX_CHARS);
+    }
+
+    String::new()
 }
 
 fn diff_tab_title(session: &DiffSession) -> String {
@@ -9812,6 +11134,314 @@ fn render_log_row(entry: &log_layer::LogEntry, index: usize, theme: ThemePalette
                     format!("{} {}", entry.message, fields_str.join(" "))
                 }),
         )
+}
+
+fn render_file_view_session(
+    session: FileViewSession,
+    theme: ThemePalette,
+    scroll_handle: &UniformListScrollHandle,
+    mono_font: gpui::Font,
+    editing: bool,
+    cx: &mut Context<ArborWindow>,
+) -> Div {
+    let path_label = session.file_path.to_string_lossy().into_owned();
+    let is_loading = session.is_loading;
+    let session_id = session.id;
+    let cursor = session.cursor;
+
+    let (status_text, is_dirty, body) = match &session.content {
+        FileViewContent::Image(image_path) => {
+            let path = image_path.clone();
+            (
+                "image".to_owned(),
+                false,
+                div()
+                    .id(("file-view-scroll", session_id))
+                    .flex_1()
+                    .min_h_0()
+                    .bg(rgb(theme.terminal_bg))
+                    .overflow_y_scroll()
+                    .flex()
+                    .justify_center()
+                    .p_4()
+                    .child(img(path).max_w_full().h_auto().with_fallback(move || {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Failed to load image")
+                            .into_any_element()
+                    })),
+            )
+        },
+        FileViewContent::Text {
+            highlighted,
+            raw_lines,
+            dirty,
+        } => {
+            let line_count = raw_lines.len().max(highlighted.len());
+            let status = if is_loading {
+                "loading...".to_owned()
+            } else {
+                format!("{line_count} lines")
+            };
+            let highlighted = highlighted.clone();
+            let raw_lines_clone = raw_lines.clone();
+            let click_raw_lines = raw_lines.clone();
+            let click_line_count = line_count;
+            let click_scroll_handle = scroll_handle.clone();
+            let line_number_width = line_count.to_string().len().max(3);
+            let gutter_px = (line_number_width + 2) as f32 * DIFF_FONT_SIZE_PX * 0.6 + 8.0; // +8 for pl_2
+            let body = div()
+                .id(("file-view-scroll", session_id))
+                .flex_1()
+                .min_h_0()
+                .bg(rgb(theme.terminal_bg))
+                .cursor_text()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.file_view_editing = true;
+                        this.right_pane_search_active = false;
+
+                        // Compute clicked line and column from mouse position
+                        let state = click_scroll_handle.0.borrow();
+                        let bounds = state.base_handle.bounds();
+                        let offset = state.base_handle.offset();
+                        drop(state);
+
+                        let local_y = f32::from(event.position.y - bounds.top()).max(0.);
+                        let content_y = (local_y - f32::from(offset.y)).max(0.);
+                        let clicked_line = ((content_y / DIFF_ROW_HEIGHT_PX).floor() as usize)
+                            .min(click_line_count.saturating_sub(1));
+
+                        let local_x =
+                            (f32::from(event.position.x - bounds.left()) - gutter_px).max(0.);
+                        let char_width = DIFF_FONT_SIZE_PX * 0.6;
+                        let clicked_col = (local_x / char_width).floor() as usize;
+
+                        let max_col = click_raw_lines
+                            .get(clicked_line)
+                            .map(|l| l.chars().count())
+                            .unwrap_or(0);
+
+                        if let Some(session) = this
+                            .file_view_sessions
+                            .iter_mut()
+                            .find(|s| s.id == session_id)
+                        {
+                            session.cursor.line = clicked_line;
+                            session.cursor.col = clicked_col.min(max_col);
+                        }
+                        cx.notify();
+                    }),
+                )
+                .when(is_loading, |this| {
+                    this.child(
+                        div()
+                            .h_full()
+                            .w_full()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .text_sm()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Loading file..."),
+                    )
+                })
+                .when(!is_loading, |this| {
+                    let scroll_handle = scroll_handle.clone();
+                    let mono_font = mono_font.clone();
+                    let line_number_width = line_count.to_string().len().max(3);
+                    let show_cursor = editing;
+                    this.child(
+                        div().size_full().min_w_0().flex().child(
+                            uniform_list(
+                                ("file-view-list", session_id),
+                                line_count,
+                                move |range, _, _| {
+                                    range
+                                        .map(|index| {
+                                            let line_num = index + 1;
+                                            let is_cursor_line =
+                                                show_cursor && cursor.line == index;
+
+                                            let mut content_div = div()
+                                                .pl_2()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .flex();
+
+                                            if show_cursor {
+                                                // When editing, show raw text with cursor
+                                                let raw = raw_lines_clone
+                                                    .get(index)
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                if is_cursor_line {
+                                                    let byte_pos =
+                                                        char_to_byte_offset(&raw, cursor.col);
+                                                    let before = &raw[..byte_pos];
+                                                    let after = &raw[byte_pos..];
+                                                    let cursor_char =
+                                                        after.chars().next().unwrap_or(' ');
+                                                    let after_cursor = if after.is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        after.chars().skip(1).collect()
+                                                    };
+                                                    content_div = content_div
+                                                        .child(
+                                                            div()
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .child(before.to_owned()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .bg(rgb(theme.accent))
+                                                                .text_color(rgb(theme.terminal_bg))
+                                                                .child(cursor_char.to_string()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .child(after_cursor),
+                                                        );
+                                                } else {
+                                                    content_div = content_div.child(
+                                                        div()
+                                                            .text_color(rgb(theme.text_primary))
+                                                            .child(if raw.is_empty() {
+                                                                " ".to_owned()
+                                                            } else {
+                                                                raw
+                                                            }),
+                                                    );
+                                                }
+                                            } else {
+                                                // Not editing: show highlighted spans
+                                                if let Some(spans) = highlighted.get(index) {
+                                                    for span in spans {
+                                                        content_div = content_div.child(
+                                                            div()
+                                                                .text_color(rgb(span.color))
+                                                                .child(span.text.clone()),
+                                                        );
+                                                    }
+                                                }
+                                            }
+
+                                            div()
+                                                .id(("fv-row", index))
+                                                .h(px(DIFF_ROW_HEIGHT_PX))
+                                                .w_full()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .font(mono_font.clone())
+                                                .text_size(px(DIFF_FONT_SIZE_PX))
+                                                .child(
+                                                    div()
+                                                        .w(px((line_number_width + 2) as f32
+                                                            * DIFF_FONT_SIZE_PX
+                                                            * 0.6))
+                                                        .flex_none()
+                                                        .text_color(rgb(theme.text_disabled))
+                                                        .text_size(px(DIFF_FONT_SIZE_PX))
+                                                        .px_1()
+                                                        .flex()
+                                                        .justify_end()
+                                                        .child(format!("{line_num}")),
+                                                )
+                                                .child(content_div)
+                                                .into_any_element()
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
+                            )
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .track_scroll(scroll_handle.clone()),
+                        ),
+                    )
+                });
+            (status, *dirty, body)
+        },
+    };
+
+    div()
+        .h_full()
+        .w_full()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(28.))
+                .px_3()
+                .bg(rgb(theme.tab_active_bg))
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font(mono_font.clone())
+                                .text_size(px(DIFF_FONT_SIZE_PX))
+                                .text_color(rgb(theme.text_muted))
+                                .child(path_label),
+                        )
+                        .when(is_dirty, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(DIFF_FONT_SIZE_PX))
+                                    .text_color(rgb(theme.accent))
+                                    .child("\u{2022}"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .when(is_dirty, |this| {
+                            this.child(
+                                div()
+                                    .id(("fv-save", session_id))
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .rounded_sm()
+                                    .bg(rgb(theme.accent))
+                                    .text_xs()
+                                    .text_color(rgb(theme.terminal_bg))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Save")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.save_active_file_view(cx);
+                                        }),
+                                    ),
+                            )
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_disabled))
+                                .child(status_text),
+                        ),
+                ),
+        )
+        .child(body)
 }
 
 fn render_diff_session(
@@ -10400,21 +12030,30 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
         return String::new();
     }
 
-    let mut chars = value.chars();
-    let mut output = String::new();
-
-    for _ in 0..max_chars {
-        let Some(ch) = chars.next() else {
-            return value.to_owned();
-        };
-        output.push(ch);
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_owned();
     }
 
-    if chars.next().is_some() {
-        output.push_str("...");
-    }
+    // Take max_chars - 1 characters + "…" so total stays within budget
+    let truncated: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{truncated}\u{2026}")
+}
 
-    output
+fn notice_looks_like_error(notice: &str) -> bool {
+    let lower = notice.to_ascii_lowercase();
+    [
+        "error",
+        "failed",
+        "invalid",
+        "cannot",
+        "could not",
+        "missing",
+        "not found",
+        "denied",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn action_button(
@@ -10725,6 +12364,93 @@ fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
         .child(text.into())
 }
 
+fn is_gui_editor(editor: &str) -> bool {
+    let basename = Path::new(editor)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(editor);
+    matches!(
+        basename,
+        "code"
+            | "codium"
+            | "subl"
+            | "atom"
+            | "gedit"
+            | "kate"
+            | "mousepad"
+            | "xed"
+            | "pluma"
+            | "gvim"
+            | "mvim"
+            | "mate"
+            | "bbedit"
+            | "nova"
+            | "zed"
+            | "cursor"
+            | "fleet"
+            | "lite-xl"
+    )
+}
+
+fn shell_escape(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '/' || c == '.' || c == '-' || c == '_')
+    {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte, _)| byte)
+        .unwrap_or(s.len())
+}
+
+fn highlight_lines_with_syntect(
+    raw_lines: &[String],
+    ext: &str,
+    default_color: u32,
+) -> Vec<Vec<FileViewSpan>> {
+    let syntax_set = SyntaxSet::load_defaults_newlines();
+    let theme_set = ThemeSet::load_defaults();
+    let theme = &theme_set.themes["base16-ocean.dark"];
+    if let Some(syntax) = syntax_set.find_syntax_by_extension(ext) {
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        raw_lines
+            .iter()
+            .map(|line| match highlighter.highlight_line(line, &syntax_set) {
+                Ok(ranges) => ranges
+                    .into_iter()
+                    .map(|(style, text)| {
+                        let c = style.foreground;
+                        FileViewSpan {
+                            text: text.to_owned(),
+                            color: (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32,
+                        }
+                    })
+                    .collect(),
+                Err(_) => vec![FileViewSpan {
+                    text: line.to_owned(),
+                    color: default_color,
+                }],
+            })
+            .collect()
+    } else {
+        raw_lines
+            .iter()
+            .map(|line| {
+                vec![FileViewSpan {
+                    text: line.to_owned(),
+                    color: default_color,
+                }]
+            })
+            .collect()
+    }
+}
+
 fn file_icon_and_color(name: &str, is_dir: bool) -> (&'static str, u32) {
     if is_dir {
         return ("\u{f07b}", 0xe5c07b);
@@ -10808,6 +12534,203 @@ fn truncate_middle_text(input: &str, max_chars: usize) -> String {
     output.push('…');
     output.extend(chars.iter().skip(tail_start));
     output
+}
+
+fn run_launch_command(command: &mut Command, operation: &str) -> Result<(), String> {
+    let output = run_command_output(command, operation)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_failure_message(operation, &output))
+    }
+}
+
+fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in Finder")?;
+        return Ok("opened worktree in Finder".to_owned());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in file manager")?;
+        return Ok("opened worktree in file manager".to_owned());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in File Explorer")?;
+        return Ok("opened worktree in File Explorer".to_owned());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening this worktree in a file manager is not supported on this platform".to_owned())
+}
+
+fn open_worktree_with_external_launcher(
+    worktree_path: &Path,
+    launcher: ExternalLauncher,
+) -> Result<String, String> {
+    match launcher.kind {
+        ExternalLauncherKind::Command(command_name) => {
+            let mut command = Command::new(command_name);
+            command.arg(worktree_path);
+            run_launch_command(
+                &mut command,
+                &format!("open worktree with {}", launcher.label),
+            )?;
+        },
+        ExternalLauncherKind::MacApp(app_name) => {
+            let mut command = Command::new("open");
+            command.arg("-a").arg(app_name).arg(worktree_path);
+            run_launch_command(
+                &mut command,
+                &format!("open worktree in {}", launcher.label),
+            )?;
+        },
+    }
+
+    Ok(format!("opened worktree in {}", launcher.label))
+}
+
+fn command_exists_on_path(command_name: &str) -> bool {
+    let Some(path_env) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&path_env).any(|directory| directory.join(command_name).is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_app_bundle_exists(app_name: &str) -> bool {
+    let launch_services_status = Command::new("open")
+        .arg("-Ra")
+        .arg(app_name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if matches!(launch_services_status, Ok(status) if status.success()) {
+        return true;
+    }
+
+    // Fallback for environments where LaunchServices lookup is unavailable.
+    let bundle = format!("{app_name}.app");
+    [
+        "/Applications",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .chain(
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .into_iter()
+            .map(|home| home.join("Applications")),
+    )
+    .any(|base| base.join(&bundle).exists())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_app_bundle_exists(_: &str) -> bool {
+    false
+}
+
+fn detect_external_launcher(
+    label: &'static str,
+    icon: &'static str,
+    icon_color: u32,
+    mac_app: Option<&'static str>,
+    command: Option<&'static str>,
+) -> Option<ExternalLauncher> {
+    if let Some(app_name) = mac_app
+        && mac_app_bundle_exists(app_name)
+    {
+        return Some(ExternalLauncher {
+            label,
+            icon,
+            icon_color,
+            kind: ExternalLauncherKind::MacApp(app_name),
+        });
+    }
+
+    if let Some(command_name) = command
+        && command_exists_on_path(command_name)
+    {
+        return Some(ExternalLauncher {
+            label,
+            icon,
+            icon_color,
+            kind: ExternalLauncherKind::Command(command_name),
+        });
+    }
+
+    None
+}
+
+fn detect_ide_launchers() -> Vec<ExternalLauncher> {
+    [
+        (
+            "VS Code",
+            "\u{e70c}",
+            0x2f80ed,
+            Some("Visual Studio Code"),
+            Some("code"),
+        ),
+        (
+            "VS Code Insiders",
+            "\u{e70c}",
+            0x4f9fff,
+            Some("Visual Studio Code - Insiders"),
+            Some("code-insiders"),
+        ),
+        ("Cursor", "Cu", 0x6ca6ff, Some("Cursor"), Some("cursor")),
+        ("Zed", "Ze", 0x59a6ff, Some("Zed"), Some("zed")),
+        (
+            "Windsurf",
+            "Ws",
+            0x3cb9fc,
+            Some("Windsurf"),
+            Some("windsurf"),
+        ),
+        ("VSCodium", "Vc", 0x23a8f2, Some("VSCodium"), Some("codium")),
+    ]
+    .into_iter()
+    .filter_map(|(label, icon, icon_color, mac_app, command)| {
+        detect_external_launcher(label, icon, icon_color, mac_app, command)
+    })
+    .collect()
+}
+
+fn detect_terminal_launchers() -> Vec<ExternalLauncher> {
+    [
+        ("Terminal", "Tm", 0x7ecf95, Some("Terminal"), None),
+        ("iTerm", "iT", 0x8ad1ec, Some("iTerm"), Some("iterm2")),
+        ("iTerm2", "i2", 0x8ad1ec, Some("iTerm2"), Some("iterm2")),
+        ("Ghostty", "Gh", 0xbf8cf8, Some("Ghostty"), Some("ghostty")),
+        (
+            "Alacritty",
+            "Al",
+            0xf0a168,
+            Some("Alacritty"),
+            Some("alacritty"),
+        ),
+        ("Warp", "Wp", 0x6f8dff, Some("Warp"), Some("warp")),
+        ("WezTerm", "Wz", 0x6dc5ff, Some("WezTerm"), Some("wezterm")),
+        ("Kitty", "Kt", 0xc89fff, Some("kitty"), Some("kitty")),
+    ]
+    .into_iter()
+    .filter_map(|(label, icon, icon_color, mac_app, command)| {
+        detect_external_launcher(label, icon, icon_color, mac_app, command)
+    })
+    .collect()
 }
 
 fn run_command_output(
@@ -12773,6 +14696,53 @@ mod tests {
         assert_eq!(removal[1].kind, DiffLineKind::Removed);
         assert_eq!(removal[1].left_text, "two");
         assert_eq!(removal[1].right_text, "");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_short_string_unchanged() {
+        let result = crate::truncate_with_ellipsis("hello", 11);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_exact_limit_unchanged() {
+        let result = crate::truncate_with_ellipsis("12345678901", 11);
+        assert_eq!(result, "12345678901");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_over_limit_adds_ellipsis() {
+        let result = crate::truncate_with_ellipsis("123456789012", 11);
+        assert_eq!(result, "1234567890\u{2026}");
+        assert_eq!(result.chars().count(), 11);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_tab_label_cases() {
+        // These are the actual tab titles that need to show "…"
+        let cases = [
+            "nvim: CHANGELOG.md",
+            "nvim: CLAUDE.md",
+            "nvim: Cargo.lock",
+            "nvim: Cargo.toml",
+            "nvim: clippy.toml",
+            "nvim: LICENSE",
+            "nvim: AGENTS.md",
+        ];
+        for title in cases {
+            let result = crate::truncate_with_ellipsis(title, 11);
+            assert!(
+                result.chars().count() <= 11,
+                "'{result}' from '{title}' is {} chars, exceeds 11",
+                result.chars().count()
+            );
+            if title.chars().count() > 11 {
+                assert!(
+                    result.ends_with('\u{2026}'),
+                    "'{result}' from '{title}' should end with ellipsis"
+                );
+            }
+        }
     }
 
     #[test]

@@ -46,7 +46,7 @@ jobs:
       - name: Build macOS binaries
         run: |
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target aarch64-apple-darwin
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target x86_64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-apple-darwin
       - name: Package macOS app
         shell: bash
         run: |
@@ -113,7 +113,9 @@ jobs:
             libc6-dev-arm64-cross \
             libxcb1-dev:arm64 \
             libxkbcommon-dev:arm64 \
-            libxkbcommon-x11-dev:arm64
+            libxkbcommon-x11-dev:arm64 \
+            libssl-dev:arm64 \
+            zlib1g-dev:arm64
       - name: Add Rust target
         shell: bash
         run: rustup target add "${{ matrix.target }}"
@@ -125,7 +127,7 @@ jobs:
             export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
             export PKG_CONFIG_ALLOW_CROSS=1
           fi
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target "${{ matrix.target }}"
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target "${{ matrix.target }}"
       - name: Package Linux app
         shell: bash
         run: |
@@ -153,7 +155,7 @@ jobs:
       - name: Add Rust target
         run: rustup target add x86_64-pc-windows-msvc
       - name: Build Windows binary
-        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target x86_64-pc-windows-msvc
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-pc-windows-msvc
       - name: Package Windows app
         run: |
           New-Item -Path dist -ItemType Directory -Force | Out-Null
