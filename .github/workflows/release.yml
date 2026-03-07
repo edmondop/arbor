@@ -121,14 +121,12 @@ jobs:
       - name: Build Linux binary
         shell: bash
         run: |
-          FEATURES=""
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
             export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
             export PKG_CONFIG_ALLOW_CROSS=1
-            FEATURES="--features vendored-openssl"
           fi
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui $FEATURES --target "${{ matrix.target }}"
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target "${{ matrix.target }}"
       - name: Package Linux app
         shell: bash
         run: |
@@ -156,7 +154,7 @@ jobs:
       - name: Add Rust target
         run: rustup target add x86_64-pc-windows-msvc
       - name: Build Windows binary
-        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target x86_64-pc-windows-msvc
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-pc-windows-msvc
       - name: Package Windows app
         run: |
           New-Item -Path dist -ItemType Directory -Force | Out-Null
