@@ -9,6 +9,8 @@ mod terminal_keys;
 mod theme;
 mod ui_state_store;
 
+use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
+
 use {
     arbor_core::{
         agent::AgentState,
@@ -412,12 +414,18 @@ struct DiffSession {
 }
 
 #[derive(Debug, Clone)]
+struct FileViewSpan {
+    text: String,
+    color: u32,
+}
+
+#[derive(Debug, Clone)]
 struct FileViewSession {
     id: u64,
     worktree_path: PathBuf,
     file_path: PathBuf,
     title: String,
-    lines: Arc<[String]>,
+    lines: Arc<[Vec<FileViewSpan>]>,
     is_loading: bool,
 }
 
@@ -2511,13 +2519,67 @@ impl ArborWindow {
         self.logs_tab_active = false;
 
         let full_path = worktree_path.join(&file_path);
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_owned();
         cx.spawn(async move |this, cx| {
             let lines = cx
                 .background_spawn(async move {
+                    let default_color: u32 = 0xc8ccd4;
                     match fs::read_to_string(&full_path) {
-                        Ok(content) => content.lines().map(String::from).collect::<Vec<_>>(),
+                        Ok(content) => {
+                            let syntax_set = SyntaxSet::load_defaults_newlines();
+                            let theme_set = ThemeSet::load_defaults();
+                            let theme = &theme_set.themes["base16-ocean.dark"];
+                            if let Some(syntax) =
+                                syntax_set.find_syntax_by_extension(&ext)
+                            {
+                                let mut highlighter =
+                                    HighlightLines::new(syntax, theme);
+                                content
+                                    .lines()
+                                    .map(|line| {
+                                        match highlighter
+                                            .highlight_line(line, &syntax_set)
+                                        {
+                                            Ok(ranges) => ranges
+                                                .into_iter()
+                                                .map(|(style, text)| {
+                                                    let c = style.foreground;
+                                                    FileViewSpan {
+                                                        text: text.to_owned(),
+                                                        color: (c.r as u32) << 16
+                                                            | (c.g as u32) << 8
+                                                            | c.b as u32,
+                                                    }
+                                                })
+                                                .collect(),
+                                            Err(_) => vec![FileViewSpan {
+                                                text: line.to_owned(),
+                                                color: default_color,
+                                            }],
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            } else {
+                                content
+                                    .lines()
+                                    .map(|line| {
+                                        vec![FileViewSpan {
+                                            text: line.to_owned(),
+                                            color: default_color,
+                                        }]
+                                    })
+                                    .collect::<Vec<_>>()
+                            }
+                        },
                         Err(error) => {
-                            vec![format!("Error reading file: {error}")]
+                            vec![vec![FileViewSpan {
+                                text: format!("Error reading file: {error}"),
+                                color: default_color,
+                            }]]
                         },
                     }
                 })
@@ -8857,7 +8919,20 @@ fn render_file_view_session(
                                         range
                                             .map(|index| {
                                                 let line_num = index + 1;
-                                                let text = &lines[index];
+                                                let spans = &lines[index];
+                                                let mut content_div = div()
+                                                    .pl_2()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .flex();
+                                                for span in spans {
+                                                    content_div = content_div.child(
+                                                        div()
+                                                            .text_color(rgb(span.color))
+                                                            .child(span.text.clone()),
+                                                    );
+                                                }
                                                 div()
                                                     .id(("fv-row", index))
                                                     .h(px(DIFF_ROW_HEIGHT_PX))
@@ -8882,15 +8957,7 @@ fn render_file_view_session(
                                                             .justify_end()
                                                             .child(format!("{line_num}")),
                                                     )
-                                                    .child(
-                                                        div()
-                                                            .pl_2()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .overflow_hidden()
-                                                            .text_color(rgb(theme.text_primary))
-                                                            .child(text.to_owned()),
-                                                    )
+                                                    .child(content_div)
                                                     .into_any_element()
                                             })
                                             .collect::<Vec<_>>()
