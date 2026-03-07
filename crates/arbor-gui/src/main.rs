@@ -14170,10 +14170,7 @@ fn augment_path_from_login_shell() {
     let marker_end = "__PATH_END__";
 
     let shell_path = match Command::new(&shell)
-        .args([
-            "-lic",
-            &format!("echo {marker_start}${{PATH}}{marker_end}"),
-        ])
+        .args(["-lic", &format!("echo {marker_start}${{PATH}}{marker_end}")])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -14190,7 +14187,7 @@ fn augment_path_from_login_shell() {
                     Some(line[after_start..after_start + end].to_owned())
                 })
                 .unwrap_or_default()
-        }
+        },
         _ => String::new(),
     };
 
