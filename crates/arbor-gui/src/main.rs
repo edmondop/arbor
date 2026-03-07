@@ -420,12 +420,18 @@ struct FileViewSpan {
 }
 
 #[derive(Debug, Clone)]
+enum FileViewContent {
+    Text(Arc<[Vec<FileViewSpan>]>),
+    Image(PathBuf),
+}
+
+#[derive(Debug, Clone)]
 struct FileViewSession {
     id: u64,
     worktree_path: PathBuf,
     file_path: PathBuf,
     title: String,
-    lines: Arc<[Vec<FileViewSpan>]>,
+    content: FileViewContent,
     is_loading: bool,
 }
 
@@ -2514,24 +2520,46 @@ impl ArborWindow {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| file_path.to_string_lossy().into_owned());
 
+        let full_path = worktree_path.join(&file_path);
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let is_image = matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "svg" | "tiff" | "tif"
+        );
+
+        if is_image {
+            self.file_view_sessions.push(FileViewSession {
+                id: session_id,
+                worktree_path: worktree_path.clone(),
+                file_path: file_path.clone(),
+                title,
+                content: FileViewContent::Image(full_path),
+                is_loading: false,
+            });
+            self.active_file_view_session_id = Some(session_id);
+            self.active_diff_session_id = None;
+            self.logs_tab_active = false;
+            cx.notify();
+            return;
+        }
+
         self.file_view_sessions.push(FileViewSession {
             id: session_id,
             worktree_path: worktree_path.clone(),
             file_path: file_path.clone(),
             title,
-            lines: Arc::from([]),
+            content: FileViewContent::Text(Arc::from([])),
             is_loading: true,
         });
         self.active_file_view_session_id = Some(session_id);
         self.active_diff_session_id = None;
         self.logs_tab_active = false;
 
-        let full_path = worktree_path.join(&file_path);
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_owned();
         cx.spawn(async move |this, cx| {
             let lines = cx
                 .background_spawn(async move {
@@ -2599,7 +2627,7 @@ impl ArborWindow {
                     .iter_mut()
                     .find(|s| s.id == session_id)
                 {
-                    session.lines = Arc::from(lines);
+                    session.content = FileViewContent::Text(Arc::from(lines));
                     session.is_loading = false;
                     cx.notify();
                 }
@@ -8964,47 +8992,46 @@ fn render_file_view_session(
     mono_font: gpui::Font,
 ) -> Div {
     let path_label = session.file_path.to_string_lossy().into_owned();
-    let line_count = session.lines.len();
     let is_loading = session.is_loading;
     let session_id = session.id;
 
-    div()
-        .h_full()
-        .w_full()
-        .min_w_0()
-        .min_h_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .h(px(28.))
-                .px_3()
-                .bg(rgb(theme.tab_active_bg))
-                .border_b_1()
-                .border_color(rgb(theme.border))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .font(mono_font.clone())
-                        .text_size(px(DIFF_FONT_SIZE_PX))
-                        .text_color(rgb(theme.text_muted))
-                        .child(path_label),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.text_disabled))
-                        .child(if is_loading {
-                            "loading...".to_owned()
-                        } else {
-                            format!("{line_count} lines")
-                        }),
-                ),
-        )
-        .child(
-            div()
+    let (status_text, body) = match &session.content {
+        FileViewContent::Image(image_path) => {
+            let path = image_path.clone();
+            (
+                "image".to_owned(),
+                div()
+                    .id(("file-view-scroll", session_id))
+                    .flex_1()
+                    .min_h_0()
+                    .bg(rgb(theme.terminal_bg))
+                    .overflow_y_scroll()
+                    .flex()
+                    .justify_center()
+                    .p_4()
+                    .child(
+                        img(path)
+                            .max_w_full()
+                            .h_auto()
+                            .with_fallback(move || {
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Failed to load image")
+                                    .into_any_element()
+                            }),
+                    ),
+            )
+        },
+        FileViewContent::Text(lines) => {
+            let line_count = lines.len();
+            let status = if is_loading {
+                "loading...".to_owned()
+            } else {
+                format!("{line_count} lines")
+            };
+            let lines = lines.clone();
+            let body = div()
                 .id(("file-view-scroll", session_id))
                 .flex_1()
                 .min_h_0()
@@ -9023,7 +9050,6 @@ fn render_file_view_session(
                     )
                 })
                 .when(!is_loading, |this| {
-                    let lines = session.lines.clone();
                     let scroll_handle = scroll_handle.clone();
                     let mono_font = mono_font.clone();
                     let line_number_width = line_count.to_string().len().max(3);
@@ -9071,7 +9097,9 @@ fn render_file_view_session(
                                                                     * 0.6,
                                                             ))
                                                             .flex_none()
-                                                            .text_color(rgb(theme.text_disabled))
+                                                            .text_color(rgb(
+                                                                theme.text_disabled,
+                                                            ))
                                                             .text_size(px(DIFF_FONT_SIZE_PX))
                                                             .px_1()
                                                             .flex()
@@ -9090,8 +9118,43 @@ fn render_file_view_session(
                                 .track_scroll(scroll_handle.clone()),
                             ),
                     )
-                }),
+                });
+            (status, body)
+        },
+    };
+
+    div()
+        .h_full()
+        .w_full()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(28.))
+                .px_3()
+                .bg(rgb(theme.tab_active_bg))
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .font(mono_font.clone())
+                        .text_size(px(DIFF_FONT_SIZE_PX))
+                        .text_color(rgb(theme.text_muted))
+                        .child(path_label),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_disabled))
+                        .child(status_text),
+                ),
         )
+        .child(body)
 }
 
 fn render_diff_session(
