@@ -37,17 +37,51 @@ pub enum WorktreeError {
 }
 
 pub fn repo_root(path: &Path) -> Result<PathBuf, WorktreeError> {
-    let output = run_git_capture(path, &["rev-parse", "--show-toplevel"])?;
-    let stdout = String::from_utf8(output.stdout)?;
-    let root = stdout.trim();
+    // Use `git worktree list` and take the first entry, which is always the
+    // main worktree.  This avoids `--show-toplevel` which returns the current
+    // worktree's path and would make linked worktrees look like separate repos.
+    let worktrees = list(path)?;
+    if let Some(main) = worktrees.first() {
+        return Ok(main.path.clone());
+    }
 
-    if root.is_empty() {
+    // Fallback for the unlikely case of an empty list.
+    let output = run_git_capture(path, &["rev-parse", "--show-toplevel"])?;
+    let toplevel = String::from_utf8(output.stdout)?.trim().to_owned();
+
+    if toplevel.is_empty() {
         return Err(WorktreeError::InvalidPorcelain(
             "empty repository root returned by git".to_owned(),
         ));
     }
 
-    Ok(PathBuf::from(root))
+    // Detect linked worktrees: --git-common-dir returns ".git" in the main
+    // repo but an absolute path to the main repo's .git dir in a worktree.
+    let common_output = run_git_capture(path, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = String::from_utf8(common_output.stdout)?.trim().to_owned();
+
+    if common_dir.is_empty() || common_dir == ".git" {
+        return Ok(PathBuf::from(toplevel));
+    }
+
+    // Resolve the common dir to an absolute path (it may be relative to the
+    // worktree's git dir).
+    let common_path = {
+        let p = PathBuf::from(&common_dir);
+        if p.is_relative() {
+            let git_dir_output = run_git_capture(path, &["rev-parse", "--git-dir"])?;
+            let git_dir = String::from_utf8(git_dir_output.stdout)?.trim().to_owned();
+            canonicalize_if_possible(PathBuf::from(git_dir).join(p))
+        } else {
+            canonicalize_if_possible(p)
+        }
+    };
+
+    // The main repo root is the parent of the common .git dir.
+    match common_path.parent() {
+        Some(parent) => Ok(parent.to_path_buf()),
+        None => Ok(PathBuf::from(toplevel)),
+    }
 }
 
 pub fn list(path: &Path) -> Result<Vec<Worktree>, WorktreeError> {
@@ -199,6 +233,36 @@ fn ensure_success(output: Output) -> Result<Output, WorktreeError> {
     };
 
     Err(WorktreeError::GitCommandFailed(message))
+}
+
+/// Strips `refs/heads/` prefix from a full git branch ref.
+pub fn short_branch(value: &str) -> String {
+    value
+        .strip_prefix("refs/heads/")
+        .unwrap_or(value)
+        .to_owned()
+}
+
+/// Compares two paths, falling back to canonicalization when they differ textually.
+pub fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let left_canonical = left.canonicalize().ok();
+    let right_canonical = right.canonicalize().ok();
+
+    left_canonical
+        .zip(right_canonical)
+        .is_some_and(|(left, right)| left == right)
+}
+
+/// Canonicalizes a path if possible, returning the original on failure.
+pub fn canonicalize_if_possible(path: PathBuf) -> PathBuf {
+    match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => path,
+    }
 }
 
 #[cfg(test)]

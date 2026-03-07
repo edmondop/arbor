@@ -1,5 +1,7 @@
 mod app_config;
+mod log_layer;
 mod repository_store;
+mod simple_http_client;
 mod terminal_backend;
 mod terminal_daemon_http;
 mod terminal_keys;
@@ -30,7 +32,7 @@ use {
     },
     ropey::Rope,
     std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         env, fs,
         path::{Path, PathBuf},
         process::{Command, Stdio},
@@ -86,8 +88,9 @@ const DIFF_FONT_SIZE_PX: f32 = 12.0;
 const DIFF_HUNK_CONTEXT_LINES: usize = 3;
 const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
+const TAB_ICON_LOGS: &str = "\u{f4ed}";
+const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 
-static QUIT_ARMED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn terminal_mono_font(cx: &App) -> gpui::Font {
     let fallbacks = FontFallbacks::from_fonts(
@@ -120,6 +123,7 @@ fn terminal_mono_font(cx: &App) -> gpui::Font {
 
 actions!(arbor, [
     RequestQuit,
+    NewWindow,
     SpawnTerminal,
     CloseActiveTerminal,
     RefreshWorktrees,
@@ -131,7 +135,12 @@ actions!(arbor, [
     UseGruvboxTheme,
     UseEmbeddedBackend,
     UseAlacrittyBackend,
-    UseGhosttyBackend
+    UseGhosttyBackend,
+    ToggleLeftPane,
+    NavigateWorktreeBack,
+    NavigateWorktreeForward,
+    CollapseAllRepositories,
+    ViewLogs
 ]);
 
 #[derive(Debug, Clone)]
@@ -331,6 +340,21 @@ enum TerminalRuntime {
 enum CenterTab {
     Terminal(u64),
     Diff(u64),
+    Logs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RightPaneTab {
+    Changes,
+    FileTree,
+}
+
+#[derive(Debug, Clone)]
+struct FileTreeEntry {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+    depth: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -441,7 +465,7 @@ struct CreateModal {
 
 enum ModalInputEvent {
     SetActiveField(CreateWorktreeField),
-    MoveActiveField(bool),
+    MoveActiveField,
     Backspace,
     Append(String),
     ClearError,
@@ -532,22 +556,40 @@ struct ArborWindow {
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
     notice: Option<String>,
+    right_pane_tab: RightPaneTab,
+    file_tree_entries: Vec<FileTreeEntry>,
+    expanded_dirs: HashSet<PathBuf>,
+    selected_file_tree_entry: Option<PathBuf>,
+    left_pane_visible: bool,
+    collapsed_repositories: HashSet<usize>,
+    worktree_nav_back: Vec<usize>,
+    worktree_nav_forward: Vec<usize>,
+    log_buffer: log_layer::LogBuffer,
+    log_entries: Vec<log_layer::LogEntry>,
+    log_generation: u64,
+    log_scroll_handle: ScrollHandle,
+    log_auto_scroll: bool,
+    logs_tab_open: bool,
+    logs_tab_active: bool,
+    quit_overlay_until: Option<Instant>,
 }
 
 impl ArborWindow {
     fn load_with_daemon_store<S>(
         startup_ui_state: ui_state_store::UiState,
+        log_buffer: log_layer::LogBuffer,
         cx: &mut Context<Self>,
     ) -> Self
     where
         S: daemon::DaemonSessionStore + Default + 'static,
     {
-        Self::load(Box::new(S::default()), startup_ui_state, cx)
+        Self::load(Box::new(S::default()), startup_ui_state, log_buffer, cx)
     }
 
     fn load(
         daemon_session_store: Box<dyn daemon::DaemonSessionStore>,
         startup_ui_state: ui_state_store::UiState,
+        log_buffer: log_layer::LogBuffer,
         cx: &mut Context<Self>,
     ) -> Self {
         let repository_store = repository_store::default_repository_store();
@@ -605,6 +647,22 @@ impl ArborWindow {
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notice: Some(format!("failed to read current directory: {error}")),
+                    right_pane_tab: RightPaneTab::Changes,
+                    file_tree_entries: Vec::new(),
+                    expanded_dirs: HashSet::new(),
+                    selected_file_tree_entry: None,
+                    left_pane_visible: true,
+                    collapsed_repositories: HashSet::new(),
+                    worktree_nav_back: Vec::new(),
+                    worktree_nav_forward: Vec::new(),
+                    log_buffer: log_buffer.clone(),
+                    log_entries: Vec::new(),
+                    log_generation: 0,
+                    log_scroll_handle: ScrollHandle::new(),
+                    log_auto_scroll: true,
+                    logs_tab_open: false,
+                    logs_tab_active: false,
+                    quit_overlay_until: None,
                 };
             },
         };
@@ -662,22 +720,42 @@ impl ArborWindow {
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notice: Some(format!("failed to resolve git repository root: {error}")),
+                    right_pane_tab: RightPaneTab::Changes,
+                    file_tree_entries: Vec::new(),
+                    expanded_dirs: HashSet::new(),
+                    selected_file_tree_entry: None,
+                    left_pane_visible: true,
+                    collapsed_repositories: HashSet::new(),
+                    worktree_nav_back: Vec::new(),
+                    worktree_nav_forward: Vec::new(),
+                    log_buffer: log_buffer.clone(),
+                    log_entries: Vec::new(),
+                    log_generation: 0,
+                    log_scroll_handle: ScrollHandle::new(),
+                    log_auto_scroll: true,
+                    logs_tab_open: false,
+                    logs_tab_active: false,
+                    quit_overlay_until: None,
                 };
             },
         };
 
+        tracing::info!(config = %config_path.display(), "loading configuration");
         let loaded_config = app_config::load_or_create_config();
         let mut notice_parts = loaded_config.notices;
         let config_last_modified = app_config::config_last_modified(&config_path);
 
         if let Err(error) = daemon_session_store.load() {
+            tracing::warn!(%error, "failed to load daemon session metadata");
             notice_parts.push(format!("failed to load daemon session metadata: {error}"));
         }
         let daemon_base_url =
             daemon_base_url_from_config(loaded_config.config.daemon_url.as_deref());
+        tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
         let mut terminal_daemon = match HttpTerminalDaemon::new(&daemon_base_url) {
             Ok(client) => Some(client),
             Err(error) => {
+                tracing::error!(%error, url = %daemon_base_url, "invalid daemon URL");
                 notice_parts.push(format!("invalid daemon_url `{daemon_base_url}`: {error}"));
                 None
             },
@@ -689,6 +767,7 @@ impl ArborWindow {
                     Err(error) => {
                         let error_text = error.to_string();
                         if daemon_error_is_connection_refused(&error_text) {
+                            tracing::debug!("daemon not running (connection refused)");
                             terminal_daemon = None;
                             (Vec::new(), false)
                         } else {
@@ -822,9 +901,25 @@ impl ArborWindow {
             manage_hosts_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
+            left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
+            collapsed_repositories: HashSet::new(),
+            worktree_nav_back: Vec::new(),
+            worktree_nav_forward: Vec::new(),
             last_persisted_ui_state: startup_ui_state,
             last_ui_state_error: None,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
+            right_pane_tab: RightPaneTab::Changes,
+            file_tree_entries: Vec::new(),
+            expanded_dirs: HashSet::new(),
+            selected_file_tree_entry: None,
+            log_buffer,
+            log_entries: Vec::new(),
+            log_generation: 0,
+            log_scroll_handle: ScrollHandle::new(),
+            log_auto_scroll: true,
+            logs_tab_open: false,
+            logs_tab_active: false,
+            quit_overlay_until: None,
         };
 
         app.refresh_worktrees(cx);
@@ -832,6 +927,7 @@ impl ArborWindow {
         let _ = app.ensure_selected_worktree_terminal();
         app.sync_daemon_session_store(cx);
         app.start_terminal_poller(cx);
+        app.start_log_poller(cx);
         app.start_worktree_auto_refresh(cx);
         app.start_github_pr_auto_refresh(cx);
         app.start_config_auto_refresh(cx);
@@ -847,6 +943,34 @@ impl ArborWindow {
                 .await;
 
                 let updated = this.update(cx, |this, cx| this.sync_running_terminals(cx));
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn start_log_poller(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async move {
+                    std::thread::sleep(LOG_POLLER_INTERVAL);
+                })
+                .await;
+
+                let updated = this.update(cx, |this, cx| {
+                    let current_generation = this.log_buffer.generation();
+                    if current_generation == this.log_generation {
+                        return;
+                    }
+                    this.log_generation = current_generation;
+                    this.log_entries = this.log_buffer.snapshot();
+                    if this.log_auto_scroll && this.logs_tab_active {
+                        this.log_scroll_handle.scroll_to_bottom();
+                    }
+                    cx.notify();
+                });
                 if updated.is_err() {
                     break;
                 }
@@ -1539,6 +1663,7 @@ impl ArborWindow {
     }
 
     fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
+        tracing::debug!("refreshing worktrees");
         let previously_selected = self.selected_worktree_path().map(Path::to_path_buf);
         let previous_summaries: HashMap<PathBuf, changes::DiffLineSummary> = self
             .worktrees
@@ -1901,6 +2026,10 @@ impl ArborWindow {
     }
 
     fn active_center_tab_for_selected_worktree(&self) -> Option<CenterTab> {
+        if self.logs_tab_active {
+            return Some(CenterTab::Logs);
+        }
+
         if let Some(diff_id) = self.active_diff_session_id {
             let worktree_path = self.selected_worktree_path()?;
             if self.diff_sessions.iter().any(|session| {
@@ -1942,6 +2071,7 @@ impl ArborWindow {
     }
 
     fn close_terminal_session_by_id(&mut self, session_id: u64) -> bool {
+        tracing::info!(session_id, "closing terminal session");
         let Some(index) = self
             .terminals
             .iter()
@@ -2053,12 +2183,13 @@ impl ArborWindow {
                     cx.notify();
                 }
             },
+            Some(CenterTab::Logs) => {
+                self.logs_tab_open = false;
+                self.logs_tab_active = false;
+                cx.notify();
+            },
             None => {},
         }
-    }
-
-    fn close_active_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_active_tab(window, cx);
     }
 
     fn theme(&self) -> ThemePalette {
@@ -2214,11 +2345,26 @@ impl ArborWindow {
     }
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(worktree) = self.worktrees.get(index) {
+            tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
+        }
+        if let Some(old) = self.active_worktree_index
+            && old != index
+        {
+            self.worktree_nav_back.push(old);
+            self.worktree_nav_forward.clear();
+        }
         self.active_worktree_index = Some(index);
         self.active_outpost_index = None;
         self.active_diff_session_id = None;
         self.sync_active_repository_from_selected_worktree();
         let _ = self.reload_changed_files();
+        self.expanded_dirs.clear();
+        self.selected_file_tree_entry = None;
+        self.file_tree_entries.clear();
+        if self.right_pane_tab == RightPaneTab::FileTree {
+            self.rebuild_file_tree();
+        }
         if self.ensure_selected_worktree_terminal() {
             self.sync_daemon_session_store(cx);
         }
@@ -2434,6 +2580,94 @@ impl ArborWindow {
             .find(|change| change.path == *selected_path)
     }
 
+    fn rebuild_file_tree(&mut self) {
+        let Some(worktree_path) = self.selected_worktree_path().map(|p| p.to_path_buf()) else {
+            self.file_tree_entries.clear();
+            return;
+        };
+        let mut entries = Vec::new();
+        self.walk_directory(&worktree_path, &worktree_path, 0, &mut entries);
+        self.file_tree_entries = entries;
+    }
+
+    fn walk_directory(
+        &self,
+        base: &Path,
+        dir: &Path,
+        depth: usize,
+        entries: &mut Vec<FileTreeEntry>,
+    ) {
+        let Ok(read_dir) = fs::read_dir(dir) else {
+            return;
+        };
+
+        let mut children: Vec<(String, PathBuf, bool)> = Vec::new();
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
+            if is_dir
+                && matches!(
+                    name.as_str(),
+                    "node_modules" | "target" | "__pycache__" | ".git"
+                )
+            {
+                continue;
+            }
+            children.push((name, entry.path(), is_dir));
+        }
+
+        children.sort_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
+
+        for (name, full_path, is_dir) in children {
+            let relative = full_path
+                .strip_prefix(base)
+                .unwrap_or(&full_path)
+                .to_path_buf();
+            entries.push(FileTreeEntry {
+                path: relative.clone(),
+                name,
+                is_dir,
+                depth,
+            });
+            if is_dir && self.expanded_dirs.contains(&relative) {
+                self.walk_directory(base, &full_path, depth + 1, entries);
+            }
+        }
+    }
+
+    fn toggle_file_tree_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.expanded_dirs.contains(&path) {
+            self.expanded_dirs.remove(&path);
+        } else {
+            self.expanded_dirs.insert(path.clone());
+        }
+        self.selected_file_tree_entry = Some(path);
+        self.rebuild_file_tree();
+        cx.notify();
+    }
+
+    fn select_file_tree_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.selected_file_tree_entry = Some(path);
+        cx.notify();
+    }
+
+    fn set_right_pane_tab(&mut self, tab: RightPaneTab, cx: &mut Context<Self>) {
+        if self.right_pane_tab == tab {
+            return;
+        }
+        self.right_pane_tab = tab;
+        if tab == RightPaneTab::FileTree && self.file_tree_entries.is_empty() {
+            self.rebuild_file_tree();
+        }
+        cx.notify();
+    }
+
     fn switch_terminal_backend(
         &mut self,
         backend_kind: TerminalBackendKind,
@@ -2513,20 +2747,10 @@ impl ArborWindow {
             ModalInputEvent::SetActiveField(field) => {
                 modal.worktree_active_field = field;
             },
-            ModalInputEvent::MoveActiveField(reverse) => {
-                modal.worktree_active_field = match (modal.worktree_active_field, reverse) {
-                    (CreateWorktreeField::RepositoryPath, false) => {
-                        CreateWorktreeField::WorktreeName
-                    },
-                    (CreateWorktreeField::WorktreeName, false) => {
-                        CreateWorktreeField::RepositoryPath
-                    },
-                    (CreateWorktreeField::RepositoryPath, true) => {
-                        CreateWorktreeField::WorktreeName
-                    },
-                    (CreateWorktreeField::WorktreeName, true) => {
-                        CreateWorktreeField::RepositoryPath
-                    },
+            ModalInputEvent::MoveActiveField => {
+                modal.worktree_active_field = match modal.worktree_active_field {
+                    CreateWorktreeField::RepositoryPath => CreateWorktreeField::WorktreeName,
+                    CreateWorktreeField::WorktreeName => CreateWorktreeField::RepositoryPath,
                 };
             },
             ModalInputEvent::Backspace => {
@@ -3035,7 +3259,7 @@ impl ArborWindow {
                 match active_tab {
                     CreateModalTab::LocalWorktree => {
                         self.update_create_worktree_modal_input(
-                            ModalInputEvent::MoveActiveField(event.keystroke.modifiers.shift),
+                            ModalInputEvent::MoveActiveField,
                             cx,
                         );
                     },
@@ -3160,7 +3384,7 @@ impl ArborWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_active_terminal_session(window, cx);
+        self.close_active_tab(window, cx);
     }
 
     fn action_refresh_worktrees(
@@ -3237,6 +3461,114 @@ impl ArborWindow {
         self.switch_terminal_backend(TerminalBackendKind::Ghostty, cx);
     }
 
+    fn action_toggle_left_pane(
+        &mut self,
+        _: &ToggleLeftPane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.left_pane_visible = !self.left_pane_visible;
+        cx.notify();
+    }
+
+    fn action_navigate_worktree_back(
+        &mut self,
+        _: &NavigateWorktreeBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = self.worktree_nav_back.pop() {
+            if let Some(current) = self.active_worktree_index {
+                self.worktree_nav_forward.push(current);
+            }
+            self.active_worktree_index = Some(target);
+            self.active_diff_session_id = None;
+            self.sync_active_repository_from_selected_worktree();
+            let _ = self.reload_changed_files();
+            if self.ensure_selected_worktree_terminal() {
+                self.sync_daemon_session_store(cx);
+            }
+            self.terminal_scroll_handle.scroll_to_bottom();
+            window.focus(&self.terminal_focus);
+            self.focus_terminal_on_next_render = false;
+            cx.notify();
+        }
+    }
+
+    fn action_navigate_worktree_forward(
+        &mut self,
+        _: &NavigateWorktreeForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = self.worktree_nav_forward.pop() {
+            if let Some(current) = self.active_worktree_index {
+                self.worktree_nav_back.push(current);
+            }
+            self.active_worktree_index = Some(target);
+            self.active_diff_session_id = None;
+            self.sync_active_repository_from_selected_worktree();
+            let _ = self.reload_changed_files();
+            if self.ensure_selected_worktree_terminal() {
+                self.sync_daemon_session_store(cx);
+            }
+            self.terminal_scroll_handle.scroll_to_bottom();
+            window.focus(&self.terminal_focus);
+            self.focus_terminal_on_next_render = false;
+            cx.notify();
+        }
+    }
+
+    fn action_collapse_all_repositories(
+        &mut self,
+        _: &CollapseAllRepositories,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let all_collapsed =
+            (0..self.repositories.len()).all(|i| self.collapsed_repositories.contains(&i));
+        if all_collapsed {
+            self.collapsed_repositories.clear();
+        } else {
+            self.collapsed_repositories = (0..self.repositories.len()).collect();
+        }
+        cx.notify();
+    }
+
+    fn action_request_quit(&mut self, _: &RequestQuit, _: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if self
+            .quit_overlay_until
+            .is_some_and(|until| now < until)
+        {
+            cx.quit();
+            return;
+        }
+
+        let deadline = now + QUIT_ARM_WINDOW;
+        self.quit_overlay_until = Some(deadline);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(QUIT_ARM_WINDOW);
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.quit_overlay_until = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn action_view_logs(&mut self, _: &ViewLogs, _: &mut Window, cx: &mut Context<Self>) {
+        self.logs_tab_open = true;
+        self.logs_tab_active = true;
+        self.active_diff_session_id = None;
+        cx.notify();
+    }
+
     fn spawn_terminal_session_inner(&mut self, show_notice_on_missing_worktree: bool) -> bool {
         let Some(cwd) = self.selected_worktree_path().map(Path::to_path_buf) else {
             if show_notice_on_missing_worktree {
@@ -3245,6 +3577,7 @@ impl ArborWindow {
             return false;
         };
 
+        tracing::info!(cwd = %cwd.display(), "spawning terminal session");
         let backend_kind = self.active_backend_kind;
         let session_id = self.next_terminal_id;
         self.next_terminal_id += 1;
@@ -3554,6 +3887,7 @@ impl ArborWindow {
         self.active_terminal_by_worktree
             .insert(worktree_path, session_id);
         self.active_diff_session_id = None;
+        self.logs_tab_active = false;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
@@ -3577,7 +3911,7 @@ impl ArborWindow {
         };
 
         self.diff_scroll_handle
-            .scroll_to_item(*row_index, ScrollStrategy::Top);
+            .scroll_to_item_strict(*row_index, ScrollStrategy::Top);
         true
     }
 
@@ -3586,6 +3920,7 @@ impl ArborWindow {
             self.notice = Some("select a worktree before opening a diff".to_owned());
             return;
         };
+        tracing::info!(worktree = %worktree_path.display(), "opening diff tab");
         let Some(selected_file_path) = self
             .selected_changed_file()
             .map(|change| change.path.clone())
@@ -3725,10 +4060,11 @@ impl ArborWindow {
     }
 
     fn select_diff_tab(&mut self, session_id: u64, cx: &mut Context<Self>) {
-        if self.active_diff_session_id == Some(session_id) {
+        if self.active_diff_session_id == Some(session_id) && !self.logs_tab_active {
             return;
         }
         self.active_diff_session_id = Some(session_id);
+        self.logs_tab_active = false;
         if let Some(selected_path) = self.selected_changed_file.clone()
             && !self.scroll_diff_to_file(selected_path.as_path())
         {
@@ -4265,6 +4601,7 @@ impl ArborWindow {
                 width,
                 height,
             }),
+            left_pane_visible: Some(self.left_pane_visible),
         }
     }
 
@@ -4344,7 +4681,7 @@ impl ArborWindow {
             .occlude()
     }
 
-    fn render_top_bar(&self) -> impl IntoElement {
+    fn render_top_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
         let repository = self.selected_repository_label();
         let branch = self
@@ -4352,6 +4689,9 @@ impl ArborWindow {
             .map(|worktree| worktree.branch.clone())
             .unwrap_or_else(|| "no-worktree".to_owned());
         let centered_title = format!("{repository} · {branch}");
+        let back_enabled = !self.worktree_nav_back.is_empty();
+        let forward_enabled = !self.worktree_nav_forward.is_empty();
+        let sidebar_hidden = !self.left_pane_visible;
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -4360,6 +4700,86 @@ impl ArborWindow {
             .relative()
             .flex()
             .items_center()
+            // Left group: sidebar toggle + back/forward navigation (offset to clear macOS traffic lights)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(76.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .child(
+                        div()
+                            .id("toggle-sidebar")
+                            .cursor_pointer()
+                            .font_family(FONT_MONO)
+                            .text_size(px(20.))
+                            .text_color(rgb(if sidebar_hidden {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            }))
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.action_toggle_left_pane(&ToggleLeftPane, window, cx);
+                            }))
+                            .child("\u{f0c9}"),
+                    )
+                    .child(
+                        div()
+                            .id("nav-back")
+                            .cursor_pointer()
+                            .font_family(FONT_MONO)
+                            .text_size(px(20.))
+                            .text_color(rgb(if back_enabled {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(back_enabled, |this| {
+                                this.on_click(cx.listener(|this, _, window, cx| {
+                                    this.action_navigate_worktree_back(
+                                        &NavigateWorktreeBack,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                            })
+                            .child("\u{f053}"),
+                    )
+                    .child(
+                        div()
+                            .id("nav-forward")
+                            .cursor_pointer()
+                            .font_family(FONT_MONO)
+                            .text_size(px(20.))
+                            .text_color(rgb(if forward_enabled {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(forward_enabled, |this| {
+                                this.on_click(cx.listener(|this, _, window, cx| {
+                                    this.action_navigate_worktree_forward(
+                                        &NavigateWorktreeForward,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                            })
+                            .child("\u{f054}"),
+                    ),
+            )
+            // Center: title
             .child(
                 div()
                     .absolute()
@@ -4378,10 +4798,120 @@ impl ArborWindow {
     }
 
     fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.left_pane_visible {
+            let theme = self.theme();
+            let repositories = self.repositories.clone();
+            let worktrees = self.worktrees.clone();
+            let mut pane = div()
+                .id("collapsed-left-pane")
+                .w(px(40.))
+                .h_full()
+                .flex_none()
+                .bg(rgb(theme.sidebar_bg))
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt_2()
+                .gap_1()
+                .overflow_y_scroll();
+
+            for (repo_index, repository) in repositories.iter().enumerate() {
+                let repo_worktrees: Vec<(usize, &WorktreeSummary)> = worktrees
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, w)| w.repo_root == repository.root)
+                    .collect();
+
+                // Add spacing between repo groups (not before the first)
+                if repo_index > 0 {
+                    pane = pane.child(div().h(px(4.)));
+                }
+
+                // Repo icon row: circular avatar or GitHub icon
+                let repo_icon = if let Some(url) = repository.avatar_url.clone() {
+                    div()
+                        .size(px(32.))
+                        .rounded_md()
+                        .overflow_hidden()
+                        .child(img(url).size_full().rounded_md().with_fallback(move || {
+                            div()
+                                .size_full()
+                                .font_family(FONT_MONO)
+                                .text_size(px(14.))
+                                .text_color(rgb(theme.text_muted))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child("\u{f09b}")
+                                .into_any_element()
+                        }))
+                        .into_any_element()
+                } else {
+                    div()
+                        .size(px(24.))
+                        .font_family(FONT_MONO)
+                        .text_size(px(14.))
+                        .text_color(rgb(theme.text_muted))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("\u{f09b}")
+                        .into_any_element()
+                };
+                pane = pane.child(repo_icon);
+
+                for (wt_index, worktree) in repo_worktrees {
+                    let is_active = self.active_worktree_index == Some(wt_index);
+                    let first_char: String = worktree
+                        .label
+                        .chars()
+                        .next()
+                        .unwrap_or('?')
+                        .to_uppercase()
+                        .collect();
+
+                    pane = pane.child(
+                        div()
+                            .id(("collapsed-worktree", wt_index))
+                            .cursor_pointer()
+                            .size(px(30.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(if is_active {
+                                theme.accent
+                            } else {
+                                theme.border
+                            }))
+                            .bg(rgb(if is_active {
+                                theme.panel_active_bg
+                            } else {
+                                theme.panel_bg
+                            }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(if is_active {
+                                theme.text_primary
+                            } else {
+                                theme.text_muted
+                            }))
+                            .child(first_char)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_worktree(wt_index, window, cx);
+                            })),
+                    );
+                }
+            }
+
+            return pane;
+        }
         let theme = self.theme();
         let repositories = self.repositories.clone();
         let worktrees = self.worktrees.clone();
         div()
+            .id("left-pane")
             .w(px(self.left_pane_width))
             .h_full()
             .bg(rgb(theme.sidebar_bg))
@@ -4402,12 +4932,8 @@ impl ArborWindow {
                         |(repository_index, repository)| {
                             let is_active_repository =
                                 self.active_repository_index == Some(repository_index);
-                            let repository_icon = repository
-                                .label
-                                .chars()
-                                .next()
-                                .map(|ch| ch.to_ascii_uppercase().to_string())
-                                .unwrap_or_else(|| "R".to_owned());
+                            let is_collapsed =
+                                self.collapsed_repositories.contains(&repository_index);
                             let repository_avatar_url = repository.avatar_url.clone();
                             let repo_worktrees: Vec<(usize, WorktreeSummary)> = worktrees
                                 .iter()
@@ -4446,7 +4972,7 @@ impl ArborWindow {
                                         }))
                                         .px_2()
                                         .py_1()
-                                        .h(px(28.))
+                                        .h(px(32.))
                                         .flex()
                                         .items_center()
                                         .justify_between()
@@ -4459,75 +4985,99 @@ impl ArborWindow {
                                                 .flex_1()
                                                 .flex()
                                                 .items_center()
-                                                .gap_2()
+                                                .gap_1()
+                                                // Chevron toggle
                                                 .child(
                                                     div()
-                                                        .size(px(14.))
-                                                        .rounded_full()
-                                                        .overflow_hidden()
-                                                        .child(
-                                                            if let Some(url) =
-                                                                repository_avatar_url.clone()
-                                                            {
+                                                        .id(("repo-chevron", repository_index))
+                                                        .cursor_pointer()
+                                                        .text_size(px(16.))
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .w(px(14.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(if is_collapsed {
+                                                            "\u{25B8}"
+                                                        } else {
+                                                            "\u{25BE}"
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                if this
+                                                                    .collapsed_repositories
+                                                                    .contains(&repository_index)
+                                                                {
+                                                                    this.collapsed_repositories
+                                                                        .remove(&repository_index);
+                                                                } else {
+                                                                    this.collapsed_repositories
+                                                                        .insert(repository_index);
+                                                                }
+                                                                cx.stop_propagation();
+                                                                cx.notify();
+                                                            },
+                                                        )),
+                                                )
+                                                // GitHub icon or avatar
+                                                .child(
+                                                    if let Some(url) =
+                                                        repository_avatar_url.clone()
+                                                    {
+                                                        div()
+                                                            .size(px(20.))
+                                                            .rounded_sm()
+                                                            .overflow_hidden()
+                                                            .child(
                                                                 img(url)
                                                                     .size_full()
-                                                                    .with_fallback({
-                                                                        let repository_icon =
-                                                                            repository_icon.clone();
-                                                                        move || {
-                                                                            div()
-                                                                                .size_full()
-                                                                                .bg(rgb(
-                                                                                    theme
-                                                                                        .panel_active_bg,
-                                                                                ))
-                                                                                .flex()
-                                                                                .items_center()
-                                                                                .justify_center()
-                                                                                .text_size(px(9.))
-                                                                                .font_weight(
-                                                                                    FontWeight::SEMIBOLD,
-                                                                                )
-                                                                                .text_color(rgb(
-                                                                                    theme
-                                                                                        .text_primary,
-                                                                                ))
-                                                                                .child(
-                                                                                    repository_icon
-                                                                                        .clone(),
-                                                                                )
-                                                                                .into_any_element()
-                                                                        }
-                                                                    })
-                                                                    .into_any_element()
-                                                            } else {
-                                                                div()
-                                                                    .size_full()
-                                                                    .bg(rgb(theme.panel_active_bg))
-                                                                    .flex()
-                                                                    .items_center()
-                                                                    .justify_center()
-                                                                    .text_size(px(9.))
-                                                                    .font_weight(
-                                                                        FontWeight::SEMIBOLD,
-                                                                    )
-                                                                    .text_color(rgb(
-                                                                        theme.text_primary,
-                                                                    ))
-                                                                    .child(repository_icon)
-                                                                    .into_any_element()
-                                                            },
-                                                        ),
+                                                                    .rounded_sm()
+                                                                    .with_fallback(move || {
+                                                                        div()
+                                                                            .size_full()
+                                                                            .font_family(FONT_MONO)
+                                                                            .text_size(px(12.))
+                                                                            .text_color(rgb(
+                                                                                theme.text_muted,
+                                                                            ))
+                                                                            .flex()
+                                                                            .items_center()
+                                                                            .justify_center()
+                                                                            .child("\u{f09b}")
+                                                                            .into_any_element()
+                                                                    }),
+                                                            )
+                                                            .into_any_element()
+                                                    } else {
+                                                        div()
+                                                            .font_family(FONT_MONO)
+                                                            .text_size(px(12.))
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .child("\u{f09b}")
+                                                            .into_any_element()
+                                                    },
                                                 )
+                                                // Repository name
                                                 .child(
                                                     div()
                                                         .min_w_0()
                                                         .overflow_hidden()
                                                         .whitespace_nowrap()
                                                         .text_ellipsis()
-                                                        .text_xs()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::MEDIUM)
                                                         .text_color(rgb(theme.text_primary))
                                                         .child(repository.label.clone()),
+                                                )
+                                                // Worktree count badge
+                                                .child(
+                                                    div()
+                                                        .text_size(px(9.))
+                                                        .text_color(rgb(theme.text_disabled))
+                                                        .child(format!(
+                                                            "{}",
+                                                            repo_worktrees.len()
+                                                        )),
                                                 ),
                                         )
                                         .child(
@@ -4559,7 +5109,8 @@ impl ArborWindow {
                                                 })),
                                         ),
                                 )
-                                .child(
+                                .when(!is_collapsed, |this| {
+                                    this.child(
                                     div()
                                         .pl(px(8.))
                                         .flex()
@@ -4771,6 +5322,7 @@ impl ArborWindow {
                                             }),
                                         ),
                                 )
+                                })
                                 .when(!repo_outposts.is_empty(), |group| {
                                     group.child(
                                         div()
@@ -4912,6 +5464,9 @@ impl ArborWindow {
                 .iter()
                 .map(|session| CenterTab::Diff(session.id)),
         );
+        if self.logs_tab_open {
+            tabs.push(CenterTab::Logs);
+        }
 
         let mut active_tab = self.active_center_tab_for_selected_worktree();
         if active_tab.is_some_and(|tab| !tabs.contains(&tab)) {
@@ -5005,17 +5560,25 @@ impl ArborWindow {
                                             .unwrap_or_else(|| "diff".to_owned()),
                                         false,
                                     ),
+                                    CenterTab::Logs => (
+                                        TAB_ICON_LOGS,
+                                        "Logs".to_owned(),
+                                        true,
+                                    ),
                                 };
                                 let tab_id = match tab {
                                     CenterTab::Terminal(id) => ("center-tab-terminal", id),
                                     CenterTab::Diff(id) => ("center-tab-diff", id),
+                                    CenterTab::Logs => ("center-tab-logs", 0),
                                 };
 
                                 div()
                                     .id(tab_id)
+                                    .group("tab")
+                                    .relative()
                                     .h_full()
                                     .cursor_pointer()
-                                    .min_w(px(122.))
+                                    .w(px(160.))
                                     .px_4()
                                     .flex()
                                     .items_center()
@@ -5040,7 +5603,7 @@ impl ArborWindow {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_sm()
                                             .text_color(rgb(if is_active {
                                                 theme.text_primary
                                             } else {
@@ -5048,14 +5611,64 @@ impl ArborWindow {
                                             }))
                                             .child(tab_label),
                                     )
-                                    .when(index == 0, |this| this.border_l_1())
+                                    .child(
+                                        div()
+                                            .id(match tab {
+                                                CenterTab::Terminal(id) => ("tab-close-terminal", id),
+                                                CenterTab::Diff(id) => ("tab-close-diff", id),
+                                                CenterTab::Logs => ("tab-close-logs", 0),
+                                            })
+                                            .absolute()
+                                            .right(px(4.))
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(24.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(24.))
+                                            .text_color(rgb(theme.text_muted))
+                                            .invisible()
+                                            .group_hover("tab", |s| s.visible())
+                                            .child("×")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                                    cx.stop_propagation();
+                                                    match tab {
+                                                        CenterTab::Terminal(session_id) => {
+                                                            if this.close_terminal_session_by_id(session_id) {
+                                                                this.sync_daemon_session_store(cx);
+                                                                this.terminal_scroll_handle.scroll_to_bottom();
+                                                                window.focus(&this.terminal_focus);
+                                                                this.focus_terminal_on_next_render = false;
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                        CenterTab::Diff(diff_id) => {
+                                                            if this.close_diff_session_by_id(diff_id) {
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                        CenterTab::Logs => {
+                                                            this.logs_tab_open = false;
+                                                            this.logs_tab_active = false;
+                                                            cx.notify();
+                                                        },
+                                                    }
+                                                }),
+                                            ),
+                                    )
                                     .when(index + 1 == tab_count, |this| this.border_r_1())
                                     .map(|this| match relation {
                                         Some(std::cmp::Ordering::Equal) => {
-                                            this.border_l_1().border_r_1()
+                                            let el = this.border_r_1();
+                                            if index == 0 { el } else { el.border_l_1() }
                                         },
                                         Some(std::cmp::Ordering::Less) => {
-                                            this.border_l_1().border_b_1()
+                                            let el = this.border_b_1();
+                                            if index == 0 { el } else { el.border_l_1() }
                                         },
                                         Some(std::cmp::Ordering::Greater) => {
                                             this.border_r_1().border_b_1()
@@ -5064,10 +5677,17 @@ impl ArborWindow {
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| match tab {
                                         CenterTab::Terminal(session_id) => {
+                                            this.logs_tab_active = false;
                                             this.select_terminal(session_id, window, cx);
                                         },
                                         CenterTab::Diff(diff_id) => {
+                                            this.logs_tab_active = false;
                                             this.select_diff_tab(diff_id, cx);
+                                        },
+                                        CenterTab::Logs => {
+                                            this.logs_tab_active = true;
+                                            this.active_diff_session_id = None;
+                                            cx.notify();
                                         },
                                     }))
                             })),
@@ -5110,7 +5730,7 @@ impl ArborWindow {
                     .min_h_0()
                     .bg(rgb(theme.terminal_bg))
                     .when(
-                        active_terminal.is_none() && active_diff_session.is_none(),
+                        active_terminal.is_none() && active_diff_session.is_none() && active_tab != Some(CenterTab::Logs),
                         |this| {
                             this.child(
                                 div()
@@ -5227,8 +5847,115 @@ impl ArborWindow {
                             mono_font,
                             diff_cell_width,
                         ))
+                    })
+                    .when(active_tab == Some(CenterTab::Logs), |this| {
+                        this.child(self.render_logs_content(cx))
                     }),
             )
+    }
+
+    fn render_logs_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let entry_count = self.log_entries.len();
+        let auto_scroll = self.log_auto_scroll;
+
+        div()
+            .h_full()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.tab_bg))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(format!("{entry_count} entries")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("log-copy-all")
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Copy All")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            let text = this
+                                                .log_entries
+                                                .iter()
+                                                .map(format_log_entry)
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("log-auto-scroll-toggle")
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(if auto_scroll {
+                                        theme.accent
+                                    } else {
+                                        theme.text_muted
+                                    }))
+                                    .child(if auto_scroll {
+                                        "Auto-scroll: ON"
+                                    } else {
+                                        "Auto-scroll: OFF"
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.log_auto_scroll = !this.log_auto_scroll;
+                                            cx.notify();
+                                        }),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().child(if entry_count > 0 {
+                let entries = self.log_entries.clone();
+                div()
+                    .id("log-entries")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.log_scroll_handle)
+                    .children(
+                        entries
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, entry)| render_log_row(entry, ix, theme)),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(rgb(theme.text_muted))
+                    .child("No log entries yet")
+                    .into_any_element()
+            }))
     }
 
     fn render_center_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5246,137 +5973,269 @@ impl ArborWindow {
 
     fn render_right_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
-        let selected_path = self.selected_changed_file.clone();
-        let has_changed_file_selected = selected_path.is_some();
+        let content: Div = match self.right_pane_tab {
+            RightPaneTab::Changes => self.render_changes_content(cx),
+            RightPaneTab::FileTree => self.render_file_tree(cx),
+        };
 
         div()
             .w(px(self.right_pane_width))
             .h_full()
             .min_h_0()
             .bg(rgb(theme.sidebar_bg))
-            .p_3()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(
-                div().h(px(24.)).flex().items_center().justify_end().child(
-                    action_button(
-                        theme,
-                        "open-diff-tab",
-                        "Diff",
-                        has_changed_file_selected,
-                        !has_changed_file_selected,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_diff_tab_for_selected_file(cx);
-                    })),
-                ),
-            )
-            .child(
-                div()
-                    .id("changes-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .scrollbar_width(px(10.))
-                    .flex()
-                    .flex_col()
-                    .font_family(FONT_MONO)
-                    .gap_0()
-                    .children(self.changed_files.iter().map(|change| {
-                        let is_selected = selected_path
-                            .as_ref()
-                            .is_some_and(|selected| selected.as_path() == change.path.as_path());
-                        let status_color = match change.kind {
-                            ChangeKind::Added => 0xa6e3a1,
-                            ChangeKind::Modified => 0xf9e2af,
-                            ChangeKind::Removed => 0xf38ba8,
-                            ChangeKind::Renamed => 0x89dceb,
-                            ChangeKind::Copied => 0x74c7ec,
-                            ChangeKind::TypeChange => 0xcba6f7,
-                            ChangeKind::Conflict => 0xf38ba8,
-                            ChangeKind::IntentToAdd => 0x94e2d5,
-                        };
-                        let path_color = match change.kind {
-                            ChangeKind::Added => 0x8fd7ad,
-                            ChangeKind::Removed => 0xf2a4b7,
-                            ChangeKind::Modified => 0xd9d7cf,
-                            ChangeKind::Renamed => 0x8ecae6,
-                            ChangeKind::Copied => 0x91d7e3,
-                            ChangeKind::TypeChange => 0xc4b1ee,
-                            ChangeKind::Conflict => 0xf38ba8,
-                            ChangeKind::IntentToAdd => 0x94e2d5,
-                        };
-                        let show_line_stats = change.additions > 0 || change.deletions > 0;
-                        let display_path = truncate_middle_path_for_width(
-                            change.path.as_path(),
-                            self.right_pane_width,
-                        );
-                        let file_path = change.path.clone();
+            .child(self.render_right_pane_tabs(cx))
+            .child(content)
+    }
 
-                        div()
-                            .h(px(24.))
-                            .px_1()
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .border_b_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(if is_selected {
-                                theme.panel_active_bg
-                            } else {
-                                theme.sidebar_bg
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                    this.select_changed_file(file_path.clone(), cx);
+    fn render_right_pane_tabs(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let active_tab = self.right_pane_tab;
+
+        let tab_button = |label: &'static str, tab: RightPaneTab| {
+            let is_active = active_tab == tab;
+            div()
+                .id(ElementId::Name(
+                    format!("right-tab-{label}").to_lowercase().into(),
+                ))
+                .flex_1()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_xs()
+                .font_family(FONT_UI)
+                .bg(rgb(if is_active {
+                    theme.tab_active_bg
+                } else {
+                    theme.tab_bg
+                }))
+                .text_color(rgb(if is_active {
+                    theme.text_primary
+                } else {
+                    theme.text_muted
+                }))
+                .when(is_active, |this| {
+                    this.border_b_2().border_color(rgb(theme.accent))
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.set_right_pane_tab(tab, cx);
+                    }),
+                )
+                .child(label)
+        };
+
+        div()
+            .h(px(28.))
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(tab_button("Changes", RightPaneTab::Changes))
+            .child(tab_button("Files", RightPaneTab::FileTree))
+    }
+
+    fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let selected_path = self.selected_changed_file.clone();
+        div().flex_1().min_h_0().flex().flex_col().child(
+            div()
+                .id("changes-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(10.))
+                .flex()
+                .flex_col()
+                .font_family(FONT_MONO)
+                .p_1()
+                .children(self.changed_files.iter().map(|change| {
+                    let is_selected = selected_path
+                        .as_ref()
+                        .is_some_and(|selected| selected.as_path() == change.path.as_path());
+                    let status_color = match change.kind {
+                        ChangeKind::Added => 0xa6e3a1,
+                        ChangeKind::Modified => 0xf9e2af,
+                        ChangeKind::Removed => 0xf38ba8,
+                        ChangeKind::Renamed => 0x89dceb,
+                        ChangeKind::Copied => 0x74c7ec,
+                        ChangeKind::TypeChange => 0xcba6f7,
+                        ChangeKind::Conflict => 0xf38ba8,
+                        ChangeKind::IntentToAdd => 0x94e2d5,
+                    };
+                    let path_color = match change.kind {
+                        ChangeKind::Added => 0x8fd7ad,
+                        ChangeKind::Removed => 0xf2a4b7,
+                        ChangeKind::Modified => 0xd9d7cf,
+                        ChangeKind::Renamed => 0x8ecae6,
+                        ChangeKind::Copied => 0x91d7e3,
+                        ChangeKind::TypeChange => 0xc4b1ee,
+                        ChangeKind::Conflict => 0xf38ba8,
+                        ChangeKind::IntentToAdd => 0x94e2d5,
+                    };
+                    let show_line_stats = change.additions > 0 || change.deletions > 0;
+                    let display_path = truncate_middle_path_for_width(
+                        change.path.as_path(),
+                        self.right_pane_width,
+                    );
+                    let file_path = change.path.clone();
+
+                    div()
+                        .h(px(24.))
+                        .pl(px(4.))
+                        .pr_1()
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                this.select_changed_file(file_path.clone(), cx);
+                                this.open_diff_tab_for_selected_file(cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(rgb(status_color))
+                                .child(change_code(change.kind)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_xs()
+                                .text_color(rgb(path_color))
+                                .child(display_path),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_1()
+                                .when(show_line_stats, |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x72d69c))
+                                            .child(format!("+{}", change.additions)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xeb6f92))
+                                            .child(format!("-{}", change.deletions)),
+                                    )
                                 }),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(status_color))
-                                    .child(change_code(change.kind)),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .text_color(rgb(path_color))
-                                    .child(display_path),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap_1()
-                                    .when(show_line_stats, |this| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x72d69c))
-                                                .child(format!("+{}", change.additions)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xeb6f92))
-                                                .child(format!("-{}", change.deletions)),
-                                        )
-                                    }),
-                            )
-                    })),
-            )
+                        )
+                })),
+        )
+    }
+
+    fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let selected_entry = self.selected_file_tree_entry.clone();
+        let expanded_dirs = &self.expanded_dirs;
+
+        div().flex_1().min_h_0().flex().flex_col().child(
+            div()
+                .id("file-tree-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(10.))
+                .flex()
+                .flex_col()
+                .font_family(FONT_MONO)
+                .p_1()
+                .children(self.file_tree_entries.iter().map(|entry| {
+                    let is_selected = selected_entry
+                        .as_ref()
+                        .is_some_and(|selected| selected == &entry.path);
+                    let indent = entry.depth as f32 * 16. + 4.;
+                    let entry_path = entry.path.clone();
+                    let is_dir = entry.is_dir;
+
+                    let chevron = if is_dir {
+                        if expanded_dirs.contains(&entry.path) {
+                            "\u{f078}" // chevron down
+                        } else {
+                            "\u{f054}" // chevron right
+                        }
+                    } else {
+                        " "
+                    };
+
+                    let (file_icon, icon_color) = file_icon_and_color(&entry.name, is_dir);
+
+                    div()
+                        .id(ElementId::Name(
+                            format!("ft-{}", entry.path.display()).into(),
+                        ))
+                        .h(px(24.))
+                        .pl(px(indent))
+                        .pr_1()
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .bg(rgb(if is_selected {
+                            theme.panel_active_bg
+                        } else {
+                            theme.sidebar_bg
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                if is_dir {
+                                    this.toggle_file_tree_dir(entry_path.clone(), cx);
+                                } else {
+                                    this.select_file_tree_entry(entry_path.clone(), cx);
+                                }
+                            }),
+                        )
+                        .child(
+                            div()
+                                .w(px(12.))
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(rgb(theme.text_muted))
+                                .child(chevron),
+                        )
+                        .child(
+                            div()
+                                .w(px(20.))
+                                .flex_none()
+                                .text_size(px(18.))
+                                .text_color(rgb(icon_color))
+                                .child(file_icon),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_xs()
+                                .text_color(rgb(icon_color))
+                                .when(is_dir, |this| this.font_weight(FontWeight::SEMIBOLD))
+                                .child(entry.name.clone()),
+                        )
+                })),
+        )
     }
 
     fn render_status_bar(&self) -> impl IntoElement {
@@ -5427,7 +6286,20 @@ impl ArborWindow {
                     ))
                     .child(status_text(theme, "•"))
                     .child(status_text(theme, format!("terminals {terminal_count}")))
-                    .child(status_text(theme, "ready")),
+                    .child(
+                        if self.worktree_stats_loading || self.worktree_prs_loading {
+                            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                            let frame_index = (SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                                / 100) as usize
+                                % frames.len();
+                            status_text(theme, format!("{} loading", frames[frame_index]))
+                        } else {
+                            status_text(theme, "ready")
+                        },
+                    ),
             )
     }
 
@@ -6272,10 +7144,7 @@ fn terminal_output_tail_for_metadata(
 }
 
 fn current_unix_timestamp_millis() -> Option<u64> {
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
-    u64::try_from(duration.as_millis()).ok()
+    daemon::current_unix_timestamp_millis()
 }
 
 fn daemon_base_url_from_config(raw: Option<&str>) -> String {
@@ -6286,16 +7155,7 @@ fn daemon_base_url_from_config(raw: Option<&str>) -> String {
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    let left_canonical = left.canonicalize().ok();
-    let right_canonical = right.canonicalize().ok();
-
-    left_canonical
-        .zip(right_canonical)
-        .is_some_and(|(left, right)| left == right)
+    worktree::paths_equivalent(left, right)
 }
 
 fn porcelain_status_to_change_kind(xy: &str) -> ChangeKind {
@@ -6454,7 +7314,13 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_use_embedded_backend))
             .on_action(cx.listener(Self::action_use_alacritty_backend))
             .on_action(cx.listener(Self::action_use_ghostty_backend))
-            .child(self.render_top_bar())
+            .on_action(cx.listener(Self::action_toggle_left_pane))
+            .on_action(cx.listener(Self::action_navigate_worktree_back))
+            .on_action(cx.listener(Self::action_navigate_worktree_forward))
+            .on_action(cx.listener(Self::action_collapse_all_repositories))
+            .on_action(cx.listener(Self::action_view_logs))
+            .on_action(cx.listener(Self::action_request_quit))
+            .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
             .child(div().when_some(self.notice.clone(), |this, notice| {
                 this.px_3()
@@ -6474,11 +7340,13 @@ impl Render for ArborWindow {
                     .flex_row()
                     .on_drag_move(cx.listener(Self::handle_pane_divider_drag_move))
                     .child(self.render_left_pane(cx))
-                    .child(self.render_pane_resize_handle(
-                        "left-pane-resize",
-                        DraggedPaneDivider::Left,
-                        theme,
-                    ))
+                    .when(self.left_pane_visible, |this| {
+                        this.child(self.render_pane_resize_handle(
+                            "left-pane-resize",
+                            DraggedPaneDivider::Left,
+                            theme,
+                        ))
+                    })
                     .child(self.render_center_pane(window, cx))
                     .child(self.render_pane_resize_handle(
                         "right-pane-resize",
@@ -6490,6 +7358,28 @@ impl Render for ArborWindow {
             .child(self.render_status_bar())
             .child(self.render_create_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
+            .when(self.quit_overlay_until.is_some_and(|until| Instant::now() < until), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(theme.chrome_bg))
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .text_sm()
+                                .text_color(rgb(theme.text_primary))
+                                .child("Hold ⌘Q to quit"),
+                        ),
+                )
+            })
     }
 }
 
@@ -6885,6 +7775,115 @@ fn rope_display_line(rope: &Rope, line_index: usize) -> String {
         let _ = text.pop();
     }
     text.replace('\t', "    ")
+}
+
+fn format_log_entry(entry: &log_layer::LogEntry) -> String {
+    let timestamp = entry
+        .timestamp
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = timestamp.as_secs();
+    let millis = timestamp.subsec_millis();
+    let hours = (total_secs / 3600) % 24;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    let level_str = match entry.level {
+        tracing::Level::ERROR => "ERROR",
+        tracing::Level::WARN => "WARN ",
+        tracing::Level::INFO => "INFO ",
+        tracing::Level::DEBUG => "DEBUG",
+        tracing::Level::TRACE => "TRACE",
+    };
+    let message = if entry.fields.is_empty() {
+        entry.message.clone()
+    } else {
+        let fields_str: Vec<String> = entry
+            .fields
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        format!("{} {}", entry.message, fields_str.join(" "))
+    };
+    format!(
+        "{hours:02}:{minutes:02}:{seconds:02}.{millis:03} {level_str} {} {message}",
+        entry.target
+    )
+}
+
+fn render_log_row(entry: &log_layer::LogEntry, index: usize, theme: ThemePalette) -> Div {
+    let timestamp = entry
+        .timestamp
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = timestamp.as_secs();
+    let millis = timestamp.subsec_millis();
+    let hours = (total_secs / 3600) % 24;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    let time_str = format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}");
+
+    let (level_str, level_color) = match entry.level {
+        tracing::Level::ERROR => ("ERROR", 0xf38ba8_u32),
+        tracing::Level::WARN => ("WARN ", 0xf9e2af),
+        tracing::Level::INFO => ("INFO ", 0xa6e3a1),
+        tracing::Level::DEBUG => ("DEBUG", 0x89b4fa),
+        tracing::Level::TRACE => ("TRACE", 0x9399b2),
+    };
+
+    let target = truncate_with_ellipsis(&entry.target, 30);
+    let bg = if index.is_multiple_of(2) {
+        theme.terminal_bg
+    } else {
+        theme.sidebar_bg
+    };
+
+    div()
+        .py(px(2.))
+        .w_full()
+        .flex()
+        .items_start()
+        .gap_2()
+        .px_2()
+        .font_family(FONT_MONO)
+        .text_size(px(DIFF_FONT_SIZE_PX))
+        .bg(rgb(bg))
+        .child(
+            div()
+                .flex_none()
+                .text_color(rgb(theme.text_muted))
+                .child(time_str),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(40.))
+                .text_color(rgb(level_color))
+                .child(level_str),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(200.))
+                .text_color(rgb(theme.text_muted))
+                .overflow_hidden()
+                .child(target),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(rgb(theme.text_primary))
+                .child(if entry.fields.is_empty() {
+                    entry.message.clone()
+                } else {
+                    let fields_str: Vec<String> = entry
+                        .fields
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect();
+                    format!("{} {}", entry.message, fields_str.join(" "))
+                }),
+        )
 }
 
 fn render_diff_session(
@@ -7575,6 +8574,49 @@ fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
         .child(text.into())
 }
 
+fn file_icon_and_color(name: &str, is_dir: bool) -> (&'static str, u32) {
+    if is_dir {
+        return ("\u{f07b}", 0xe5c07b);
+    }
+
+    // Check full filename first
+    match name {
+        "Dockerfile" | ".dockerignore" => return ("\u{e7b0}", 0x61afef),
+        "Makefile" | "Justfile" => return ("\u{e615}", 0x98c379),
+        ".gitignore" | ".env" => return ("\u{e615}", 0x838994),
+        _ => {},
+    }
+
+    // Check extension
+    let ext = name.rsplit('.').next().unwrap_or("");
+    match ext {
+        "rs" => ("\u{e7a8}", 0xe06c75),
+        "toml" => ("\u{e615}", 0x838994),
+        "py" => ("\u{e73c}", 0x61afef),
+        "js" => ("\u{e74e}", 0xe5c07b),
+        "ts" => ("\u{e628}", 0x61afef),
+        "jsx" | "tsx" => ("\u{e7ba}", 0x56b6c2),
+        "json" => ("\u{e60b}", 0xe5c07b),
+        "html" => ("\u{e736}", 0xe06c75),
+        "css" | "scss" | "sass" => ("\u{e749}", 0x56b6c2),
+        "md" | "mdx" => ("\u{e73e}", 0x61afef),
+        "yaml" | "yml" => ("\u{e615}", 0xc678dd),
+        "sh" | "bash" | "zsh" => ("\u{e795}", 0x98c379),
+        "go" => ("\u{e627}", 0x56b6c2),
+        "c" | "h" => ("\u{e61e}", 0x61afef),
+        "cpp" | "hpp" | "cc" => ("\u{e61d}", 0xe06c75),
+        "java" => ("\u{e738}", 0xe06c75),
+        "rb" => ("\u{e739}", 0xe06c75),
+        "swift" => ("\u{e755}", 0xe06c75),
+        "lock" => ("\u{f023}", 0x838994),
+        "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" => ("\u{f1c5}", 0xc678dd),
+        "txt" | "log" => ("\u{f15c}", 0x838994),
+        "xml" => ("\u{e619}", 0xe5c07b),
+        "sql" => ("\u{f1c0}", 0xe5c07b),
+        _ => ("\u{f15c}", 0x838994),
+    }
+}
+
 fn change_code(kind: ChangeKind) -> &'static str {
     match kind {
         ChangeKind::Added => "A",
@@ -7624,7 +8666,7 @@ fn github_repo_slug_for_repo(repo_root: &Path) -> Option<String> {
 
 fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
     let (owner, _) = repo_slug.split_once('/')?;
-    Some(format!("https://github.com/{owner}.png?size=40"))
+    Some(format!("https://avatars.githubusercontent.com/{owner}?size=96"))
 }
 
 fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
@@ -7761,10 +8803,7 @@ fn repository_display_name(path: &Path) -> String {
 }
 
 fn short_branch(value: &str) -> String {
-    value
-        .strip_prefix("refs/heads/")
-        .unwrap_or(value)
-        .to_owned()
+    worktree::short_branch(value)
 }
 
 fn expand_home_path(path: &str) -> Result<PathBuf, String> {
@@ -8730,33 +9769,44 @@ fn parse_theme_kind(theme: Option<&str>) -> Result<ThemeKind, String> {
     }
 }
 
-fn request_quit(_: &RequestQuit, cx: &mut App) {
-    let now = Instant::now();
-    let mut guard = match QUIT_ARMED_AT.lock() {
-        Ok(lock) => lock,
-        Err(poisoned) => poisoned.into_inner(),
-    };
 
-    let should_quit = guard
-        .as_ref()
-        .is_some_and(|armed_at| now.duration_since(*armed_at) <= QUIT_ARM_WINDOW);
-
-    if should_quit {
-        *guard = None;
-        cx.quit();
-        return;
+fn open_arbor_window(cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
+    if let Err(error) = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(1180.), px(760.))),
+            app_id: Some("so.pen.arbor".to_owned()),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Arbor".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(9.), px(9.))),
+            }),
+            window_decorations: Some(WindowDecorations::Client),
+            ..Default::default()
+        },
+        |_, cx| {
+            cx.new(|cx| {
+                ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
+                    ui_state_store::UiState::default(),
+                    log_layer::LogBuffer::new(),
+                    cx,
+                )
+            })
+        },
+    ) {
+        eprintln!("failed to open Arbor window: {error:#}");
     }
+}
 
-    *guard = Some(now);
-    eprintln!(
-        "press Cmd-Q again within {}ms to quit Arbor",
-        QUIT_ARM_WINDOW.as_millis(),
-    );
+fn new_window(_: &NewWindow, cx: &mut App) {
+    open_arbor_window(cx);
 }
 
 fn install_app_menu_and_keys(cx: &mut App) {
-    cx.on_action(request_quit);
+    cx.on_action(new_window);
     cx.bind_keys([
+        KeyBinding::new("cmd-n", NewWindow, None),
         KeyBinding::new("cmd-q", RequestQuit, None),
         KeyBinding::new("cmd-t", SpawnTerminal, None),
         KeyBinding::new("cmd-w", CloseActiveTerminal, None),
@@ -8770,6 +9820,10 @@ fn install_app_menu_and_keys(cx: &mut App) {
         KeyBinding::new("cmd-1", UseEmbeddedBackend, None),
         KeyBinding::new("cmd-2", UseAlacrittyBackend, None),
         KeyBinding::new("cmd-3", UseGhosttyBackend, None),
+        KeyBinding::new("cmd-\\", ToggleLeftPane, None),
+        KeyBinding::new("cmd-[", NavigateWorktreeBack, None),
+        KeyBinding::new("cmd-]", NavigateWorktreeForward, None),
+        KeyBinding::new("cmd-shift-l", ViewLogs, None),
     ]);
     cx.set_menus(vec![
         Menu {
@@ -8783,6 +9837,8 @@ fn install_app_menu_and_keys(cx: &mut App) {
         Menu {
             name: "File".into(),
             items: vec![
+                MenuItem::action("New Window", NewWindow),
+                MenuItem::separator(),
                 MenuItem::action("Add Repository...", OpenAddRepository),
                 MenuItem::separator(),
                 MenuItem::action("New Terminal Tab", SpawnTerminal),
@@ -8810,11 +9866,23 @@ fn install_app_menu_and_keys(cx: &mut App) {
             ],
         },
         Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Toggle Sidebar", ToggleLeftPane),
+                MenuItem::action("Collapse All Repositories", CollapseAllRepositories),
+                MenuItem::separator(),
+                MenuItem::action("View Logs", ViewLogs),
+            ],
+        },
+        Menu {
             name: "Worktree".into(),
             items: vec![
                 MenuItem::action("Add Repository...", OpenAddRepository),
                 MenuItem::separator(),
                 MenuItem::action("New Worktree", OpenCreateWorktree),
+                MenuItem::separator(),
+                MenuItem::action("Navigate Back", NavigateWorktreeBack),
+                MenuItem::action("Navigate Forward", NavigateWorktreeForward),
                 MenuItem::separator(),
                 MenuItem::action("Refresh Worktrees", RefreshWorktrees),
                 MenuItem::action("Refresh Changes", RefreshChanges),
@@ -8843,7 +9911,25 @@ fn bounds_from_window_geometry(
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    let log_buffer = log_layer::LogBuffer::new();
+
+    {
+        use tracing_subscriber::{
+            EnvFilter, Layer, Registry, layer::SubscriberExt, util::SubscriberInitExt,
+        };
+
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let in_memory_layer =
+            log_layer::InMemoryLayer::new(log_buffer.clone()).with_filter(env_filter);
+
+        Registry::default().with(in_memory_layer).init();
+    }
+
+    tracing::info!("Arbor starting");
+
+    Application::new().run(move |cx: &mut App| {
+        cx.set_http_client(simple_http_client::create_http_client());
         install_app_menu_and_keys(cx);
         let startup_ui_state = ui_state_store::load_startup_state();
         let default_bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
@@ -8852,6 +9938,7 @@ fn main() {
             .and_then(bounds_from_window_geometry)
             .unwrap_or(default_bounds);
         let startup_ui_state_for_window = startup_ui_state.clone();
+        let log_buffer_for_window = log_buffer.clone();
 
         if let Err(error) = cx.open_window(
             WindowOptions {
@@ -8868,9 +9955,11 @@ fn main() {
             },
             move |_, cx| {
                 let startup_ui_state = startup_ui_state_for_window.clone();
+                let log_buffer = log_buffer_for_window.clone();
                 cx.new(move |cx| {
                     ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
                         startup_ui_state,
+                        log_buffer,
                         cx,
                     )
                 })
