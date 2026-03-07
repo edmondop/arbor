@@ -421,8 +421,18 @@ struct FileViewSpan {
 
 #[derive(Debug, Clone)]
 enum FileViewContent {
-    Text(Arc<[Vec<FileViewSpan>]>),
+    Text {
+        highlighted: Arc<[Vec<FileViewSpan>]>,
+        raw_lines: Vec<String>,
+        dirty: bool,
+    },
     Image(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileViewCursor {
+    line: usize,
+    col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -433,6 +443,7 @@ struct FileViewSession {
     title: String,
     content: FileViewContent,
     is_loading: bool,
+    cursor: FileViewCursor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -583,6 +594,7 @@ struct ArborWindow {
     active_file_view_session_id: Option<u64>,
     next_file_view_session_id: u64,
     file_view_scroll_handle: UniformListScrollHandle,
+    file_view_editing: bool,
     active_terminal_by_worktree: HashMap<PathBuf, u64>,
     next_terminal_id: u64,
     next_diff_session_id: u64,
@@ -680,6 +692,7 @@ impl ArborWindow {
                     active_file_view_session_id: None,
                     next_file_view_session_id: 1,
                     file_view_scroll_handle: UniformListScrollHandle::new(),
+                    file_view_editing: false,
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
@@ -763,6 +776,7 @@ impl ArborWindow {
                     active_file_view_session_id: None,
                     next_file_view_session_id: 1,
                     file_view_scroll_handle: UniformListScrollHandle::new(),
+                    file_view_editing: false,
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
@@ -958,6 +972,7 @@ impl ArborWindow {
             active_file_view_session_id: None,
             next_file_view_session_id: 1,
             file_view_scroll_handle: UniformListScrollHandle::new(),
+            file_view_editing: false,
             active_terminal_by_worktree: HashMap::new(),
             next_terminal_id: 1,
             next_diff_session_id: 1,
@@ -2540,6 +2555,7 @@ impl ArborWindow {
                 title,
                 content: FileViewContent::Image(full_path),
                 is_loading: false,
+                cursor: FileViewCursor { line: 0, col: 0 },
             });
             self.active_file_view_session_id = Some(session_id);
             self.active_diff_session_id = None;
@@ -2553,69 +2569,39 @@ impl ArborWindow {
             worktree_path: worktree_path.clone(),
             file_path: file_path.clone(),
             title,
-            content: FileViewContent::Text(Arc::from([])),
+            content: FileViewContent::Text {
+                highlighted: Arc::from([]),
+                raw_lines: Vec::new(),
+                dirty: false,
+            },
             is_loading: true,
+            cursor: FileViewCursor { line: 0, col: 0 },
         });
         self.active_file_view_session_id = Some(session_id);
         self.active_diff_session_id = None;
         self.logs_tab_active = false;
 
         cx.spawn(async move |this, cx| {
-            let lines = cx
+            let result = cx
                 .background_spawn(async move {
                     let default_color: u32 = 0xc8ccd4;
                     match fs::read_to_string(&full_path) {
                         Ok(content) => {
-                            let syntax_set = SyntaxSet::load_defaults_newlines();
-                            let theme_set = ThemeSet::load_defaults();
-                            let theme = &theme_set.themes["base16-ocean.dark"];
-                            if let Some(syntax) =
-                                syntax_set.find_syntax_by_extension(&ext)
-                            {
-                                let mut highlighter =
-                                    HighlightLines::new(syntax, theme);
-                                content
-                                    .lines()
-                                    .map(|line| {
-                                        match highlighter
-                                            .highlight_line(line, &syntax_set)
-                                        {
-                                            Ok(ranges) => ranges
-                                                .into_iter()
-                                                .map(|(style, text)| {
-                                                    let c = style.foreground;
-                                                    FileViewSpan {
-                                                        text: text.to_owned(),
-                                                        color: (c.r as u32) << 16
-                                                            | (c.g as u32) << 8
-                                                            | c.b as u32,
-                                                    }
-                                                })
-                                                .collect(),
-                                            Err(_) => vec![FileViewSpan {
-                                                text: line.to_owned(),
-                                                color: default_color,
-                                            }],
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                            } else {
-                                content
-                                    .lines()
-                                    .map(|line| {
-                                        vec![FileViewSpan {
-                                            text: line.to_owned(),
-                                            color: default_color,
-                                        }]
-                                    })
-                                    .collect::<Vec<_>>()
-                            }
+                            let raw: Vec<String> =
+                                content.lines().map(String::from).collect();
+                            let highlighted =
+                                highlight_lines_with_syntect(&raw, &ext, default_color);
+                            (raw, highlighted)
                         },
                         Err(error) => {
-                            vec![vec![FileViewSpan {
-                                text: format!("Error reading file: {error}"),
-                                color: default_color,
-                            }]]
+                            let msg = format!("Error reading file: {error}");
+                            (
+                                vec![msg.clone()],
+                                vec![vec![FileViewSpan {
+                                    text: msg,
+                                    color: default_color,
+                                }]],
+                            )
                         },
                     }
                 })
@@ -2627,7 +2613,11 @@ impl ArborWindow {
                     .iter_mut()
                     .find(|s| s.id == session_id)
                 {
-                    session.content = FileViewContent::Text(Arc::from(lines));
+                    session.content = FileViewContent::Text {
+                        highlighted: Arc::from(result.1),
+                        raw_lines: result.0,
+                        dirty: false,
+                    };
                     session.is_loading = false;
                     cx.notify();
                 }
@@ -2660,6 +2650,7 @@ impl ArborWindow {
         self.file_view_sessions.remove(index);
         if self.active_file_view_session_id == Some(session_id) {
             self.active_file_view_session_id = None;
+            self.file_view_editing = false;
         }
         true
     }
@@ -5070,13 +5061,24 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.create_modal.is_some() || self.manage_hosts_modal.is_some() {
+        if self.create_modal.is_some()
+            || self.manage_hosts_modal.is_some()
+            || self.right_pane_search_active
+        {
             return;
         }
 
-        let Some(CenterTab::Terminal(active_terminal_id)) =
-            self.active_center_tab_for_selected_worktree()
-        else {
+        let active_tab = self.active_center_tab_for_selected_worktree();
+
+        // Handle file view editing before terminal input
+        if matches!(active_tab, Some(CenterTab::FileView(_))) {
+            if self.handle_file_view_key_down(event, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        let Some(CenterTab::Terminal(active_terminal_id)) = active_tab else {
             return;
         };
 
@@ -5116,6 +5118,226 @@ impl ArborWindow {
     ) {
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
+    }
+
+    fn handle_file_view_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // Always handle Cmd+S for save, even when not in editing mode
+        if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "s" {
+            self.save_active_file_view(cx);
+            return true;
+        }
+        if !self.file_view_editing {
+            return false;
+        }
+        let Some(session_id) = self.active_file_view_session_id else {
+            return false;
+        };
+        let Some(session) = self
+            .file_view_sessions
+            .iter_mut()
+            .find(|s| s.id == session_id)
+        else {
+            return false;
+        };
+        let FileViewContent::Text {
+            raw_lines, dirty, ..
+        } = &mut session.content
+        else {
+            return false;
+        };
+        if raw_lines.is_empty() {
+            return false;
+        }
+
+        let cursor = &mut session.cursor;
+
+        // Skip platform combos (Cmd+S handled above)
+        if event.keystroke.modifiers.platform {
+            return false;
+        }
+
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.file_view_editing = false;
+                cx.notify();
+                return true;
+            },
+            "backspace" => {
+                if cursor.col > 0 {
+                    let line = &mut raw_lines[cursor.line];
+                    let byte_pos = char_to_byte_offset(line, cursor.col);
+                    let prev_byte = char_to_byte_offset(line, cursor.col - 1);
+                    line.replace_range(prev_byte..byte_pos, "");
+                    cursor.col -= 1;
+                } else if cursor.line > 0 {
+                    let removed = raw_lines.remove(cursor.line);
+                    cursor.line -= 1;
+                    cursor.col = raw_lines[cursor.line].chars().count();
+                    raw_lines[cursor.line].push_str(&removed);
+                }
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "delete" => {
+                let line_char_count = raw_lines[cursor.line].chars().count();
+                if cursor.col < line_char_count {
+                    let line = &mut raw_lines[cursor.line];
+                    let byte_pos = char_to_byte_offset(line, cursor.col);
+                    let next_byte = char_to_byte_offset(line, cursor.col + 1);
+                    line.replace_range(byte_pos..next_byte, "");
+                } else if cursor.line + 1 < raw_lines.len() {
+                    let next = raw_lines.remove(cursor.line + 1);
+                    raw_lines[cursor.line].push_str(&next);
+                }
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "enter" | "return" => {
+                let line = &raw_lines[cursor.line];
+                let byte_pos = char_to_byte_offset(line, cursor.col);
+                let rest = line[byte_pos..].to_owned();
+                raw_lines[cursor.line].truncate(byte_pos);
+                cursor.line += 1;
+                cursor.col = 0;
+                raw_lines.insert(cursor.line, rest);
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "left" => {
+                if cursor.col > 0 {
+                    cursor.col -= 1;
+                } else if cursor.line > 0 {
+                    cursor.line -= 1;
+                    cursor.col = raw_lines[cursor.line].chars().count();
+                }
+                cx.notify();
+                return true;
+            },
+            "right" => {
+                let line_len = raw_lines[cursor.line].chars().count();
+                if cursor.col < line_len {
+                    cursor.col += 1;
+                } else if cursor.line + 1 < raw_lines.len() {
+                    cursor.line += 1;
+                    cursor.col = 0;
+                }
+                cx.notify();
+                return true;
+            },
+            "up" => {
+                if cursor.line > 0 {
+                    cursor.line -= 1;
+                    let line_len = raw_lines[cursor.line].chars().count();
+                    cursor.col = cursor.col.min(line_len);
+                }
+                cx.notify();
+                return true;
+            },
+            "down" => {
+                if cursor.line + 1 < raw_lines.len() {
+                    cursor.line += 1;
+                    let line_len = raw_lines[cursor.line].chars().count();
+                    cursor.col = cursor.col.min(line_len);
+                }
+                cx.notify();
+                return true;
+            },
+            "tab" => {
+                let line = &mut raw_lines[cursor.line];
+                let byte_pos = char_to_byte_offset(line, cursor.col);
+                line.insert_str(byte_pos, "    ");
+                cursor.col += 4;
+                *dirty = true;
+                cx.notify();
+                return true;
+            },
+            "home" => {
+                cursor.col = 0;
+                cx.notify();
+                return true;
+            },
+            "end" => {
+                cursor.col = raw_lines[cursor.line].chars().count();
+                cx.notify();
+                return true;
+            },
+            _ => {},
+        }
+
+        if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+            return false;
+        }
+
+        // Character input
+        if let Some(key_char) = event.keystroke.key_char.as_ref() {
+            let line = &mut raw_lines[cursor.line];
+            let byte_pos = char_to_byte_offset(line, cursor.col);
+            line.insert_str(byte_pos, key_char);
+            cursor.col += key_char.chars().count();
+            *dirty = true;
+            cx.notify();
+            return true;
+        }
+
+        false
+    }
+
+    fn save_active_file_view(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.active_file_view_session_id else {
+            return;
+        };
+        let Some(session) = self.file_view_sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        let FileViewContent::Text {
+            raw_lines, dirty, ..
+        } = &session.content
+        else {
+            return;
+        };
+        if !dirty {
+            return;
+        }
+        let content = raw_lines.join("\n");
+        let full_path = session.worktree_path.join(&session.file_path);
+        let ext = session
+            .file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let raw_clone = raw_lines.clone();
+        match fs::write(&full_path, &content) {
+            Ok(()) => {
+                let highlighted = highlight_lines_with_syntect(&raw_clone, &ext, 0xc8ccd4);
+                if let Some(s) = self
+                    .file_view_sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id)
+                {
+                    if let FileViewContent::Text {
+                        highlighted: h,
+                        dirty: d,
+                        ..
+                    } = &mut s.content
+                    {
+                        *h = Arc::from(highlighted);
+                        *d = false;
+                    }
+                }
+            },
+            Err(error) => {
+                self.notice = Some(format!("Failed to save: {error}"));
+            },
+        }
+        cx.notify();
     }
 
     fn clamp_pane_widths_for_workspace(&mut self, workspace_width: f32) {
@@ -6409,6 +6631,7 @@ impl ArborWindow {
                                         CenterTab::Terminal(session_id) => {
                                             this.logs_tab_active = false;
                                             this.active_file_view_session_id = None;
+                                            this.file_view_editing = false;
                                             this.select_terminal(session_id, window, cx);
                                         },
                                         CenterTab::Diff(diff_id) => {
@@ -6422,6 +6645,7 @@ impl ArborWindow {
                                             this.logs_tab_active = true;
                                             this.active_diff_session_id = None;
                                             this.active_file_view_session_id = None;
+                                            this.file_view_editing = false;
                                             cx.notify();
                                         },
                                     }))
@@ -6585,11 +6809,14 @@ impl ArborWindow {
                     })
                     .when_some(active_file_view_session, |this, session| {
                         let mono_font = terminal_mono_font(cx);
+                        let editing = self.file_view_editing;
                         this.child(render_file_view_session(
                             session,
                             theme,
                             &self.file_view_scroll_handle,
                             mono_font,
+                            editing,
+                            cx,
                         ))
                     })
                     .when(active_tab == Some(CenterTab::Logs), |this| {
@@ -8990,16 +9217,20 @@ fn render_file_view_session(
     theme: ThemePalette,
     scroll_handle: &UniformListScrollHandle,
     mono_font: gpui::Font,
+    editing: bool,
+    cx: &mut Context<ArborWindow>,
 ) -> Div {
     let path_label = session.file_path.to_string_lossy().into_owned();
     let is_loading = session.is_loading;
     let session_id = session.id;
+    let cursor = session.cursor;
 
-    let (status_text, body) = match &session.content {
+    let (status_text, is_dirty, body) = match &session.content {
         FileViewContent::Image(image_path) => {
             let path = image_path.clone();
             (
                 "image".to_owned(),
+                false,
                 div()
                     .id(("file-view-scroll", session_id))
                     .flex_1()
@@ -9023,19 +9254,33 @@ fn render_file_view_session(
                     ),
             )
         },
-        FileViewContent::Text(lines) => {
-            let line_count = lines.len();
+        FileViewContent::Text {
+            highlighted,
+            raw_lines,
+            dirty,
+        } => {
+            let line_count = raw_lines.len().max(highlighted.len());
             let status = if is_loading {
                 "loading...".to_owned()
             } else {
                 format!("{line_count} lines")
             };
-            let lines = lines.clone();
+            let highlighted = highlighted.clone();
+            let raw_lines_clone = raw_lines.clone();
             let body = div()
                 .id(("file-view-scroll", session_id))
                 .flex_1()
                 .min_h_0()
                 .bg(rgb(theme.terminal_bg))
+                .cursor_text()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.file_view_editing = true;
+                        this.right_pane_search_active = false;
+                        cx.notify();
+                    }),
+                )
                 .when(is_loading, |this| {
                     this.child(
                         div()
@@ -9053,6 +9298,7 @@ fn render_file_view_session(
                     let scroll_handle = scroll_handle.clone();
                     let mono_font = mono_font.clone();
                     let line_number_width = line_count.to_string().len().max(3);
+                    let show_cursor = editing;
                     this.child(
                         div()
                             .size_full()
@@ -9061,25 +9307,99 @@ fn render_file_view_session(
                             .child(
                                 uniform_list(
                                     ("file-view-list", session_id),
-                                    lines.len(),
+                                    line_count,
                                     move |range, _, _| {
                                         range
                                             .map(|index| {
                                                 let line_num = index + 1;
-                                                let spans = &lines[index];
+                                                let is_cursor_line =
+                                                    show_cursor && cursor.line == index;
+
                                                 let mut content_div = div()
                                                     .pl_2()
                                                     .flex_1()
                                                     .min_w_0()
                                                     .overflow_hidden()
                                                     .flex();
-                                                for span in spans {
-                                                    content_div = content_div.child(
-                                                        div()
-                                                            .text_color(rgb(span.color))
-                                                            .child(span.text.clone()),
-                                                    );
+
+                                                if show_cursor {
+                                                    // When editing, show raw text with cursor
+                                                    let raw =
+                                                        raw_lines_clone.get(index).cloned().unwrap_or_default();
+                                                    if is_cursor_line {
+                                                        let byte_pos = char_to_byte_offset(
+                                                            &raw, cursor.col,
+                                                        );
+                                                        let before = &raw[..byte_pos];
+                                                        let after = &raw[byte_pos..];
+                                                        let cursor_char =
+                                                            after.chars().next().unwrap_or(' ');
+                                                        let after_cursor = if after.is_empty() {
+                                                            String::new()
+                                                        } else {
+                                                            after.chars().skip(1).collect()
+                                                        };
+                                                        content_div = content_div
+                                                            .child(
+                                                                div()
+                                                                    .text_color(rgb(
+                                                                        theme.text_primary,
+                                                                    ))
+                                                                    .child(
+                                                                        before.to_owned(),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .bg(rgb(theme.accent))
+                                                                    .text_color(rgb(
+                                                                        theme.terminal_bg,
+                                                                    ))
+                                                                    .child(
+                                                                        cursor_char.to_string(),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_color(rgb(
+                                                                        theme.text_primary,
+                                                                    ))
+                                                                    .child(after_cursor),
+                                                            );
+                                                    } else {
+                                                        content_div = content_div.child(
+                                                            div()
+                                                                .text_color(rgb(
+                                                                    theme.text_primary,
+                                                                ))
+                                                                .child(if raw.is_empty() {
+                                                                    " ".to_owned()
+                                                                } else {
+                                                                    raw
+                                                                }),
+                                                        );
+                                                    }
+                                                } else {
+                                                    // Not editing: show highlighted spans
+                                                    if let Some(spans) =
+                                                        highlighted.get(index)
+                                                    {
+                                                        for span in spans {
+                                                            content_div =
+                                                                content_div.child(
+                                                                    div()
+                                                                        .text_color(rgb(
+                                                                            span.color,
+                                                                        ))
+                                                                        .child(
+                                                                            span.text
+                                                                                .clone(),
+                                                                        ),
+                                                                );
+                                                        }
+                                                    }
                                                 }
+
                                                 div()
                                                     .id(("fv-row", index))
                                                     .h(px(DIFF_ROW_HEIGHT_PX))
@@ -9092,7 +9412,8 @@ fn render_file_view_session(
                                                     .child(
                                                         div()
                                                             .w(px(
-                                                                (line_number_width + 2) as f32
+                                                                (line_number_width + 2)
+                                                                    as f32
                                                                     * DIFF_FONT_SIZE_PX
                                                                     * 0.6,
                                                             ))
@@ -9100,11 +9421,15 @@ fn render_file_view_session(
                                                             .text_color(rgb(
                                                                 theme.text_disabled,
                                                             ))
-                                                            .text_size(px(DIFF_FONT_SIZE_PX))
+                                                            .text_size(px(
+                                                                DIFF_FONT_SIZE_PX,
+                                                            ))
                                                             .px_1()
                                                             .flex()
                                                             .justify_end()
-                                                            .child(format!("{line_num}")),
+                                                            .child(format!(
+                                                                "{line_num}"
+                                                            )),
                                                     )
                                                     .child(content_div)
                                                     .into_any_element()
@@ -9119,7 +9444,7 @@ fn render_file_view_session(
                             ),
                     )
                 });
-            (status, body)
+            (status, *dirty, body)
         },
     };
 
@@ -9142,16 +9467,56 @@ fn render_file_view_session(
                 .justify_between()
                 .child(
                     div()
-                        .font(mono_font.clone())
-                        .text_size(px(DIFF_FONT_SIZE_PX))
-                        .text_color(rgb(theme.text_muted))
-                        .child(path_label),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font(mono_font.clone())
+                                .text_size(px(DIFF_FONT_SIZE_PX))
+                                .text_color(rgb(theme.text_muted))
+                                .child(path_label),
+                        )
+                        .when(is_dirty, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(DIFF_FONT_SIZE_PX))
+                                    .text_color(rgb(theme.accent))
+                                    .child("\u{2022}"),
+                            )
+                        }),
                 )
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(theme.text_disabled))
-                        .child(status_text),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .when(is_dirty, |this| {
+                            this.child(
+                                div()
+                                    .id(("fv-save", session_id))
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .rounded_sm()
+                                    .bg(rgb(theme.accent))
+                                    .text_xs()
+                                    .text_color(rgb(theme.terminal_bg))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Save")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.save_active_file_view(cx);
+                                        }),
+                                    ),
+                            )
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_disabled))
+                                .child(status_text),
+                        ),
                 ),
         )
         .child(body)
@@ -9891,6 +10256,55 @@ fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
         .text_xs()
         .text_color(rgb(theme.text_muted))
         .child(text.into())
+}
+
+fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte, _)| byte)
+        .unwrap_or(s.len())
+}
+
+fn highlight_lines_with_syntect(
+    raw_lines: &[String],
+    ext: &str,
+    default_color: u32,
+) -> Vec<Vec<FileViewSpan>> {
+    let syntax_set = SyntaxSet::load_defaults_newlines();
+    let theme_set = ThemeSet::load_defaults();
+    let theme = &theme_set.themes["base16-ocean.dark"];
+    if let Some(syntax) = syntax_set.find_syntax_by_extension(ext) {
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        raw_lines
+            .iter()
+            .map(|line| match highlighter.highlight_line(line, &syntax_set) {
+                Ok(ranges) => ranges
+                    .into_iter()
+                    .map(|(style, text)| {
+                        let c = style.foreground;
+                        FileViewSpan {
+                            text: text.to_owned(),
+                            color: (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32,
+                        }
+                    })
+                    .collect(),
+                Err(_) => vec![FileViewSpan {
+                    text: line.to_owned(),
+                    color: default_color,
+                }],
+            })
+            .collect()
+    } else {
+        raw_lines
+            .iter()
+            .map(|line| {
+                vec![FileViewSpan {
+                    text: line.to_owned(),
+                    color: default_color,
+                }]
+            })
+            .collect()
+    }
 }
 
 fn file_icon_and_color(name: &str, is_dir: bool) -> (&'static str, u32) {
