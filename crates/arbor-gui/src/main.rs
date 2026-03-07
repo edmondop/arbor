@@ -1378,9 +1378,9 @@ impl ArborWindow {
             .map(|worktree| worktree.path.clone())
     }
 
-    fn maybe_notify(&self, title: &str, body: &str) {
+    fn maybe_notify(&self, title: &str, body: &str, play_sound: bool) {
         if self.notifications_enabled && !self.window_is_active {
-            notifications::send(title, body);
+            notifications::send(title, body, play_sound);
         }
     }
 
@@ -1392,7 +1392,7 @@ impl ArborWindow {
             terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
         let daemon = self.terminal_daemon.clone();
         let mut sessions_to_close = Vec::new();
-        let mut pending_notifications: Vec<(String, String)> = Vec::new();
+        let mut pending_notifications: Vec<(String, String, bool)> = Vec::new();
 
         for index in 0..self.terminals.len() {
             let Some(runtime) = self
@@ -1444,6 +1444,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1453,6 +1454,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "terminal tab `{}` exited with code {exit_code}",
@@ -1529,6 +1531,7 @@ impl ArborWindow {
                                     pending_notifications.push((
                                         "Terminal completed".to_owned(),
                                         format!("`{title}` completed successfully"),
+                                        true,
                                     ));
                                     sessions_to_close.push(session.id);
                                 } else if session.state == TerminalState::Failed {
@@ -1537,6 +1540,7 @@ impl ArborWindow {
                                     pending_notifications.push((
                                         "Terminal failed".to_owned(),
                                         format!("`{title}` failed with code {exit_code}"),
+                                        false,
                                     ));
                                     self.notice = Some(format!(
                                         "terminal tab `{title}` exited with code {exit_code}",
@@ -1676,6 +1680,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "SSH terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1685,6 +1690,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "SSH terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "SSH terminal tab `{}` exited with code {exit_code}",
@@ -1733,6 +1739,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Mosh terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1742,6 +1749,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Mosh terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "mosh terminal tab `{}` exited with code {exit_code}",
@@ -1753,8 +1761,8 @@ impl ArborWindow {
             };
         }
 
-        for (title, body) in pending_notifications {
-            self.maybe_notify(&title, &body);
+        for (title, body, play_sound) in pending_notifications {
+            self.maybe_notify(&title, &body, play_sound);
         }
 
         for session_id in sessions_to_close {
