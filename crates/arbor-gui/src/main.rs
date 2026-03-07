@@ -5147,6 +5147,7 @@ impl ArborWindow {
         window: &mut Window,
         _: &mut Context<Self>,
     ) {
+        self.right_pane_search_active = false;
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
     }
