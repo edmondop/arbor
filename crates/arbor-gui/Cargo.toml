@@ -10,7 +10,7 @@ name = "Arbor"
 path = "src/main.rs"
 
 [features]
-vendored-openssl = ["libssh-rs-sys/vendored-openssl"]
+vendored-openssl = ["libssh-rs-sys/vendored-openssl", "libssh-rs-sys/vendored"]
 
 [dependencies]
 libssh-rs-sys = { version = "0.2", optional = true }
