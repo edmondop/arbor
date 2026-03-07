@@ -526,6 +526,23 @@ enum HostsModalInputEvent {
     ClearError,
 }
 
+#[derive(Debug, Clone)]
+enum DeleteTarget {
+    Worktree(usize),
+    Outpost(usize),
+}
+
+#[derive(Debug, Clone)]
+struct DeleteModal {
+    target: DeleteTarget,
+    label: String,
+    branch: String,
+    has_unpushed: Option<bool>,
+    delete_branch: bool,
+    is_deleting: bool,
+    error: Option<String>,
+}
+
 struct CreatedWorktree {
     worktree_name: String,
     branch_name: String,
@@ -566,6 +583,7 @@ struct ArborWindow {
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
     create_modal: Option<CreateModal>,
+    delete_modal: Option<DeleteModal>,
     outposts: Vec<OutpostSummary>,
     outpost_store: Box<dyn arbor_core::outpost_store::OutpostStore>,
     active_outpost_index: Option<usize>,
@@ -661,6 +679,7 @@ impl ArborWindow {
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_modal: None,
+                    delete_modal: None,
                     outposts: Vec::new(),
                     outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
                     active_outpost_index: None,
@@ -738,6 +757,7 @@ impl ArborWindow {
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_modal: None,
+                    delete_modal: None,
                     outposts: Vec::new(),
                     outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
                     active_outpost_index: None,
@@ -927,6 +947,7 @@ impl ArborWindow {
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
             create_modal: None,
+            delete_modal: None,
             outposts,
             outpost_store,
             active_outpost_index: None,
@@ -2638,31 +2659,6 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn remove_outpost(&mut self, outpost_index: usize, cx: &mut Context<Self>) {
-        let Some(outpost) = self.outposts.get(outpost_index) else {
-            return;
-        };
-
-        let outpost_id = outpost.outpost_id.clone();
-        if let Err(error) = self.outpost_store.remove(&outpost_id) {
-            self.notice = Some(format!("failed to remove outpost: {error}"));
-            cx.notify();
-            return;
-        }
-
-        self.outposts.remove(outpost_index);
-
-        if self.active_outpost_index == Some(outpost_index) {
-            self.active_outpost_index = None;
-        } else if let Some(active) = self.active_outpost_index
-            && active > outpost_index
-        {
-            self.active_outpost_index = Some(active - 1);
-        }
-
-        cx.notify();
-    }
-
     fn reload_changed_files(&mut self) -> bool {
         let previous_files = self.changed_files.clone();
         let previous_notice = self.notice.clone();
@@ -3122,6 +3118,148 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn open_delete_modal(
+        &mut self,
+        target: DeleteTarget,
+        label: String,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) {
+        let worktree_index = match &target {
+            DeleteTarget::Worktree(i) => Some(*i),
+            _ => None,
+        };
+        self.delete_modal = Some(DeleteModal {
+            target,
+            label,
+            branch: worktree::short_branch(&branch),
+            has_unpushed: if worktree_index.is_some() { None } else { Some(false) },
+            delete_branch: false,
+            is_deleting: false,
+            error: None,
+        });
+        cx.notify();
+
+        // For worktrees, spawn async check for unpushed commits.
+        if let Some(worktree_index) = worktree_index {
+            if let Some(wt) = self.worktrees.get(worktree_index) {
+                let wt_path = wt.path.clone();
+                cx.spawn(async move |this, cx| {
+                    let has_unpushed = cx
+                        .background_spawn(async move {
+                            worktree::has_unpushed_commits(&wt_path)
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(modal) = this.delete_modal.as_mut() {
+                            modal.has_unpushed = Some(has_unpushed);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn close_delete_modal(&mut self, cx: &mut Context<Self>) {
+        self.delete_modal = None;
+        cx.notify();
+    }
+
+    fn execute_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.delete_modal.as_ref() else {
+            return;
+        };
+        if modal.is_deleting {
+            return;
+        }
+
+        match modal.target.clone() {
+            DeleteTarget::Worktree(index) => {
+                let Some(wt) = self.worktrees.get(index) else {
+                    self.close_delete_modal(cx);
+                    return;
+                };
+                let repo_root = wt.repo_root.clone();
+                let wt_path = wt.path.clone();
+                let branch = modal.branch.clone();
+                let delete_branch = modal.delete_branch;
+
+                if let Some(modal) = self.delete_modal.as_mut() {
+                    modal.is_deleting = true;
+                    modal.error = None;
+                    cx.notify();
+                }
+
+                cx.spawn(async move |this, cx| {
+                    // Remove the worktree (force to handle dirty state).
+                    let result = cx
+                        .background_spawn({
+                            let repo_root = repo_root.clone();
+                            let wt_path = wt_path.clone();
+                            async move { worktree::remove(&repo_root, &wt_path, true) }
+                        })
+                        .await;
+
+                    if let Err(e) = &result {
+                        let err_msg = e.to_string();
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(modal) = this.delete_modal.as_mut() {
+                                modal.is_deleting = false;
+                                modal.error = Some(err_msg);
+                                cx.notify();
+                            }
+                        });
+                        return;
+                    }
+
+                    // Optionally delete the branch.
+                    if delete_branch && !branch.is_empty() {
+                        let _ = cx
+                            .background_spawn(async move {
+                                worktree::delete_branch(&repo_root, &branch)
+                            })
+                            .await;
+                    }
+
+                    let _ = this.update(cx, |this, cx| {
+                        this.delete_modal = None;
+                        this.refresh_worktrees(cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            },
+            DeleteTarget::Outpost(index) => {
+                let Some(outpost) = self.outposts.get(index) else {
+                    self.close_delete_modal(cx);
+                    return;
+                };
+                let outpost_id = outpost.outpost_id.clone();
+
+                if let Err(e) = self.outpost_store.remove(&outpost_id) {
+                    if let Some(modal) = self.delete_modal.as_mut() {
+                        modal.error = Some(e.to_string());
+                        cx.notify();
+                    }
+                    return;
+                }
+
+                self.outposts.remove(index);
+                if self.active_outpost_index == Some(index) {
+                    self.active_outpost_index = None;
+                } else if let Some(active) = self.active_outpost_index
+                    && active > index
+                {
+                    self.active_outpost_index = Some(active - 1);
+                }
+                self.delete_modal = None;
+                cx.notify();
+            },
+        }
+    }
+
     fn update_create_worktree_modal_input(
         &mut self,
         input: ModalInputEvent,
@@ -3551,6 +3689,33 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         if event.is_held {
+            return;
+        }
+
+        if self.delete_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_delete_modal(cx);
+                    cx.stop_propagation();
+                },
+                "enter" | "return" => {
+                    self.execute_delete(cx);
+                    cx.stop_propagation();
+                },
+                "space" | " " => {
+                    if let Some(modal) = self.delete_modal.as_mut() {
+                        if matches!(modal.target, DeleteTarget::Worktree(_)) {
+                            modal.delete_branch = !modal.delete_branch;
+                            cx.notify();
+                        }
+                    }
+                    cx.stop_propagation();
+                },
+                _ => {},
+            }
             return;
         }
 
@@ -5507,7 +5672,9 @@ impl ArborWindow {
                                                 let diff_summary = worktree.diff_summary;
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
-                                                let show_name = worktree.label != worktree.branch;
+                                                let is_primary = worktree.is_primary_checkout;
+                                                let wt_label = worktree.label.clone();
+                                                let wt_branch = worktree.branch.clone();
                                                 let agent_dot_color = match worktree.agent_state {
                                                     Some(AgentState::Working) => Some(0xe5c07b_u32),
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
@@ -5515,32 +5682,56 @@ impl ArborWindow {
                                                 };
                                                 div()
                                                     .id(("worktree-row", index))
+                                                    .group("wt-row")
                                                     .font_family(FONT_MONO)
                                                     .cursor_pointer()
                                                     .flex()
                                                     .items_center()
-                                                    .gap_1()
-                                                    .h(px(40.))
                                                     .on_click(
                                                         cx.listener(move |this, _, window, cx| {
                                                             this.select_worktree(index, window, cx)
                                                         }),
                                                     )
-                                                    // Activity dot outside the cell
+                                                    // X delete button in 24px left column (hidden until row hover)
                                                     .child(
                                                         div()
                                                             .flex_none()
-                                                            .w(px(20.))
+                                                            .w(px(24.))
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
-                                                            .when_some(agent_dot_color, |this, color| {
+                                                            .when(!is_primary, |this| {
                                                                 this.child(
                                                                     div()
-                                                                        .flex_none()
-                                                                        .size(px(6.))
-                                                                        .rounded_full()
-                                                                        .bg(rgb(color)),
+                                                                        .id(("worktree-delete", index))
+                                                                        .w(px(18.))
+                                                                        .h(px(18.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .font_family(FONT_MONO)
+                                                                        .text_size(px(16.))
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .hover(|s| s.text_color(rgb(theme.text_primary)))
+                                                                        .invisible()
+                                                                        .group_hover("wt-row", |s| s.visible())
+                                                                        .child("\u{f00d}")
+                                                                        .on_mouse_down(
+                                                                            MouseButton::Left,
+                                                                            cx.listener({
+                                                                                let wt_label = wt_label.clone();
+                                                                                let wt_branch = wt_branch.clone();
+                                                                                move |this, _: &MouseDownEvent, _, cx| {
+                                                                                    cx.stop_propagation();
+                                                                                    this.open_delete_modal(
+                                                                                        DeleteTarget::Worktree(index),
+                                                                                        wt_label.clone(),
+                                                                                        wt_branch.clone(),
+                                                                                        cx,
+                                                                                    );
+                                                                                }
+                                                                            }),
+                                                                        ),
                                                                 )
                                                             }),
                                                     )
@@ -5561,112 +5752,73 @@ impl ArborWindow {
                                                         .py_1()
                                                         .flex()
                                                         .flex_col()
+                                                        .gap(px(1.))
                                                         .justify_center()
                                                         .when(is_active, |this| {
                                                             this.bg(rgb(theme.panel_active_bg))
                                                         })
-                                                    .child(
-                                                        div().min_w_0().flex_1().when(
-                                                            show_name,
-                                                            |this| {
-                                                                this.child(
-                                                                    div()
-                                                                        .min_w_0()
-                                                                        .overflow_hidden()
-                                                                        .whitespace_nowrap()
-                                                                        .text_ellipsis()
-                                                                        .text_xs()
-                                                                        .font_weight(
-                                                                            FontWeight::SEMIBOLD,
-                                                                        )
-                                                                        .text_color(rgb(
-                                                                            theme.text_primary,
-                                                                        ))
-                                                                        .child(
-                                                                            worktree
-                                                                                .label
-                                                                                .clone(),
-                                                                        ),
-                                                                )
-                                                            },
-                                                        ),
-                                                    )
+                                                    // Line 1: [icon] [spinner] [name] ... [+- lines] [time ago]
                                                     .child(
                                                         div()
-                                                            .min_w_0()
                                                             .flex()
                                                             .items_center()
-                                                            .justify_between()
-                                                            .gap_2()
+                                                            .gap_1()
+                                                            // Git branch icon
+                                                            .child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .text_size(px(10.))
+                                                                    .text_color(rgb(theme.text_muted))
+                                                                    .child("\u{e725}"),
+                                                            )
+                                                            // Activity spinner dot
+                                                            .child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .w(px(8.))
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .when_some(agent_dot_color, |this, color| {
+                                                                        this.child(
+                                                                            div()
+                                                                                .flex_none()
+                                                                                .size(px(6.))
+                                                                                .rounded_full()
+                                                                                .bg(rgb(color)),
+                                                                        )
+                                                                    }),
+                                                            )
+                                                            // Name/label
                                                             .child(
                                                                 div()
                                                                     .min_w_0()
+                                                                    .flex_1()
                                                                     .overflow_hidden()
                                                                     .whitespace_nowrap()
                                                                     .text_ellipsis()
                                                                     .text_xs()
-                                                                    .text_color(rgb(theme.text_disabled))
-                                                                    .child(worktree.branch.clone()),
+                                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                                    .text_color(rgb(theme.text_primary))
+                                                                    .child(worktree.label.clone()),
                                                             )
+                                                            // Right side: [+- lines] [time ago]
                                                             .child({
                                                                 let summary =
                                                                     diff_summary.unwrap_or_default();
                                                                 let show_diff_summary =
                                                                     summary.additions > 0
                                                                         || summary.deletions > 0;
-                                                                let mut details = div()
+                                                                let mut right = div()
                                                                     .flex_none()
                                                                     .flex()
                                                                     .items_center()
-                                                                    .justify_end()
                                                                     .gap_1();
-
-                                                                if let Some(pr_number) = pr_number {
-                                                                    let pr_text =
-                                                                        format!("#{pr_number}");
-                                                                    if let Some(pr_url) =
-                                                                        pr_url.clone()
-                                                                    {
-                                                                        details = details.child(
-                                                                            div()
-                                                                                .id((
-                                                                                    "worktree-pr-link",
-                                                                                    index,
-                                                                                ))
-                                                                                .cursor_pointer()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    theme.accent,
-                                                                                ))
-                                                                                .child(pr_text)
-                                                                                .on_click(
-                                                                                    cx.listener(
-                                                                                        move |this, _, _, cx| {
-                                                                                            this.open_external_url(
-                                                                                                &pr_url,
-                                                                                                cx,
-                                                                                            );
-                                                                                            cx.stop_propagation();
-                                                                                        },
-                                                                                    ),
-                                                                                ),
-                                                                        );
-                                                                    } else {
-                                                                        details = details.child(
-                                                                            div()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    theme.accent,
-                                                                                ))
-                                                                                .child(pr_text),
-                                                                        );
-                                                                    }
-                                                                }
 
                                                                 if self.worktree_stats_loading
                                                                     && diff_summary.is_none()
                                                                 {
-                                                                    details = details.child(
+                                                                    right = right.child(
                                                                         div()
                                                                             .text_xs()
                                                                             .text_color(rgb(
@@ -5675,7 +5827,7 @@ impl ArborWindow {
                                                                             .child("..."),
                                                                     );
                                                                 } else if show_diff_summary {
-                                                                    details = details
+                                                                    right = right
                                                                         .child(
                                                                             div()
                                                                                 .text_xs()
@@ -5703,7 +5855,7 @@ impl ArborWindow {
                                                                 }
 
                                                                 if let Some(activity_ms) = worktree.last_activity_unix_ms {
-                                                                    details = details.child(
+                                                                    right = right.child(
                                                                         div()
                                                                             .text_xs()
                                                                             .text_color(rgb(
@@ -5713,7 +5865,57 @@ impl ArborWindow {
                                                                     );
                                                                 }
 
-                                                                details
+                                                                right
+                                                            }),
+                                                    )
+                                                    // Line 2: [branch name] ... [PR number]
+                                                    .child(
+                                                        div()
+                                                            .pl(px(22.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .min_w_0()
+                                                                    .flex_1()
+                                                                    .overflow_hidden()
+                                                                    .whitespace_nowrap()
+                                                                    .text_ellipsis()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(theme.text_disabled))
+                                                                    .child(worktree.branch.clone()),
+                                                            )
+                                                            .when_some(pr_number, |this, pr_num| {
+                                                                let pr_text = format!("#{pr_num}");
+                                                                if let Some(pr_url) = pr_url.clone() {
+                                                                    this.child(
+                                                                        div()
+                                                                            .id(("worktree-pr-link", index))
+                                                                            .cursor_pointer()
+                                                                            .flex_none()
+                                                                            .text_xs()
+                                                                            .text_color(rgb(theme.accent))
+                                                                            .child(pr_text)
+                                                                            .on_click(cx.listener(
+                                                                                move |this, _, _, cx| {
+                                                                                    this.open_external_url(
+                                                                                        &pr_url,
+                                                                                        cx,
+                                                                                    );
+                                                                                    cx.stop_propagation();
+                                                                                },
+                                                                            )),
+                                                                    )
+                                                                } else {
+                                                                    this.child(
+                                                                        div()
+                                                                            .flex_none()
+                                                                            .text_xs()
+                                                                            .text_color(rgb(theme.accent))
+                                                                            .child(pr_text),
+                                                                    )
+                                                                }
                                                             }),
                                                     )
                                                     )
@@ -5724,13 +5926,14 @@ impl ArborWindow {
                                 .when(!repo_outposts.is_empty(), |group| {
                                     group.child(
                                         div()
-                                            .pl(px(8.))
                                             .flex()
                                             .flex_col()
                                             .gap_1()
                                             .children(
                                                 repo_outposts.into_iter().map(|(outpost_index, outpost)| {
                                                     let is_active = self.active_outpost_index == Some(outpost_index);
+                                                    let op_label = outpost.label.clone();
+                                                    let op_branch = outpost.branch.clone();
                                                     let status_color = match outpost.status {
                                                         arbor_core::outpost::OutpostStatus::Available => theme.accent,
                                                         arbor_core::outpost::OutpostStatus::Unreachable => 0xeb6f92,
@@ -5738,33 +5941,85 @@ impl ArborWindow {
                                                     };
                                                     div()
                                                         .id(("outpost-row", outpost_index))
+                                                        .group("op-row")
                                                         .font_family(FONT_MONO)
                                                         .cursor_pointer()
-                                                        .rounded_sm()
-                                                        .border_1()
-                                                        .border_color(rgb(if is_active { theme.accent } else { theme.border }))
-                                                        .bg(rgb(theme.panel_bg))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .h(px(40.))
                                                         .flex()
-                                                        .flex_col()
-                                                        .justify_center()
-                                                        .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                                                        .items_center()
                                                         .on_click(cx.listener(move |this, _, window, cx| {
                                                             this.select_outpost(outpost_index, window, cx);
                                                         }))
+                                                        // X delete button in 24px left column (hidden until row hover)
+                                                        .child(
+                                                            div()
+                                                                .flex_none()
+                                                                .w(px(24.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .child(
+                                                                    div()
+                                                                        .id(("outpost-delete", outpost_index))
+                                                                        .w(px(18.))
+                                                                        .h(px(18.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .font_family(FONT_MONO)
+                                                                        .text_size(px(16.))
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .hover(|s| s.text_color(rgb(theme.text_primary)))
+                                                                        .invisible()
+                                                                        .group_hover("op-row", |s| s.visible())
+                                                                        .child("\u{f00d}")
+                                                                        .on_mouse_down(
+                                                                            MouseButton::Left,
+                                                                            cx.listener({
+                                                                                let op_label = op_label.clone();
+                                                                                let op_branch = op_branch.clone();
+                                                                                move |this, _: &MouseDownEvent, _, cx| {
+                                                                                    cx.stop_propagation();
+                                                                                    this.open_delete_modal(
+                                                                                        DeleteTarget::Outpost(outpost_index),
+                                                                                        op_label.clone(),
+                                                                                        op_branch.clone(),
+                                                                                        cx,
+                                                                                    );
+                                                                                }
+                                                                            }),
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(rgb(if is_active { theme.accent } else { theme.border }))
+                                                            .bg(rgb(theme.panel_bg))
+                                                            .px_2()
+                                                            .py_1()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(1.))
+                                                            .justify_center()
+                                                            .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                                                        // Line 1: [icon] [name] ... [@hostname]
                                                         .child(
                                                             div()
                                                                 .flex()
                                                                 .items_center()
                                                                 .gap_1()
+                                                                // Globe icon
                                                                 .child(
                                                                     div()
-                                                                        .text_sm()
+                                                                        .flex_none()
+                                                                        .text_size(px(10.))
                                                                         .text_color(rgb(status_color))
                                                                         .child("\u{f0ac}"),
                                                                 )
+                                                                // Name/label
                                                                 .child(
                                                                     div()
                                                                         .min_w_0()
@@ -5776,47 +6031,35 @@ impl ArborWindow {
                                                                         .font_weight(FontWeight::SEMIBOLD)
                                                                         .text_color(rgb(theme.text_primary))
                                                                         .child(outpost.label.clone()),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .pl(px(14.))
-                                                                .min_w_0()
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_between()
-                                                                .gap_2()
-                                                                .child(
-                                                                    div()
-                                                                        .min_w_0()
-                                                                        .overflow_hidden()
-                                                                        .whitespace_nowrap()
-                                                                        .text_ellipsis()
-                                                                        .text_xs()
-                                                                        .text_color(rgb(theme.text_disabled))
-                                                                        .child(outpost.branch.clone()),
                                                                 )
+                                                                // Right side: @hostname
                                                                 .child(
                                                                     div()
                                                                         .flex_none()
                                                                         .text_xs()
                                                                         .text_color(rgb(theme.text_muted))
                                                                         .child(format!("@{}", outpost.hostname)),
-                                                                )
+                                                                ),
+                                                        )
+                                                        // Line 2: [branch name]
+                                                        .child(
+                                                            div()
+                                                                .pl(px(14.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
                                                                 .child(
                                                                     div()
-                                                                        .id(("outpost-remove", outpost_index))
-                                                                        .flex_none()
-                                                                        .cursor_pointer()
+                                                                        .min_w_0()
+                                                                        .flex_1()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
                                                                         .text_xs()
-                                                                        .text_color(rgb(theme.text_muted))
-                                                                        .hover(|style| style.text_color(rgb(theme.text_primary)))
-                                                                        .ml_1()
-                                                                        .child("\u{f00d}")
-                                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                                            this.remove_outpost(outpost_index, cx);
-                                                                        })),
+                                                                        .text_color(rgb(theme.text_disabled))
+                                                                        .child(outpost.branch.clone()),
                                                                 ),
+                                                        )
                                                         )
                                                 }),
                                             ),
@@ -7253,6 +7496,185 @@ impl ArborWindow {
             )
     }
 
+    fn render_delete_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.delete_modal.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let is_worktree = matches!(modal.target, DeleteTarget::Worktree(_));
+        let title = if is_worktree {
+            "Delete Worktree"
+        } else {
+            "Remove Outpost"
+        };
+        let delete_disabled = modal.is_deleting;
+        let delete_label = if modal.is_deleting {
+            "Deleting..."
+        } else if is_worktree {
+            "Delete"
+        } else {
+            "Remove"
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(440.))
+                    .max_w(px(440.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // Header
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(title),
+                            )
+                            .child(
+                                action_button(theme, "close-delete-modal", "Close", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_delete_modal(cx);
+                                    })),
+                            ),
+                    )
+                    // Label
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(format!("{}: {}", if is_worktree { "Worktree" } else { "Outpost" }, modal.label)),
+                    )
+                    // Unpushed commits warning (worktrees only)
+                    .when(is_worktree, |this| {
+                        match modal.has_unpushed {
+                            None => this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Checking for unpushed commits..."),
+                            ),
+                            Some(true) => this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xe5c07b))
+                                    .child("\u{f071} This worktree has unpushed commits that will be lost."),
+                            ),
+                            Some(false) => this,
+                        }
+                    })
+                    // Branch deletion checkbox (worktrees only)
+                    .when(is_worktree && !modal.branch.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("delete-branch-checkbox")
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .py_1()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(modal) = this.delete_modal.as_mut() {
+                                        modal.delete_branch = !modal.delete_branch;
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(
+                                    div()
+                                        .w(px(14.))
+                                        .h(px(14.))
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .when(modal.delete_branch, |this| {
+                                            this.bg(rgb(theme.accent))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(theme.sidebar_bg))
+                                                        .child("\u{f00c}"),
+                                                )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(format!("Also delete branch `{}`", modal.branch)),
+                                ),
+                        )
+                    })
+                    // Error display
+                    .when_some(modal.error.clone(), |this, err| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xeb6f92))
+                                .child(err),
+                        )
+                    })
+                    // Buttons
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                action_button(theme, "delete-cancel", "Cancel", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_delete_modal(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("delete-confirm")
+                                    .cursor_pointer()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(rgb(0xeb6f92))
+                                    .bg(rgb(theme.panel_bg))
+                                    .px_2()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(rgb(0xeb6f92))
+                                    .when(delete_disabled, |this| {
+                                        this.opacity(0.5).cursor_default()
+                                    })
+                                    .when(!delete_disabled, |this| {
+                                        this.hover(|s| s.bg(rgb(0xeb6f92)).text_color(rgb(theme.sidebar_bg)))
+                                    })
+                                    .child(delete_label)
+                                    .when(!delete_disabled, |this| {
+                                        this.on_click(cx.listener(|this, _, _, cx| {
+                                            this.execute_delete(cx);
+                                        }))
+                                    }),
+                            ),
+                    ),
+            )
+    }
+
     fn render_manage_hosts_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_hosts_modal.clone() else {
             return div();
@@ -7848,6 +8270,7 @@ impl Render for ArborWindow {
             )
             .child(self.render_status_bar())
             .child(self.render_create_modal(cx))
+            .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
             .when(
                 self.quit_overlay_until
