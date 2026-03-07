@@ -45,7 +45,7 @@ jobs:
           rustup target add x86_64-apple-darwin
       - name: Build macOS binaries
         run: |
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target aarch64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target aarch64-apple-darwin
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-apple-darwin
       - name: Package macOS app
         shell: bash
