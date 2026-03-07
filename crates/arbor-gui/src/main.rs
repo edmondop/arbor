@@ -5400,6 +5400,20 @@ impl ArborWindow {
                                                                         .text_xs()
                                                                         .text_color(rgb(theme.text_muted))
                                                                         .child(format!("@{}", outpost.hostname)),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id(("outpost-remove", outpost_index))
+                                                                        .flex_none()
+                                                                        .cursor_pointer()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .hover(|style| style.text_color(rgb(theme.text_primary)))
+                                                                        .ml_1()
+                                                                        .child("\u{f00d}")
+                                                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                                                            this.remove_outpost(outpost_index, cx);
+                                                                        })),
                                                                 ),
                                                         )
                                                 }),
