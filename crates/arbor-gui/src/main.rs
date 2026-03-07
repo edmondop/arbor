@@ -809,18 +809,81 @@ impl ArborWindow {
         let cwd = match env::current_dir() {
             Ok(path) => path,
             Err(error) => {
+                let mut notice_parts = vec![format!("failed to read current directory: {error}")];
+                let loaded_config = app_config::load_or_create_config();
+                notice_parts.extend(loaded_config.notices);
+                let config_last_modified = app_config::config_last_modified(&config_path);
+
+                let repositories = match repository_store.load_roots() {
+                    Ok(roots) => repository_store::resolve_repositories_from_roots(roots),
+                    Err(err) => {
+                        notice_parts.push(format!("failed to load saved repositories: {err}"));
+                        Vec::new()
+                    },
+                };
+                let active_repository_index = if repositories.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
+                let active_repository = active_repository_index
+                    .and_then(|i| repositories.get(i))
+                    .cloned();
+                let repo_root = active_repository
+                    .as_ref()
+                    .map(|r| r.root.clone())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let github_repo_slug = active_repository.and_then(|r| r.github_repo_slug);
+
+                let active_backend_kind = match parse_terminal_backend_kind(
+                    loaded_config.config.terminal_backend.as_deref(),
+                ) {
+                    Ok(kind) => kind,
+                    Err(err) => {
+                        notice_parts.push(err);
+                        TerminalBackendKind::Embedded
+                    },
+                };
+                let theme_kind = match parse_theme_kind(loaded_config.config.theme.as_deref()) {
+                    Ok(kind) => kind,
+                    Err(err) => {
+                        notice_parts.push(err);
+                        ThemeKind::One
+                    },
+                };
+                let notifications_enabled = loaded_config.config.notifications.unwrap_or(true);
+                let remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded_config
+                    .config
+                    .remote_hosts
+                    .iter()
+                    .map(|host_config| arbor_core::outpost::RemoteHost {
+                        name: host_config.name.clone(),
+                        hostname: host_config.hostname.clone(),
+                        port: host_config.port,
+                        user: host_config.user.clone(),
+                        identity_file: host_config.identity_file.clone(),
+                        remote_base_path: host_config.remote_base_path.clone(),
+                        daemon_port: host_config.daemon_port,
+                        mosh: host_config.mosh,
+                        mosh_server_path: host_config.mosh_server_path.clone(),
+                    })
+                    .collect();
+                let agent_presets = normalize_agent_presets(&loaded_config.config.agent_presets);
+                let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
+                let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
+
                 return Self {
                     repository_store,
                     daemon_session_store,
                     terminal_daemon: None,
                     daemon_base_url: DEFAULT_DAEMON_BASE_URL.to_owned(),
                     ui_state_store,
-                    config_path: config_path.clone(),
-                    config_last_modified: app_config::config_last_modified(&config_path),
-                    repositories: Vec::new(),
-                    active_repository_index: None,
-                    repo_root: PathBuf::from("."),
-                    github_repo_slug: None,
+                    config_path,
+                    config_last_modified,
+                    repositories,
+                    active_repository_index,
+                    repo_root,
+                    github_repo_slug,
                     worktrees: Vec::new(),
                     worktree_stats_loading: false,
                     worktree_prs_loading: false,
@@ -838,8 +901,8 @@ impl ArborWindow {
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
-                    active_backend_kind: TerminalBackendKind::Embedded,
-                    theme_kind: ThemeKind::One,
+                    active_backend_kind,
+                    theme_kind,
                     left_pane_width: startup_ui_state
                         .left_pane_width
                         .map_or(DEFAULT_LEFT_PANE_WIDTH, |width| width as f32),
@@ -854,14 +917,14 @@ impl ArborWindow {
                     terminal_selection_drag_anchor: None,
                     create_modal: None,
                     delete_modal: None,
-                    outposts: Vec::new(),
-                    outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
+                    outposts,
+                    outpost_store,
                     active_outpost_index: None,
-                    remote_hosts: Vec::new(),
+                    remote_hosts,
                     ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
                     manage_hosts_modal: None,
                     manage_presets_modal: None,
-                    agent_presets: default_agent_presets(),
+                    agent_presets,
                     active_preset_tab: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
@@ -872,9 +935,9 @@ impl ArborWindow {
                     terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
-                    notifications_enabled: true,
+                    notifications_enabled,
                     window_is_active: true,
-                    notice: Some(format!("failed to read current directory: {error}")),
+                    notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
                     theme_toast: None,
                     theme_toast_generation: 0,
                     right_pane_tab: RightPaneTab::Changes,
@@ -900,100 +963,7 @@ impl ArborWindow {
             },
         };
 
-        let repo_root = match worktree::repo_root(&cwd) {
-            Ok(path) => path,
-            Err(error) => {
-                let github_repo_slug = github_repo_slug_for_repo(&cwd);
-                return Self {
-                    repository_store,
-                    daemon_session_store,
-                    terminal_daemon: None,
-                    daemon_base_url: DEFAULT_DAEMON_BASE_URL.to_owned(),
-                    ui_state_store,
-                    config_path: config_path.clone(),
-                    config_last_modified: app_config::config_last_modified(&config_path),
-                    repositories: Vec::new(),
-                    active_repository_index: None,
-                    repo_root: cwd,
-                    github_repo_slug,
-                    worktrees: Vec::new(),
-                    worktree_stats_loading: false,
-                    worktree_prs_loading: false,
-                    active_worktree_index: None,
-                    changed_files: Vec::new(),
-                    selected_changed_file: None,
-                    terminals: Vec::new(),
-                    diff_sessions: Vec::new(),
-                    active_diff_session_id: None,
-                    file_view_sessions: Vec::new(),
-                    active_file_view_session_id: None,
-                    next_file_view_session_id: 1,
-                    file_view_scroll_handle: UniformListScrollHandle::new(),
-                    file_view_editing: false,
-                    active_terminal_by_worktree: HashMap::new(),
-                    next_terminal_id: 1,
-                    next_diff_session_id: 1,
-                    active_backend_kind: TerminalBackendKind::Embedded,
-                    theme_kind: ThemeKind::One,
-                    left_pane_width: startup_ui_state
-                        .left_pane_width
-                        .map_or(DEFAULT_LEFT_PANE_WIDTH, |width| width as f32),
-                    right_pane_width: startup_ui_state
-                        .right_pane_width
-                        .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
-                    terminal_focus: cx.focus_handle(),
-                    terminal_scroll_handle: ScrollHandle::new(),
-                    center_tabs_scroll_handle: ScrollHandle::new(),
-                    diff_scroll_handle: UniformListScrollHandle::new(),
-                    terminal_selection: None,
-                    terminal_selection_drag_anchor: None,
-                    create_modal: None,
-                    delete_modal: None,
-                    outposts: Vec::new(),
-                    outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
-                    active_outpost_index: None,
-                    remote_hosts: Vec::new(),
-                    ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
-                    manage_hosts_modal: None,
-                    manage_presets_modal: None,
-                    agent_presets: default_agent_presets(),
-                    active_preset_tab: None,
-                    pending_diff_scroll_to_file: None,
-                    focus_terminal_on_next_render: true,
-                    git_action_in_flight: None,
-                    top_bar_quick_actions_open: false,
-                    top_bar_quick_actions_submenu: None,
-                    ide_launchers: Vec::new(),
-                    terminal_launchers: Vec::new(),
-                    last_persisted_ui_state: startup_ui_state,
-                    last_ui_state_error: None,
-                    notifications_enabled: true,
-                    window_is_active: true,
-                    notice: Some(format!("failed to resolve git repository root: {error}")),
-                    theme_toast: None,
-                    theme_toast_generation: 0,
-                    right_pane_tab: RightPaneTab::Changes,
-                    right_pane_search: String::new(),
-                    right_pane_search_active: false,
-                    file_tree_entries: Vec::new(),
-                    expanded_dirs: HashSet::new(),
-                    selected_file_tree_entry: None,
-                    left_pane_visible: true,
-                    collapsed_repositories: HashSet::new(),
-                    worktree_nav_back: Vec::new(),
-                    worktree_nav_forward: Vec::new(),
-                    log_buffer: log_buffer.clone(),
-                    log_entries: Vec::new(),
-                    log_generation: 0,
-                    log_scroll_handle: ScrollHandle::new(),
-                    log_auto_scroll: true,
-                    logs_tab_open: false,
-                    logs_tab_active: false,
-                    quit_overlay_until: None,
-                    agent_ws_connected: false,
-                };
-            },
-        };
+        let repo_root = worktree::repo_root(&cwd).ok();
 
         tracing::info!(config = %config_path.display(), "loading configuration");
         let loaded_config = app_config::load_or_create_config();
@@ -1047,19 +1017,26 @@ impl ArborWindow {
         };
         let mut persist_repositories = false;
 
-        if repositories.is_empty()
-            || !repositories
-                .iter()
-                .any(|repository| repository.root == repo_root)
+        if let Some(ref root) = repo_root
+            && (repositories.is_empty()
+                || !repositories
+                    .iter()
+                    .any(|repository| &repository.root == root))
         {
-            repositories.push(RepositorySummary::from_root(repo_root.clone()));
+            repositories.push(RepositorySummary::from_root(root.clone()));
             persist_repositories = true;
         }
 
-        let active_repository_index = repositories
-            .iter()
-            .position(|repository| repository.root == repo_root)
-            .or(Some(0));
+        let active_repository_index = if let Some(ref root) = repo_root {
+            repositories
+                .iter()
+                .position(|repository| &repository.root == root)
+                .or(Some(0))
+        } else if !repositories.is_empty() {
+            Some(0)
+        } else {
+            None
+        };
         let active_repository = active_repository_index
             .and_then(|index| repositories.get(index))
             .cloned();
@@ -1122,7 +1099,8 @@ impl ArborWindow {
             repo_root: active_repository
                 .as_ref()
                 .map(|repository| repository.root.clone())
-                .unwrap_or(repo_root),
+                .or(repo_root)
+                .unwrap_or(cwd),
             github_repo_slug: active_repository.and_then(|repository| repository.github_repo_slug),
             worktrees: Vec::new(),
             worktree_stats_loading: false,
