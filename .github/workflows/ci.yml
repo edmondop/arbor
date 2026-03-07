@@ -136,7 +136,8 @@ jobs:
             libxcb1-dev:arm64 \
             libxkbcommon-dev:arm64 \
             libxkbcommon-x11-dev:arm64 \
-            libssl-dev:arm64
+            libssl-dev:arm64 \
+            zlib1g-dev:arm64
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
       - name: Build arbor-gui (linux arm64)
