@@ -72,7 +72,7 @@ const QUIT_ARM_WINDOW: Duration = Duration::from_millis(1200);
 const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
-const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 12;
+const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
 const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_LEFT_PANE_WIDTH: f32 = 290.;
 const DEFAULT_RIGHT_PANE_WIDTH: f32 = 340.;
@@ -10242,21 +10242,14 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
         return String::new();
     }
 
-    let mut chars = value.chars();
-    let mut output = String::new();
-
-    for _ in 0..max_chars {
-        let Some(ch) = chars.next() else {
-            return value.to_owned();
-        };
-        output.push(ch);
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_owned();
     }
 
-    if chars.next().is_some() {
-        output.push_str("...");
-    }
-
-    output
+    // Take max_chars - 1 characters + "…" so total stays within budget
+    let truncated: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{truncated}\u{2026}")
 }
 
 fn action_button(
