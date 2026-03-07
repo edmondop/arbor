@@ -8808,15 +8808,19 @@ fn format_relative_time(unix_ms: u64) -> String {
 }
 
 fn terminal_tab_title(session: &TerminalSession) -> String {
-    let Some(last_command) = session
+    if let Some(last_command) = session
         .last_command
         .as_ref()
         .filter(|command| !command.trim().is_empty())
-    else {
-        return String::new();
-    };
+    {
+        return truncate_with_ellipsis(last_command.trim(), TERMINAL_TAB_COMMAND_MAX_CHARS);
+    }
 
-    truncate_with_ellipsis(last_command.trim(), TERMINAL_TAB_COMMAND_MAX_CHARS)
+    if !session.title.is_empty() && !session.title.starts_with("term-") {
+        return truncate_with_ellipsis(&session.title, TERMINAL_TAB_COMMAND_MAX_CHARS);
+    }
+
+    String::new()
 }
 
 fn diff_tab_title(session: &DiffSession) -> String {
