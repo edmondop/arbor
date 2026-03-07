@@ -14142,7 +14142,88 @@ fn bounds_from_window_geometry(
     ))
 }
 
+/// When launched as a macOS `.app` bundle the process inherits a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`).  This function sources the user's login
+/// shell to obtain their real PATH and merges it with the current one so that
+/// tools like `gh` and `git` installed via Homebrew are found.
+fn augment_path_from_login_shell() {
+    // Only needed on macOS – other platforms inherit the full environment.
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let current_path = env::var("PATH").unwrap_or_default();
+
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+    let marker_start = "__PATH_START__";
+    let marker_end = "__PATH_END__";
+
+    let shell_path = match Command::new(&shell)
+        .args([
+            "-lic",
+            &format!("echo {marker_start}${{PATH}}{marker_end}"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .find_map(|line| {
+                    let start = line.find(marker_start)?;
+                    let after_start = start + marker_start.len();
+                    let end = line[after_start..].find(marker_end)?;
+                    Some(line[after_start..after_start + end].to_owned())
+                })
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+
+    // Merge: login-shell paths first, then current PATH, deduplicated.
+    let mut seen = HashSet::new();
+    let mut merged: Vec<&str> = Vec::new();
+
+    let paths_to_add = if shell_path.is_empty() {
+        // Fallback: prepend common Homebrew / user paths.
+        let home = env::var("HOME").unwrap_or_default();
+        vec![
+            "/opt/homebrew/bin".to_owned(),
+            "/opt/homebrew/sbin".to_owned(),
+            "/usr/local/bin".to_owned(),
+            format!("{home}/.local/bin"),
+        ]
+    } else {
+        shell_path.split(':').map(|s| s.to_owned()).collect()
+    };
+
+    // Borrow after building the vec so lifetimes are clear.
+    for dir in &paths_to_add {
+        if !dir.is_empty() && seen.insert(dir.as_str()) {
+            merged.push(dir.as_str());
+        }
+    }
+    for dir in current_path.split(':') {
+        if !dir.is_empty() && seen.insert(dir) {
+            merged.push(dir);
+        }
+    }
+
+    let new_path = merged.join(":");
+
+    // SAFETY: called at the very start of main(), before any threads are spawned.
+    #[allow(unsafe_code)]
+    unsafe {
+        env::set_var("PATH", &new_path);
+    }
+}
+
 fn main() {
+    augment_path_from_login_shell();
+
     let log_buffer = log_layer::LogBuffer::new();
 
     {
