@@ -91,7 +91,6 @@ const TAB_ICON_DIFF: &str = "\u{f440}";
 const TAB_ICON_LOGS: &str = "\u{f4ed}";
 const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 
-
 fn terminal_mono_font(cx: &App) -> gpui::Font {
     let fallbacks = FontFallbacks::from_fonts(
         TERMINAL_FONT_FAMILIES
@@ -2428,10 +2427,7 @@ impl ArborWindow {
 
     fn action_request_quit(&mut self, _: &RequestQuit, _: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
-        if self
-            .quit_overlay_until
-            .is_some_and(|until| now < until)
-        {
+        if self.quit_overlay_until.is_some_and(|until| now < until) {
             cx.quit();
             return;
         }
@@ -5290,28 +5286,32 @@ impl Render for ArborWindow {
             )
             .child(self.render_status_bar())
             .child(self.render_create_worktree_modal(cx))
-            .when(self.quit_overlay_until.is_some_and(|until| Instant::now() < until), |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .px_4()
-                                .py_2()
-                                .rounded_md()
-                                .bg(rgb(theme.chrome_bg))
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .text_sm()
-                                .text_color(rgb(theme.text_primary))
-                                .child("Hold ⌘Q to quit"),
-                        ),
-                )
-            })
+            .when(
+                self.quit_overlay_until
+                    .is_some_and(|until| Instant::now() < until),
+                |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(theme.chrome_bg))
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .text_sm()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Hold ⌘Q to quit"),
+                            ),
+                    )
+                },
+            )
     }
 }
 
@@ -6598,7 +6598,9 @@ fn github_repo_slug_for_repo(repo_root: &Path) -> Option<String> {
 
 fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
     let (owner, _) = repo_slug.split_once('/')?;
-    Some(format!("https://avatars.githubusercontent.com/{owner}?size=96"))
+    Some(format!(
+        "https://avatars.githubusercontent.com/{owner}?size=96"
+    ))
 }
 
 fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
@@ -7700,7 +7702,6 @@ fn parse_theme_kind(theme: Option<&str>) -> Result<ThemeKind, String> {
         )),
     }
 }
-
 
 fn open_arbor_window(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
