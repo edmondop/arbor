@@ -2,4 +2,8 @@
 .DS_Store
 crates/arbor-web-ui/app/node_modules
 crates/arbor-web-ui/app/dist
+crates/arbor-web-ui/app/e2e/test-results
+crates/arbor-web-ui/app/e2e/screenshots
+crates/arbor-web-ui/app/playwright-report
+crates/arbor-web-ui/app/test-results
 /homebrew-arbor

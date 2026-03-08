@@ -1,0 +1,153 @@
+import type { Repository, Worktree, TerminalSession, ChangedFile } from "./types";
+import { fetchRepositories, fetchWorktrees, fetchTerminals, fetchChangedFiles } from "./api";
+
+export type AppState = {
+  repositories: Repository[];
+  worktrees: Worktree[];
+  sessions: TerminalSession[];
+  changedFiles: ChangedFile[];
+
+  selectedRepoRoot: string | null;
+  selectedWorktreePath: string | null;
+  activeSessionId: string | null;
+
+  loading: boolean;
+  error: string | null;
+};
+
+export function createInitialState(): AppState {
+  return {
+    repositories: [],
+    worktrees: [],
+    sessions: [],
+    changedFiles: [],
+    selectedRepoRoot: null,
+    selectedWorktreePath: null,
+    activeSessionId: null,
+    loading: true,
+    error: null,
+  };
+}
+
+type Listener = () => void;
+
+const listeners = new Set<Listener>();
+
+export function subscribe(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+export function notify(): void {
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+export let state = createInitialState();
+
+export function updateState(partial: Partial<AppState>): void {
+  Object.assign(state, partial);
+  notify();
+}
+
+export async function refresh(): Promise<void> {
+  updateState({ loading: true, error: null });
+
+  try {
+    const [repositories, worktrees, sessions] = await Promise.all([
+      fetchRepositories(),
+      fetchWorktrees(),
+      fetchTerminals(),
+    ]);
+
+    // Validate selections still exist
+    const selectedRepoRoot =
+      state.selectedRepoRoot !== null &&
+      repositories.some((r) => r.root === state.selectedRepoRoot)
+        ? state.selectedRepoRoot
+        : null;
+
+    const selectedWorktreePath =
+      state.selectedWorktreePath !== null &&
+      worktrees.some((w) => w.path === state.selectedWorktreePath)
+        ? state.selectedWorktreePath
+        : null;
+
+    const activeSessionId =
+      state.activeSessionId !== null &&
+      sessions.some((s) => s.session_id === state.activeSessionId)
+        ? state.activeSessionId
+        : null;
+
+    updateState({
+      repositories,
+      worktrees,
+      sessions,
+      selectedRepoRoot,
+      selectedWorktreePath,
+      activeSessionId,
+      loading: false,
+    });
+
+    // Fetch changed files for selected worktree
+    if (selectedWorktreePath !== null) {
+      refreshChangedFiles(selectedWorktreePath);
+    } else {
+      updateState({ changedFiles: [] });
+    }
+  } catch (error) {
+    updateState({
+      loading: false,
+      error: error instanceof Error ? error.message : "unknown request failure",
+    });
+  }
+}
+
+export function refreshChangedFiles(worktreePath: string): void {
+  fetchChangedFiles(worktreePath)
+    .then((changedFiles) => {
+      if (state.selectedWorktreePath === worktreePath) {
+        updateState({ changedFiles });
+      }
+    })
+    .catch(() => {
+      // Silently ignore change detection failures
+    });
+}
+
+export function selectRepository(root: string | null): void {
+  const newRoot = state.selectedRepoRoot === root ? null : root;
+  updateState({
+    selectedRepoRoot: newRoot,
+    selectedWorktreePath: null,
+    changedFiles: [],
+  });
+}
+
+export function selectWorktree(path: string | null): void {
+  const newPath = state.selectedWorktreePath === path ? null : path;
+  updateState({ selectedWorktreePath: newPath, changedFiles: [] });
+  if (newPath !== null) {
+    refreshChangedFiles(newPath);
+  }
+}
+
+export function setActiveSession(sessionId: string | null): void {
+  updateState({ activeSessionId: sessionId });
+}
+
+export function filteredWorktrees(): Worktree[] {
+  if (state.selectedRepoRoot === null) return state.worktrees;
+  return state.worktrees.filter((w) => w.repo_root === state.selectedRepoRoot);
+}
+
+export function filteredSessions(): TerminalSession[] {
+  if (state.selectedRepoRoot === null) return state.sessions;
+  const workspacePaths = new Set(
+    state.worktrees
+      .filter((w) => w.repo_root === state.selectedRepoRoot)
+      .map((w) => w.path),
+  );
+  return state.sessions.filter((s) => workspacePaths.has(s.workspace_id));
+}

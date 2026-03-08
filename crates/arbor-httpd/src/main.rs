@@ -5,6 +5,7 @@ use {
     crate::terminal_daemon::{LocalTerminalDaemon, LocalTerminalDaemonError, SessionEvent},
     arbor_core::{
         agent::AgentState,
+        changes,
         daemon::{
             CreateOrAttachRequest, DaemonSessionRecord, DetachRequest, JsonDaemonSessionStore,
             KillRequest, ResizeRequest, SignalRequest, SnapshotRequest, TerminalDaemon,
@@ -105,6 +106,19 @@ struct WorktreeDto {
 #[derive(Debug, Deserialize)]
 struct WorktreeQuery {
     repo_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangesQuery {
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChangedFileDto {
+    path: String,
+    kind: String,
+    additions: usize,
+    deletions: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +229,7 @@ fn router(state: AppState, web_ui_available: bool) -> Router {
         .route("/health", get(health))
         .route("/repositories", get(list_repositories))
         .route("/worktrees", get(list_worktrees))
+        .route("/worktrees/changes", get(list_worktree_changes))
         .route("/terminals", get(list_terminals).post(create_terminal))
         .route(
             "/terminals/{session_id}/snapshot",
@@ -312,6 +327,30 @@ async fn list_worktrees(
     });
 
     Ok(Json(worktrees))
+}
+
+async fn list_worktree_changes(
+    Query(query): Query<ChangesQuery>,
+) -> ApiResult<Vec<ChangedFileDto>> {
+    let worktree_path = PathBuf::from(&query.path);
+    let files = changes::changed_files(&worktree_path).map_err(|error| {
+        internal_error(format!(
+            "failed to get changes for `{}`: {error}",
+            worktree_path.display()
+        ))
+    })?;
+
+    let dtos = files
+        .into_iter()
+        .map(|file| ChangedFileDto {
+            path: file.path.display().to_string(),
+            kind: file.kind.to_string(),
+            additions: file.additions,
+            deletions: file.deletions,
+        })
+        .collect();
+
+    Ok(Json(dtos))
 }
 
 async fn list_terminals(State(state): State<AppState>) -> ApiResult<Vec<DaemonSessionRecord>> {

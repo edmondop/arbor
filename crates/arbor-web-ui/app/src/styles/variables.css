@@ -1,0 +1,34 @@
+:root {
+  --bg: #0f1115;
+  --bg-surface: #16181d;
+  --bg-surface2: #1c1f26;
+  --bg-hover: #22252e;
+  --bg-active: #2a2d37;
+
+  --text: #e4e4e7;
+  --text-muted: #71717a;
+  --text-faint: #52525b;
+
+  --accent: #89b4fa;
+  --accent-hover: #a6c8ff;
+  --accent-subtle: rgba(137, 180, 250, 0.1);
+
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --yellow: #f9e2af;
+  --blue: #89b4fa;
+
+  --border: #27272a;
+  --border-strong: #3f3f46;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "CaskaydiaMono Nerd Font Mono", ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --sidebar-width: 260px;
+  --changes-width: 280px;
+  --status-bar-height: 28px;
+}
