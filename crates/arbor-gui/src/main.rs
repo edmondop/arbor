@@ -12295,92 +12295,90 @@ impl Render for ArborWindow {
                 )
             }))
             .when(self.quit_overlay_until.is_some(), |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
+                this
+                    .child(
+                        div()
+                            .id("quit-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .bg(rgb(0x000000))
+                            .opacity(0.5)
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.action_dismiss_quit(window, cx);
-                            }),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .bg(rgb(0x000000))
-                                .opacity(0.5),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .px_6()
-                                        .py_4()
-                                        .rounded_lg()
-                                        .bg(rgb(theme.chrome_bg))
-                                        .border_1()
-                                        .border_color(rgb(theme.border))
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .gap_3()
-                                        .on_mouse_down(MouseButton::Left, |_, _, _| {})
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(theme.text_primary))
-                                                .child("Are you sure you want to quit Arbor?"),
-                                        )
-                                        .child(
-                                            div()
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .occlude()
+                            .child(
+                                div()
+                                    .px_6()
+                                    .py_4()
+                                    .rounded_lg()
+                                    .bg(rgb(theme.chrome_bg))
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(theme.text_primary))
+                                            .child("Are you sure you want to quit Arbor?"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(
+                                                action_button(
+                                                    theme,
+                                                    "quit-cancel",
+                                                    "Cancel",
+                                                    false,
+                                                    false,
+                                                )
+                                                .min_w(px(64.))
                                                 .flex()
-                                                .gap_2()
-                                                .child(
-                                                    action_button(
-                                                        theme,
-                                                        "quit-cancel",
-                                                        "Cancel",
-                                                        false,
-                                                        false,
-                                                    )
+                                                .justify_center()
+                                                .on_click(cx.listener(
+                                                    |this, _, window, cx| {
+                                                        this.action_dismiss_quit(window, cx);
+                                                    },
+                                                )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("quit-confirm")
+                                                    .cursor_pointer()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(rgb(0xc94040))
+                                                    .bg(rgb(0xc94040))
+                                                    .min_w(px(64.))
+                                                    .flex()
+                                                    .justify_center()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .text_xs()
+                                                    .text_color(rgb(0xffffff))
+                                                    .child("Quit")
                                                     .on_click(cx.listener(
                                                         |this, _, window, cx| {
-                                                            this.action_dismiss_quit(window, cx);
+                                                            this.action_confirm_quit(window, cx);
                                                         },
                                                     )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("quit-confirm")
-                                                        .cursor_pointer()
-                                                        .rounded_sm()
-                                                        .border_1()
-                                                        .border_color(rgb(0xc94040))
-                                                        .bg(rgb(0xc94040))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .text_xs()
-                                                        .text_color(rgb(0xffffff))
-                                                        .child("Quit")
-                                                        .on_click(cx.listener(
-                                                            |this, _, window, cx| {
-                                                                this.action_confirm_quit(
-                                                                    window, cx,
-                                                                );
-                                                            },
-                                                        )),
-                                                ),
-                                        ),
-                                ),
-                        ),
-                )
+                                            ),
+                                    ),
+                            ),
+                    )
             })
     }
 }
