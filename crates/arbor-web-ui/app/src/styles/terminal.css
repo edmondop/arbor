@@ -86,6 +86,16 @@
   background: var(--red);
 }
 
+.terminal-tab-icon {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.terminal-tab.active .terminal-tab-icon {
+  color: var(--accent);
+}
+
 .terminal-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;

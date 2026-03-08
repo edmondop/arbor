@@ -57,7 +57,7 @@ test.describe("Arbor Web UI", () => {
               shell: "/bin/zsh",
               cols: 120,
               rows: 35,
-              title: "arbor",
+              title: "claude",
               last_command: "just test",
               output_tail: "All tests passed!",
               exit_code: null,
@@ -114,46 +114,51 @@ test.describe("Arbor Web UI", () => {
     await page.screenshot({ path: "e2e/screenshots/layout.png", fullPage: true });
   });
 
-  test("sidebar shows repositories", async ({ page }) => {
+  test("sidebar shows repos with worktrees grouped underneath", async ({ page }) => {
     const sidebar = page.getByTestId("sidebar");
-    await expect(sidebar.locator(".sidebar-item-name").getByText("arbor", { exact: true })).toBeVisible();
-    await expect(sidebar.locator(".sidebar-item-name").getByText("moltis", { exact: true })).toBeVisible();
+
+    // Repo headers
+    await expect(sidebar.locator(".repo-name").getByText("arbor", { exact: true })).toBeVisible();
+    await expect(sidebar.locator(".repo-name").getByText("moltis", { exact: true })).toBeVisible();
+
+    // Worktree cards under their repo
+    await expect(sidebar.locator(".wt-branch").getByText("main").first()).toBeVisible();
+    await expect(sidebar.locator(".wt-branch").getByText("feature/auth")).toBeVisible();
+
+    // Worktree count badges
+    await expect(sidebar.locator(".repo-wt-count").getByText("2")).toBeVisible();
+    await expect(sidebar.locator(".repo-wt-count").getByText("1")).toBeVisible();
   });
 
-  test("sidebar shows worktrees", async ({ page }) => {
-    const sidebar = page.getByTestId("sidebar");
-    await expect(sidebar.locator(".sidebar-item-meta").getByText(/^main/).first()).toBeVisible();
-    await expect(sidebar.locator(".sidebar-item-meta").getByText(/feature\/auth/)).toBeVisible();
-  });
-
-  test("clicking repo filters worktrees", async ({ page }) => {
+  test("collapsing repo hides its worktrees", async ({ page }) => {
     const sidebar = page.getByTestId("sidebar");
 
-    // Click the moltis repo
-    await sidebar.getByRole("button", { name: /moltis/ }).first().click();
+    // Click chevron on the arbor repo to collapse
+    const arborGroup = sidebar.locator(".repo-group").first();
+    await arborGroup.locator(".repo-chevron").click();
 
-    // Should only show moltis worktrees
-    await expect(sidebar.getByText("feature/auth")).not.toBeVisible();
+    // Worktrees for arbor should be hidden
+    await expect(sidebar.locator(".wt-branch").getByText("feature/auth")).not.toBeVisible();
+    // Moltis worktree should still show
+    await expect(sidebar.locator(".wt-branch").getByText("main")).toBeVisible();
 
     await page.screenshot({
-      path: "e2e/screenshots/repo-filter.png",
+      path: "e2e/screenshots/repo-collapsed.png",
       fullPage: true,
     });
   });
 
   test("terminal panel shows session tabs", async ({ page }) => {
     const terminalPanel = page.getByTestId("terminal-panel");
-    await expect(terminalPanel.getByText("arbor")).toBeVisible();
-    await expect(terminalPanel.getByText("feature-auth")).toBeVisible();
+    await expect(terminalPanel.locator(".terminal-tab-label").getByText("claude")).toBeVisible();
+    await expect(terminalPanel.locator(".terminal-tab-label").getByText("feature-auth")).toBeVisible();
   });
 
   test("changes panel shows files when worktree selected", async ({ page }) => {
     const sidebar = page.getByTestId("sidebar");
 
-    // Select the arbor repo first
-    await sidebar.getByRole("button", { name: /arbor/ }).first().click();
-    // Select the main worktree
-    await sidebar.getByRole("button", { name: /main/ }).first().click();
+    // Click the main worktree card under arbor
+    await sidebar.locator(".wt-card").first().click();
 
     const changesPanel = page.getByTestId("changes-panel");
     await expect(changesPanel.getByText("src/main.rs")).toBeVisible();
@@ -175,10 +180,9 @@ test.describe("Arbor Web UI", () => {
   });
 
   test("full layout screenshot", async ({ page }) => {
-    // Select a repo and worktree for full context
+    // Select a worktree for full context
     const sidebar = page.getByTestId("sidebar");
-    await sidebar.getByRole("button", { name: /arbor/ }).first().click();
-    await sidebar.getByRole("button", { name: /main/ }).first().click();
+    await sidebar.locator(".wt-card").first().click();
 
     // Wait for changes to load
     const changesPanel = page.getByTestId("changes-panel");

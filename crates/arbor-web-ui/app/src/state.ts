@@ -116,15 +116,6 @@ export function refreshChangedFiles(worktreePath: string): void {
     });
 }
 
-export function selectRepository(root: string | null): void {
-  const newRoot = state.selectedRepoRoot === root ? null : root;
-  updateState({
-    selectedRepoRoot: newRoot,
-    selectedWorktreePath: null,
-    changedFiles: [],
-  });
-}
-
 export function selectWorktree(path: string | null): void {
   const newPath = state.selectedWorktreePath === path ? null : path;
   updateState({ selectedWorktreePath: newPath, changedFiles: [] });
@@ -137,17 +128,6 @@ export function setActiveSession(sessionId: string | null): void {
   updateState({ activeSessionId: sessionId });
 }
 
-export function filteredWorktrees(): Worktree[] {
-  if (state.selectedRepoRoot === null) return state.worktrees;
-  return state.worktrees.filter((w) => w.repo_root === state.selectedRepoRoot);
-}
-
 export function filteredSessions(): TerminalSession[] {
-  if (state.selectedRepoRoot === null) return state.sessions;
-  const workspacePaths = new Set(
-    state.worktrees
-      .filter((w) => w.repo_root === state.selectedRepoRoot)
-      .map((w) => w.path),
-  );
-  return state.sessions.filter((s) => workspacePaths.has(s.workspace_id));
+  return state.sessions;
 }

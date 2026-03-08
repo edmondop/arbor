@@ -1,11 +1,14 @@
 import { el, formatAge, shortPath } from "../utils";
+import type { Repository, Worktree } from "../types";
 import {
   state,
   subscribe,
-  selectRepository,
+  notify,
   selectWorktree,
-  filteredWorktrees,
 } from "../state";
+
+/** Track which repo groups are collapsed (by repo root). */
+const collapsedRepos = new Set<string>();
 
 export function createSidebar(): HTMLElement {
   const sidebar = el("aside", "sidebar");
@@ -15,12 +18,25 @@ export function createSidebar(): HTMLElement {
     sidebar.replaceChildren();
 
     const header = el("div", "sidebar-header");
-    const title = el("h2", "sidebar-title", "Arbor");
-    header.append(title);
+    header.append(el("h2", "sidebar-title", "Arbor"));
     sidebar.append(header);
 
-    renderRepos(sidebar);
-    renderWorktrees(sidebar);
+    const scroll = el("div", "sidebar-scroll");
+
+    if (state.repositories.length === 0) {
+      scroll.append(el("div", "sidebar-empty", "No repositories"));
+      sidebar.append(scroll);
+      return;
+    }
+
+    for (const repo of state.repositories) {
+      const repoWorktrees = state.worktrees.filter(
+        (w) => w.repo_root === repo.root,
+      );
+      scroll.append(renderRepoGroup(repo, repoWorktrees));
+    }
+
+    sidebar.append(scroll);
   }
 
   subscribe(render);
@@ -28,93 +44,80 @@ export function createSidebar(): HTMLElement {
   return sidebar;
 }
 
-function renderRepos(container: HTMLElement): void {
-  const section = el("div", "sidebar-section");
-  const heading = el("div", "sidebar-section-heading", "Repositories");
-  section.append(heading);
+function renderRepoGroup(repo: Repository, worktrees: Worktree[]): HTMLElement {
+  const isCollapsed = collapsedRepos.has(repo.root);
+  const group = el("div", "repo-group");
 
-  if (state.repositories.length === 0) {
-    section.append(el("div", "sidebar-empty", "No repositories"));
-    container.append(section);
-    return;
-  }
+  // Repository header row
+  const header = el("div", "repo-header");
+  header.addEventListener("click", (e) => {
+    // Don't toggle if clicking the chevron (it has its own handler)
+    if ((e.target as HTMLElement).closest(".repo-chevron")) return;
+  });
 
-  const list = el("ul", "sidebar-list");
-  for (const repo of state.repositories) {
-    const item = el("li", "sidebar-item");
-    if (state.selectedRepoRoot === repo.root) {
-      item.classList.add("active");
+  const chevron = el("span", "repo-chevron", isCollapsed ? "\u25B8" : "\u25BE");
+  chevron.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (collapsedRepos.has(repo.root)) {
+      collapsedRepos.delete(repo.root);
+    } else {
+      collapsedRepos.add(repo.root);
     }
+    notify();
+  });
 
-    const btn = el("button", "sidebar-item-btn");
-    btn.addEventListener("click", () => selectRepository(repo.root));
+  const icon = el("span", "repo-icon", repo.label.charAt(0).toUpperCase());
 
-    const icon = el("span", "sidebar-icon", repoIcon(repo.label));
-    const info = el("div", "sidebar-item-info");
-    info.append(
-      el("span", "sidebar-item-name", repo.label),
-      el("span", "sidebar-item-meta", shortPath(repo.root)),
-    );
-    btn.append(icon, info);
-    item.append(btn);
-    list.append(item);
+  const name = el("span", "repo-name", repo.label);
+
+  const count = el("span", "repo-wt-count", String(worktrees.length));
+
+  header.append(chevron, icon, name, count);
+  group.append(header);
+
+  // Worktree cards (when not collapsed)
+  if (!isCollapsed) {
+    const wtList = el("div", "wt-list");
+    for (const wt of worktrees) {
+      wtList.append(renderWorktreeCard(wt));
+    }
+    group.append(wtList);
   }
-  section.append(list);
-  container.append(section);
+
+  return group;
 }
 
-function renderWorktrees(container: HTMLElement): void {
-  const section = el("div", "sidebar-section");
-  const heading = el("div", "sidebar-section-heading", "Worktrees");
-  section.append(heading);
+function renderWorktreeCard(wt: Worktree): HTMLElement {
+  const isActive = state.selectedWorktreePath === wt.path;
+  const card = el("div", "wt-card");
+  if (isActive) card.classList.add("active");
 
-  const worktrees = filteredWorktrees();
-  if (worktrees.length === 0) {
-    section.append(
-      el(
-        "div",
-        "sidebar-empty",
-        state.selectedRepoRoot !== null
-          ? "No worktrees for this repo"
-          : "Select a repository",
-      ),
-    );
-    container.append(section);
-    return;
+  card.addEventListener("click", () => selectWorktree(wt.path));
+
+  // Git branch icon
+  const branchIcon = el("span", "wt-branch-icon", "\u{e725}");
+
+  // Text column: two lines
+  const info = el("div", "wt-info");
+
+  // Line 1: branch name + diff summary (if we had it) + age
+  const line1 = el("div", "wt-line1");
+  const branchName = el("span", "wt-branch", wt.branch);
+  line1.append(branchName);
+
+  if (wt.last_activity_unix_ms !== null) {
+    line1.append(el("span", "wt-age", formatAge(wt.last_activity_unix_ms)));
   }
 
-  const list = el("ul", "sidebar-list");
-  for (const wt of worktrees) {
-    const item = el("li", "sidebar-item");
-    if (state.selectedWorktreePath === wt.path) {
-      item.classList.add("active");
-    }
-
-    const btn = el("button", "sidebar-item-btn");
-    btn.addEventListener("click", () => selectWorktree(wt.path));
-
-    const branchChar = wt.branch.charAt(0).toUpperCase();
-    const icon = el("span", "sidebar-icon branch-icon", branchChar);
-    const info = el("div", "sidebar-item-info");
-    const nameText = shortPath(wt.path);
-    const metaParts = [wt.branch];
-    if (wt.is_primary_checkout) metaParts.push("primary");
-    if (wt.last_activity_unix_ms !== null) {
-      metaParts.push(formatAge(wt.last_activity_unix_ms));
-    }
-
-    info.append(
-      el("span", "sidebar-item-name", nameText),
-      el("span", "sidebar-item-meta", metaParts.join(" · ")),
-    );
-    btn.append(icon, info);
-    item.append(btn);
-    list.append(item);
+  // Line 2: path + primary badge
+  const line2 = el("div", "wt-line2");
+  line2.append(el("span", "wt-path", shortPath(wt.path)));
+  if (wt.is_primary_checkout) {
+    line2.append(el("span", "wt-badge", "primary"));
   }
-  section.append(list);
-  container.append(section);
-}
 
-function repoIcon(label: string): string {
-  return label.charAt(0).toUpperCase();
+  info.append(line1, line2);
+  card.append(branchIcon, info);
+
+  return card;
 }
