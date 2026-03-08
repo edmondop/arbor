@@ -117,6 +117,8 @@ const PRESET_ICON_CLAUDE_PNG: &[u8] = include_bytes!("../../../assets/preset-ico
 const PRESET_ICON_CODEX_SVG: &[u8] = include_bytes!("../../../assets/preset-icons/codex-white.svg");
 const PRESET_ICON_OPENCODE_SVG: &[u8] =
     include_bytes!("../../../assets/preset-icons/opencode-white.svg");
+const PRESET_ICON_COPILOT_SVG: &[u8] =
+    include_bytes!("../../../assets/preset-icons/copilot-white.svg");
 
 fn terminal_mono_font(cx: &App) -> gpui::Font {
     let fallbacks = FontFallbacks::from_fonts(
@@ -392,16 +394,18 @@ enum AgentPresetKind {
     Codex,
     Claude,
     OpenCode,
+    Copilot,
 }
 
 impl AgentPresetKind {
-    const ORDER: [Self; 3] = [Self::Codex, Self::Claude, Self::OpenCode];
+    const ORDER: [Self; 4] = [Self::Codex, Self::Claude, Self::OpenCode, Self::Copilot];
 
     fn key(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -410,6 +414,7 @@ impl AgentPresetKind {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
             Self::OpenCode => "OpenCode",
+            Self::Copilot => "Copilot",
         }
     }
 
@@ -418,6 +423,7 @@ impl AgentPresetKind {
             Self::Codex => "\u{f121}",
             Self::Claude => "C",
             Self::OpenCode => "\u{f085}",
+            Self::Copilot => "\u{f09b}",
         }
     }
 
@@ -430,6 +436,7 @@ impl AgentPresetKind {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
             "opencode" => Some(Self::OpenCode),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -444,6 +451,11 @@ impl AgentPresetKind {
         } else {
             Self::ORDER[(current + 1) % Self::ORDER.len()]
         }
+    }
+
+    /// Check if the default command for this preset is available in PATH.
+    fn is_installed(self) -> bool {
+        is_command_in_path(self.default_command())
     }
 }
 
@@ -878,6 +890,10 @@ struct ArborWindow {
     quit_overlay_until: Option<Instant>,
     agent_ws_connected: bool,
     ime_marked_text: Option<String>,
+    welcome_clone_url: String,
+    welcome_clone_url_active: bool,
+    welcome_cloning: bool,
+    welcome_clone_error: Option<String>,
 }
 
 impl ArborWindow {
@@ -1078,6 +1094,10 @@ impl ArborWindow {
                     quit_overlay_until: None,
                     agent_ws_connected: false,
                     ime_marked_text: None,
+                    welcome_clone_url: String::new(),
+                    welcome_clone_url_active: false,
+                    welcome_cloning: false,
+                    welcome_clone_error: None,
                 };
 
                 return app;
@@ -1328,6 +1348,10 @@ impl ArborWindow {
             quit_overlay_until: None,
             agent_ws_connected: false,
             ime_marked_text: None,
+            welcome_clone_url: String::new(),
+            welcome_clone_url_active: false,
+            welcome_cloning: false,
+            welcome_clone_error: None,
         };
 
         app.refresh_worktrees(cx);
@@ -3268,6 +3292,225 @@ impl ArborWindow {
         .detach();
     }
 
+    fn submit_welcome_clone(&mut self, cx: &mut Context<Self>) {
+        let url = self.welcome_clone_url.trim().to_owned();
+        if url.is_empty() {
+            self.welcome_clone_error = Some("Please enter a repository URL".to_owned());
+            cx.notify();
+            return;
+        }
+        if self.welcome_cloning {
+            return;
+        }
+
+        let repo_name = extract_repo_name_from_url(&url);
+        if repo_name.is_empty() {
+            self.welcome_clone_error =
+                Some("Could not determine repository name from URL".to_owned());
+            cx.notify();
+            return;
+        }
+
+        let clone_dir = match user_home_dir() {
+            Ok(home) => home.join(".arbor").join("repos").join(&repo_name),
+            Err(error) => {
+                self.welcome_clone_error = Some(error);
+                cx.notify();
+                return;
+            },
+        };
+
+        if clone_dir.exists() {
+            self.add_repository_from_path(clone_dir, cx);
+            self.welcome_clone_url.clear();
+            self.welcome_clone_url_active = false;
+            self.welcome_clone_error = None;
+            return;
+        }
+
+        self.welcome_cloning = true;
+        self.welcome_clone_error = None;
+        cx.notify();
+
+        let clone_url = url.clone();
+        let target = clone_dir.clone();
+        cx.spawn(async move |this, cx| {
+            let result = std::thread::spawn(move || {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!("failed to create directory `{}`: {e}", parent.display())
+                    })?;
+                }
+                let output = Command::new("git")
+                    .arg("clone")
+                    .arg(&clone_url)
+                    .arg(&target)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .map_err(|e| format!("failed to run git clone: {e}"))?;
+
+                if output.status.success() {
+                    Ok(target)
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(format!("git clone failed: {}", stderr.trim()))
+                }
+            })
+            .join()
+            .unwrap_or_else(|_| Err("git clone thread panicked".to_owned()));
+
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(cloned_path) => {
+                    this.welcome_cloning = false;
+                    this.welcome_clone_url.clear();
+                    this.welcome_clone_url_active = false;
+                    this.welcome_clone_error = None;
+                    this.add_repository_from_path(cloned_path, cx);
+                },
+                Err(error) => {
+                    this.welcome_cloning = false;
+                    this.welcome_clone_error = Some(error);
+                    cx.notify();
+                },
+            });
+        })
+        .detach();
+    }
+
+    fn render_welcome_pane(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let clone_url_active = self.welcome_clone_url_active;
+        let cloning = self.welcome_cloning;
+        let clone_error = self.welcome_clone_error.clone();
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .bg(rgb(theme.app_bg))
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(theme.text_primary))
+                    .child("Welcome to Arbor"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(theme.text_muted))
+                    .text_center()
+                    .max_w(px(460.))
+                    .child("Get started by adding a repository. You can open a local git repository or clone one from a URL."),
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .w(px(420.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_muted))
+                            .child("CLONE FROM URL"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                modal_input_field(
+                                    theme,
+                                    "welcome-clone-url",
+                                    "Repository URL",
+                                    &self.welcome_clone_url,
+                                    "https://github.com/user/repo or git@github.com:user/repo.git",
+                                    clone_url_active,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.welcome_clone_url_active = true;
+                                    cx.notify();
+                                })),
+                            )
+                            .when_some(clone_error, |this, error| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.notice_text))
+                                        .child(error),
+                                )
+                            })
+                            .child(
+                                action_button(
+                                    theme,
+                                    "welcome-clone-button",
+                                    if cloning { "Cloning..." } else { "Clone Repository" },
+                                    false,
+                                    cloning,
+                                )
+                                .when(!cloning, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit_welcome_clone(cx);
+                                    }))
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(1.))
+                                    .bg(rgb(theme.border)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child("or"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(1.))
+                                    .bg(rgb(theme.border)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_muted))
+                            .child("LOCAL REPOSITORY"),
+                    )
+                    .child(
+                        action_button(
+                            theme,
+                            "welcome-add-local",
+                            "Open Local Repository",
+                            false,
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_add_repository_picker(cx);
+                        })),
+                    ),
+            )
+    }
+
     fn open_external_url(&mut self, url: &str, cx: &mut Context<Self>) {
         cx.open_url(url);
     }
@@ -5126,6 +5369,52 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         if event.is_held {
+            return;
+        }
+
+        if self.welcome_clone_url_active {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.welcome_clone_url_active = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                },
+                "backspace" => {
+                    self.welcome_clone_url.pop();
+                    self.welcome_clone_error = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.submit_welcome_clone(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+            if event.keystroke.modifiers.platform {
+                if event.keystroke.key.as_str() == "v"
+                    && let Some(clipboard) = cx.read_from_clipboard()
+                {
+                    let text = clipboard.text().unwrap_or_default();
+                    self.welcome_clone_url.push_str(&text);
+                    self.welcome_clone_error = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                return;
+            }
+            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+                return;
+            }
+            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                self.welcome_clone_url.push_str(key_char);
+                self.welcome_clone_error = None;
+                cx.notify();
+                cx.stop_propagation();
+            }
             return;
         }
 
@@ -8986,9 +9275,13 @@ impl ArborWindow {
                             .border_l_1()
                             .border_color(rgb(theme.border))
                             .border_b_1()
-                            .child(preset_button(AgentPresetKind::Codex))
-                            .child(preset_button(AgentPresetKind::Claude))
-                            .child(preset_button(AgentPresetKind::OpenCode))
+                            .children(
+                                AgentPresetKind::ORDER
+                                    .iter()
+                                    .copied()
+                                    .filter(|kind| installed_preset_kinds().contains(kind))
+                                    .map(&preset_button),
+                            )
                             .children(self.repo_presets.iter().enumerate().map(|(index, preset)| {
                                 let icon_text = preset.icon.clone();
                                 let name_text = preset.name.clone();
@@ -11461,9 +11754,7 @@ impl ArborWindow {
                             .gap_0()
                             .border_b_1()
                             .border_color(rgb(theme.border))
-                            .child(tab_button(AgentPresetKind::Codex))
-                            .child(tab_button(AgentPresetKind::Claude))
-                            .child(tab_button(AgentPresetKind::OpenCode)),
+                            .children(AgentPresetKind::ORDER.iter().copied().map(&tab_button)),
                     )
                     .child(
                         modal_input_field(
@@ -11997,6 +12288,26 @@ impl ArborWindow {
     }
 }
 
+fn is_command_in_path(command: &str) -> bool {
+    use std::env;
+    let path_var = env::var_os("PATH").unwrap_or_default();
+    env::split_paths(&path_var).any(|dir| dir.join(command).is_file())
+}
+
+/// Return the set of `AgentPresetKind` variants whose CLI is found in PATH.
+/// Cached for the lifetime of the process (the set of installed tools is
+/// unlikely to change while the app is running).
+fn installed_preset_kinds() -> &'static HashSet<AgentPresetKind> {
+    static INSTALLED: OnceLock<HashSet<AgentPresetKind>> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        AgentPresetKind::ORDER
+            .iter()
+            .copied()
+            .filter(|kind| kind.is_installed())
+            .collect()
+    })
+}
+
 fn default_agent_presets() -> Vec<AgentPreset> {
     AgentPresetKind::ORDER
         .iter()
@@ -12485,31 +12796,36 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_row()
-                    .on_drag_move(cx.listener(Self::handle_pane_divider_drag_move))
-                    .child(self.render_left_pane(cx))
-                    .when(self.left_pane_visible, |this| {
-                        this.child(self.render_pane_resize_handle(
-                            "left-pane-resize",
-                            DraggedPaneDivider::Left,
+            .when(self.repositories.is_empty(), |this| {
+                this.child(self.render_welcome_pane(cx))
+            })
+            .when(!self.repositories.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_row()
+                        .on_drag_move(cx.listener(Self::handle_pane_divider_drag_move))
+                        .child(self.render_left_pane(cx))
+                        .when(self.left_pane_visible, |this| {
+                            this.child(self.render_pane_resize_handle(
+                                "left-pane-resize",
+                                DraggedPaneDivider::Left,
+                                theme,
+                            ))
+                        })
+                        .child(self.render_center_pane(window, cx))
+                        .child(self.render_pane_resize_handle(
+                            "right-pane-resize",
+                            DraggedPaneDivider::Right,
                             theme,
                         ))
-                    })
-                    .child(self.render_center_pane(window, cx))
-                    .child(self.render_pane_resize_handle(
-                        "right-pane-resize",
-                        DraggedPaneDivider::Right,
-                        theme,
-                    ))
-                    .child(self.render_right_pane(cx)),
-            )
+                        .child(self.render_right_pane(cx)),
+                )
+            })
             .child(self.render_status_bar())
             .child(self.render_top_bar_worktree_quick_actions_menu(cx))
             .child(self.render_notice_toast(cx))
@@ -14264,51 +14580,28 @@ fn preset_icon_image(kind: AgentPresetKind) -> Arc<Image> {
     static CLAUDE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
     static CODEX_ICON: OnceLock<Arc<Image>> = OnceLock::new();
     static OPENCODE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
+    static COPILOT_ICON: OnceLock<Arc<Image>> = OnceLock::new();
 
-    match kind {
-        AgentPresetKind::Codex => CODEX_ICON
-            .get_or_init(|| {
-                tracing::info!(
-                    preset = kind.key(),
-                    asset = preset_icon_asset_path(kind),
-                    bytes = preset_icon_bytes(kind).len(),
-                    "loading preset icon asset"
-                );
-                Arc::new(Image::from_bytes(
-                    preset_icon_format(kind),
-                    preset_icon_bytes(kind).to_vec(),
-                ))
-            })
-            .clone(),
-        AgentPresetKind::Claude => CLAUDE_ICON
-            .get_or_init(|| {
-                tracing::info!(
-                    preset = kind.key(),
-                    asset = preset_icon_asset_path(kind),
-                    bytes = preset_icon_bytes(kind).len(),
-                    "loading preset icon asset"
-                );
-                Arc::new(Image::from_bytes(
-                    preset_icon_format(kind),
-                    preset_icon_bytes(kind).to_vec(),
-                ))
-            })
-            .clone(),
-        AgentPresetKind::OpenCode => OPENCODE_ICON
-            .get_or_init(|| {
-                tracing::info!(
-                    preset = kind.key(),
-                    asset = preset_icon_asset_path(kind),
-                    bytes = preset_icon_bytes(kind).len(),
-                    "loading preset icon asset"
-                );
-                Arc::new(Image::from_bytes(
-                    preset_icon_format(kind),
-                    preset_icon_bytes(kind).to_vec(),
-                ))
-            })
-            .clone(),
-    }
+    let lock = match kind {
+        AgentPresetKind::Codex => &CODEX_ICON,
+        AgentPresetKind::Claude => &CLAUDE_ICON,
+        AgentPresetKind::OpenCode => &OPENCODE_ICON,
+        AgentPresetKind::Copilot => &COPILOT_ICON,
+    };
+
+    lock.get_or_init(|| {
+        tracing::info!(
+            preset = kind.key(),
+            asset = preset_icon_asset_path(kind),
+            bytes = preset_icon_bytes(kind).len(),
+            "loading preset icon asset"
+        );
+        Arc::new(Image::from_bytes(
+            preset_icon_format(kind),
+            preset_icon_bytes(kind).to_vec(),
+        ))
+    })
+    .clone()
 }
 
 fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
@@ -14316,12 +14609,15 @@ fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
         AgentPresetKind::Codex => PRESET_ICON_CODEX_SVG,
         AgentPresetKind::Claude => PRESET_ICON_CLAUDE_PNG,
         AgentPresetKind::OpenCode => PRESET_ICON_OPENCODE_SVG,
+        AgentPresetKind::Copilot => PRESET_ICON_COPILOT_SVG,
     }
 }
 
 fn preset_icon_format(kind: AgentPresetKind) -> ImageFormat {
     match kind {
-        AgentPresetKind::Codex | AgentPresetKind::OpenCode => ImageFormat::Svg,
+        AgentPresetKind::Codex | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => {
+            ImageFormat::Svg
+        },
         AgentPresetKind::Claude => ImageFormat::Png,
     }
 }
@@ -14331,6 +14627,7 @@ fn preset_icon_asset_path(kind: AgentPresetKind) -> &'static str {
         AgentPresetKind::Codex => "assets/preset-icons/codex-white.svg",
         AgentPresetKind::Claude => "assets/preset-icons/claude.png",
         AgentPresetKind::OpenCode => "assets/preset-icons/opencode-white.svg",
+        AgentPresetKind::Copilot => "assets/preset-icons/copilot-white.svg",
     }
 }
 
@@ -14338,11 +14635,13 @@ fn log_preset_icon_fallback_once(kind: AgentPresetKind, fallback_glyph: &'static
     static CLAUDE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
     static CODEX_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
     static OPENCODE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
+    static COPILOT_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
 
     let once = match kind {
         AgentPresetKind::Codex => &CODEX_FALLBACK_LOGGED,
         AgentPresetKind::Claude => &CLAUDE_FALLBACK_LOGGED,
         AgentPresetKind::OpenCode => &OPENCODE_FALLBACK_LOGGED,
+        AgentPresetKind::Copilot => &COPILOT_FALLBACK_LOGGED,
     };
 
     once.get_or_init(|| {
@@ -14367,11 +14666,13 @@ fn log_preset_icon_render_once(kind: AgentPresetKind) {
     static CLAUDE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
     static CODEX_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
     static OPENCODE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
+    static COPILOT_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
 
     let once = match kind {
         AgentPresetKind::Codex => &CODEX_RENDER_LOGGED,
         AgentPresetKind::Claude => &CLAUDE_RENDER_LOGGED,
         AgentPresetKind::OpenCode => &OPENCODE_RENDER_LOGGED,
+        AgentPresetKind::Copilot => &COPILOT_RENDER_LOGGED,
     };
 
     once.get_or_init(|| {
@@ -14386,7 +14687,7 @@ fn log_preset_icon_render_once(kind: AgentPresetKind) {
 fn preset_icon_render_size_px(kind: AgentPresetKind) -> f32 {
     match kind {
         AgentPresetKind::Codex => 20.,
-        AgentPresetKind::Claude | AgentPresetKind::OpenCode => 14.,
+        AgentPresetKind::Claude | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => 14.,
     }
 }
 
@@ -14397,11 +14698,13 @@ fn agent_preset_button_content(kind: AgentPresetKind, text_color: u32) -> Div {
     let icon_slot_size = icon_size.max(14.);
     let fallback_color = match kind {
         AgentPresetKind::Claude => 0xD97757,
-        AgentPresetKind::Codex | AgentPresetKind::OpenCode => text_color,
+        AgentPresetKind::Codex | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => text_color,
     };
     let fallback_glyph = match kind {
         AgentPresetKind::Claude => "C",
-        AgentPresetKind::Codex | AgentPresetKind::OpenCode => kind.fallback_icon(),
+        AgentPresetKind::Codex | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => {
+            kind.fallback_icon()
+        },
     };
     div()
         .flex()
@@ -15612,6 +15915,28 @@ fn github_request_access_token(
     }
 
     Err("GitHub OAuth token request failed".to_owned())
+}
+
+fn extract_repo_name_from_url(url: &str) -> String {
+    let url = url.trim();
+    // Strip trailing .git
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    // Strip trailing /
+    let url = url.strip_suffix('/').unwrap_or(url);
+    // Get the last path component
+    if let Some(pos) = url.rfind('/') {
+        url[pos + 1..].to_owned()
+    } else if let Some(pos) = url.rfind(':') {
+        // SSH-style: git@github.com:user/repo
+        let after_colon = &url[pos + 1..];
+        if let Some(slash_pos) = after_colon.rfind('/') {
+            after_colon[slash_pos + 1..].to_owned()
+        } else {
+            after_colon.to_owned()
+        }
+    } else {
+        String::new()
+    }
 }
 
 fn repository_display_name(path: &Path) -> String {

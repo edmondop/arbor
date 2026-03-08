@@ -6,7 +6,7 @@ pub enum AgentState {
     Waiting,
 }
 
-const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "opencode"];
+const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "opencode", "copilot"];
 
 /// Detect working directories of running AI tool processes.
 ///
