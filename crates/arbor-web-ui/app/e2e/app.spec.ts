@@ -191,18 +191,19 @@ test.describe("Arbor Web UI", () => {
     });
   });
 
-  test("terminal panel shows session tabs", async ({ page }) => {
+  test("terminal panel shows session tabs for selected worktree", async ({ page }) => {
     const terminalPanel = page.getByTestId("terminal-panel");
+    // Primary worktree is auto-selected, so only the "claude" session should be visible
     await expect(terminalPanel.locator(".terminal-tab-label").getByText("claude")).toBeVisible();
+
+    // Switch to feature-auth worktree
+    const sidebar = page.getByTestId("sidebar");
+    await sidebar.locator(".wt-card").nth(1).click();
     await expect(terminalPanel.locator(".terminal-tab-label").getByText("feature-auth")).toBeVisible();
   });
 
   test("changes panel shows files when worktree selected", async ({ page }) => {
-    const sidebar = page.getByTestId("sidebar");
-
-    // Click the main worktree card under arbor
-    await sidebar.locator(".wt-card").first().click();
-
+    // Primary worktree is auto-selected on load, so changes should appear
     const changesPanel = page.getByTestId("changes-panel");
     await expect(changesPanel.getByText("src/main.rs")).toBeVisible();
     await expect(changesPanel.getByText("src/api.rs")).toBeVisible();
@@ -223,11 +224,7 @@ test.describe("Arbor Web UI", () => {
   });
 
   test("full layout screenshot", async ({ page }) => {
-    // Select a worktree for full context
-    const sidebar = page.getByTestId("sidebar");
-    await sidebar.locator(".wt-card").first().click();
-
-    // Wait for changes to load
+    // Primary worktree is auto-selected, wait for changes to load
     const changesPanel = page.getByTestId("changes-panel");
     await expect(changesPanel.getByText("src/main.rs")).toBeVisible();
 

@@ -68,18 +68,33 @@ export async function refresh(): Promise<void> {
       fetchProcesses().catch(() => [] as ProcessInfo[]),
     ]);
 
-    // Validate selections still exist
-    const selectedRepoRoot =
+    // Validate selections still exist, auto-select on first load
+    let selectedRepoRoot =
       state.selectedRepoRoot !== null &&
       repositories.some((r) => r.root === state.selectedRepoRoot)
         ? state.selectedRepoRoot
         : null;
 
-    const selectedWorktreePath =
+    // Auto-select first repo on initial load
+    if (selectedRepoRoot === null && repositories.length > 0) {
+      selectedRepoRoot = repositories[0].root;
+    }
+
+    let selectedWorktreePath =
       state.selectedWorktreePath !== null &&
       worktrees.some((w) => w.path === state.selectedWorktreePath)
         ? state.selectedWorktreePath
         : null;
+
+    // Auto-select primary worktree (or first) for the selected repo on initial load
+    if (selectedWorktreePath === null && selectedRepoRoot !== null) {
+      const repoWorktrees = worktrees.filter((w) => w.repo_root === selectedRepoRoot);
+      const primary = repoWorktrees.find((w) => w.is_primary_checkout);
+      const first = primary ?? repoWorktrees[0];
+      if (first !== undefined) {
+        selectedWorktreePath = first.path;
+      }
+    }
 
     let activeSessionId =
       state.activeSessionId !== null &&
@@ -87,10 +102,22 @@ export async function refresh(): Promise<void> {
         ? state.activeSessionId
         : null;
 
-    // Auto-select first running terminal if none is active
-    if (activeSessionId === null && sessions.length > 0) {
-      const running = sessions.find((s) => s.state === "running");
-      const first = running ?? sessions[0];
+    // Auto-select first running terminal for the selected worktree
+    const visibleSessions = selectedWorktreePath !== null
+      ? sessions.filter((s) => s.workspace_id === selectedWorktreePath || s.cwd === selectedWorktreePath)
+      : sessions;
+
+    // Clear active session if it doesn't belong to the selected worktree
+    if (activeSessionId !== null && selectedWorktreePath !== null) {
+      const belongs = visibleSessions.some((s) => s.session_id === activeSessionId);
+      if (!belongs) {
+        activeSessionId = null;
+      }
+    }
+
+    if (activeSessionId === null && visibleSessions.length > 0) {
+      const running = visibleSessions.find((s) => s.state === "running");
+      const first = running ?? visibleSessions[0];
       if (first !== undefined) {
         activeSessionId = first.session_id;
       }

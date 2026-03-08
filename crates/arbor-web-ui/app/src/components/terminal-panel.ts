@@ -44,7 +44,10 @@ export function createTerminalPanel(): HTMLElement {
 
   const presetGroup = el("div", "preset-group");
   for (const preset of AGENT_PRESETS) {
-    const btn = el("button", "preset-btn", preset.label);
+    const btn = el("button", "preset-btn");
+    const icon = el("span", `preset-icon ${preset.cssClass}`);
+    const label = el("span", "", preset.label);
+    btn.append(icon, label);
     btn.title = `Launch ${preset.label}`;
     btn.addEventListener("click", () => launchPreset(preset));
     presetGroup.append(btn);
@@ -303,13 +306,13 @@ function teardownActiveInstance(): void {
   }
 }
 
-type AgentPreset = { label: string; command: string };
+type AgentPreset = { label: string; command: string; cssClass: string };
 
 const AGENT_PRESETS: AgentPreset[] = [
-  { label: "Claude", command: "claude" },
-  { label: "Codex", command: "codex" },
-  { label: "OpenCode", command: "opencode" },
-  { label: "Copilot", command: "copilot" },
+  { label: "Claude", command: "claude", cssClass: "preset-icon-claude" },
+  { label: "Codex", command: "codex", cssClass: "preset-icon-codex" },
+  { label: "OpenCode", command: "opencode", cssClass: "preset-icon-opencode" },
+  { label: "Copilot", command: "copilot", cssClass: "preset-icon-copilot" },
 ];
 
 async function launchPreset(preset: AgentPreset): Promise<void> {

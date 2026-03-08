@@ -28,6 +28,10 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # key = "opencode"
 # command = "opencode"
 
+# [daemon]
+# auth_token = "your-secret-token"  # required for remote access
+# tls = true                        # HTTPS with self-signed certs (default: true)
+
 # [[remote_hosts]]
 # name = "build-server"
 # hostname = "build.example.com"
@@ -309,6 +313,29 @@ pub fn remove_repo_preset(repo_root: &Path, name: &str) -> Result<(), String> {
         }
         if arr.is_empty() {
             doc.remove("presets");
+        }
+    }
+
+    fs::write(&path, doc.to_string())
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
+pub fn save_scalar_settings(settings: &[(&str, Option<&str>)]) -> Result<(), String> {
+    let path = config_path();
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+
+    for &(key, value) in settings {
+        match value {
+            Some(v) if !v.is_empty() => {
+                doc.insert(key, toml_edit::value(v));
+            },
+            _ => {
+                doc.remove(key);
+            },
         }
     }
 

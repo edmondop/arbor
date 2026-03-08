@@ -1,0 +1,303 @@
+//! Authentication middleware for arbor-httpd.
+//!
+//! - Localhost connections bypass authentication entirely.
+//! - Remote connections require either:
+//!   - A `Bearer <token>` header matching the configured auth token, or
+//!   - A valid session cookie obtained by posting the token to `/login`.
+//! - If no auth token is configured, remote connections are refused with
+//!   a message telling the user to set `[daemon] auth_token` in their config.
+
+use {
+    axum::{
+        Router,
+        body::Body,
+        extract::{ConnectInfo, State},
+        http::{Request, StatusCode},
+        middleware::{self, Next},
+        response::{Html, IntoResponse, Response},
+        routing::{get, post},
+    },
+    hmac::{Hmac, Mac},
+    sha2::Sha256,
+    std::{net::SocketAddr, sync::Arc},
+};
+
+type HmacSha256 = Hmac<Sha256>;
+
+const SESSION_COOKIE_NAME: &str = "arbor_session";
+const SESSION_MAX_AGE_SECS: u64 = 86400 * 7; // 7 days
+
+/// Shared auth state embedded in the app.
+#[derive(Clone)]
+pub struct AuthState {
+    /// The configured auth token. If `None`, remote access is blocked entirely.
+    pub auth_token: Option<String>,
+    /// Random secret generated at launch for signing session cookies.
+    pub session_secret: Arc<[u8; 32]>,
+}
+
+impl AuthState {
+    pub fn new(auth_token: Option<String>) -> Self {
+        let mut secret = [0u8; 32];
+        use rand::Rng;
+        rand::rng().fill(&mut secret);
+        Self {
+            auth_token,
+            session_secret: Arc::new(secret),
+        }
+    }
+
+    /// Create an HMAC session cookie value from the auth token.
+    fn sign_session(&self, token: &str) -> String {
+        let mut mac = HmacSha256::new_from_slice(self.session_secret.as_ref())
+            .unwrap_or_else(|_| unreachable!());
+        mac.update(token.as_bytes());
+        let result = mac.finalize();
+        hex::encode(result.into_bytes())
+    }
+
+    /// Verify a session cookie value.
+    fn verify_session(&self, cookie_value: &str, token: &str) -> bool {
+        let mut mac = HmacSha256::new_from_slice(self.session_secret.as_ref())
+            .unwrap_or_else(|_| unreachable!());
+        mac.update(token.as_bytes());
+        let Ok(expected) = hex::decode(cookie_value) else {
+            return false;
+        };
+        mac.verify_slice(&expected).is_ok()
+    }
+}
+
+fn is_loopback(addr: &SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
+
+/// Axum middleware that enforces authentication on non-localhost requests.
+pub async fn auth_middleware(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(auth): State<AuthState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    // Localhost always passes through
+    if is_loopback(&addr) {
+        return next.run(request).await;
+    }
+
+    let Some(ref configured_token) = auth.auth_token else {
+        // No token configured — refuse all remote access
+        return (
+            StatusCode::FORBIDDEN,
+            Html(
+                "<h1>Remote access requires authentication</h1>\
+                 <p>Set <code>[daemon] auth_token = \"your-secret\"</code> in \
+                 <code>~/.config/arbor/config.toml</code> to enable remote access.</p>",
+            ),
+        )
+            .into_response();
+    };
+
+    // Check Bearer token header
+    if let Some(auth_header) = request.headers().get("authorization")
+        && let Ok(value) = auth_header.to_str()
+        && let Some(bearer_token) = value.strip_prefix("Bearer ")
+        && constant_time_eq(bearer_token.trim(), configured_token)
+    {
+        return next.run(request).await;
+    }
+
+    // Check session cookie
+    if let Some(cookie_header) = request.headers().get("cookie")
+        && let Ok(cookies) = cookie_header.to_str()
+    {
+        for cookie in cookies.split(';') {
+            let cookie = cookie.trim();
+            if let Some(value) = cookie.strip_prefix(&format!("{SESSION_COOKIE_NAME}="))
+                && auth.verify_session(value.trim(), configured_token)
+            {
+                return next.run(request).await;
+            }
+        }
+    }
+
+    // Not authenticated — return 401
+    (StatusCode::UNAUTHORIZED, Html(LOGIN_PAGE_HTML)).into_response()
+}
+
+/// Build a router for auth-related endpoints (login page + login POST).
+/// These routes are NOT protected by the auth middleware.
+pub fn auth_routes() -> Router<AuthState> {
+    Router::new()
+        .route("/login", get(login_page))
+        .route("/login", post(handle_login))
+}
+
+async fn login_page() -> Html<&'static str> {
+    Html(LOGIN_PAGE_HTML)
+}
+
+#[derive(serde::Deserialize)]
+struct LoginRequest {
+    token: String,
+}
+
+async fn handle_login(
+    State(auth): State<AuthState>,
+    axum::Form(form): axum::Form<LoginRequest>,
+) -> Response {
+    let Some(ref configured_token) = auth.auth_token else {
+        return (StatusCode::FORBIDDEN, "No auth token configured").into_response();
+    };
+
+    if !constant_time_eq(&form.token, configured_token) {
+        return (StatusCode::UNAUTHORIZED, Html(LOGIN_ERROR_HTML)).into_response();
+    }
+
+    let session_value = auth.sign_session(configured_token);
+    let cookie = format!(
+        "{SESSION_COOKIE_NAME}={session_value}; Path=/; HttpOnly; SameSite=Strict; \
+         Secure; Max-Age={SESSION_MAX_AGE_SECS}"
+    );
+
+    (
+        StatusCode::SEE_OTHER,
+        [("set-cookie", cookie.as_str()), ("location", "/")],
+        "",
+    )
+        .into_response()
+}
+
+/// Apply auth middleware to a router, adding login routes that bypass auth.
+pub fn with_auth(app: Router, auth_state: AuthState) -> Router {
+    let login_routes = auth_routes().with_state(auth_state.clone());
+
+    // Login routes are NOT behind the auth middleware
+    let protected = app.route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
+
+    // Merge: login routes first (unprotected), then protected routes
+    login_routes.merge(protected)
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+const LOGIN_PAGE_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arbor – Login</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1115; color: #e4e4e7;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh;
+  }
+  .card {
+    background: #1a1b1e; border: 1px solid #2a2b2e; border-radius: 12px;
+    padding: 32px; width: 100%; max-width: 380px;
+  }
+  h1 { font-size: 20px; margin-bottom: 8px; }
+  p { font-size: 13px; color: #71717a; margin-bottom: 24px; }
+  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+  input[type="password"] {
+    width: 100%; padding: 10px 12px; border: 1px solid #2a2b2e; border-radius: 6px;
+    background: #0f1115; color: #e4e4e7; font-size: 14px;
+    font-family: ui-monospace, monospace;
+  }
+  input:focus { outline: none; border-color: #4ade80; }
+  button {
+    width: 100%; margin-top: 16px; padding: 10px; border: none; border-radius: 6px;
+    background: #4ade80; color: #0f1115; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { background: #22c55e; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Arbor</h1>
+  <p>Enter your authentication token to access this instance remotely.</p>
+  <form method="POST" action="/login">
+    <label for="token">Auth Token</label>
+    <input type="password" id="token" name="token" autofocus required>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>"#;
+
+const LOGIN_ERROR_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arbor – Login Failed</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1115; color: #e4e4e7;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh;
+  }
+  .card {
+    background: #1a1b1e; border: 1px solid #2a2b2e; border-radius: 12px;
+    padding: 32px; width: 100%; max-width: 380px;
+  }
+  h1 { font-size: 20px; margin-bottom: 8px; }
+  .error { color: #f38ba8; font-size: 13px; margin-bottom: 16px; }
+  p { font-size: 13px; color: #71717a; margin-bottom: 24px; }
+  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+  input[type="password"] {
+    width: 100%; padding: 10px 12px; border: 1px solid #2a2b2e; border-radius: 6px;
+    background: #0f1115; color: #e4e4e7; font-size: 14px;
+    font-family: ui-monospace, monospace;
+  }
+  input:focus { outline: none; border-color: #4ade80; }
+  button {
+    width: 100%; margin-top: 16px; padding: 10px; border: none; border-radius: 6px;
+    background: #4ade80; color: #0f1115; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { background: #22c55e; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Arbor</h1>
+  <div class="error">Invalid token. Please try again.</div>
+  <form method="POST" action="/login">
+    <label for="token">Auth Token</label>
+    <input type="password" id="token" name="token" autofocus required>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>"#;
+
+/// Hex encoding/decoding helpers to avoid adding a `hex` dependency.
+mod hex {
+    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
+        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    pub fn decode(s: &str) -> Result<Vec<u8>, ()> {
+        if !s.len().is_multiple_of(2) {
+            return Err(());
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ()))
+            .collect()
+    }
+}
