@@ -79,6 +79,36 @@ impl ThemeKind {
         ThemeKind::Zellner,
     ];
 
+    pub fn slug(self) -> &'static str {
+        match self {
+            ThemeKind::One => "one-dark",
+            ThemeKind::Ayu => "ayu-dark",
+            ThemeKind::Gruvbox => "gruvbox-dark",
+            ThemeKind::Dracula => "dracula",
+            ThemeKind::SolarizedLight => "solarized-light",
+            ThemeKind::Everforest => "everforest-dark",
+            ThemeKind::Catppuccin => "catppuccin",
+            ThemeKind::CatppuccinLatte => "catppuccin-latte",
+            ThemeKind::Ethereal => "ethereal",
+            ThemeKind::FlexokiLight => "flexoki-light",
+            ThemeKind::Hackerman => "hackerman",
+            ThemeKind::Kanagawa => "kanagawa",
+            ThemeKind::MatteBlack => "matte-black",
+            ThemeKind::Miasma => "miasma",
+            ThemeKind::Nord => "nord",
+            ThemeKind::OsakaJade => "osaka-jade",
+            ThemeKind::Ristretto => "ristretto",
+            ThemeKind::RosePine => "rose-pine",
+            ThemeKind::TokyoNight => "tokyo-night",
+            ThemeKind::Vantablack => "vantablack",
+            ThemeKind::White => "white",
+            ThemeKind::RetroboxClassic => "retrobox-classic",
+            ThemeKind::TokyoNightDay => "tokyonight-day",
+            ThemeKind::TokyoNightClassic => "tokyonight-classic",
+            ThemeKind::Zellner => "zellner",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ThemeKind::One => "One Dark",
