@@ -53,6 +53,9 @@ use {
 
 const FONT_UI: &str = ".ZedSans";
 const FONT_MONO: &str = "CaskaydiaMono Nerd Font Mono";
+#[cfg(target_os = "macos")]
+const TERMINAL_FONT_FAMILIES: [&str; 5] = [FONT_MONO, "SF Mono", "Menlo", "Monaco", "Courier New"];
+#[cfg(not(target_os = "macos"))]
 const TERMINAL_FONT_FAMILIES: [&str; 6] = [
     FONT_MONO,
     ".ZedMono",
@@ -7377,6 +7380,10 @@ impl ArborWindow {
                 .overflow_y_scroll();
 
             for (repo_index, repository) in repositories.iter().enumerate() {
+                let repository_github_url = repository
+                    .github_repo_slug
+                    .as_ref()
+                    .map(|repo_slug| github_repo_url(repo_slug));
                 let repo_worktrees: Vec<(usize, &WorktreeSummary)> = worktrees
                     .iter()
                     .enumerate()
@@ -7389,8 +7396,33 @@ impl ArborWindow {
                 }
 
                 // Repo icon row: circular avatar or GitHub icon
-                let repo_icon = if let Some(url) = repository.avatar_url.clone() {
-                    div()
+                let repo_icon = match (repository.avatar_url.clone(), repository_github_url.clone())
+                {
+                    (Some(url), Some(github_url)) => div()
+                        .id(("collapsed-repository-github-link", repo_index))
+                        .size(px(32.))
+                        .rounded_md()
+                        .overflow_hidden()
+                        .cursor_pointer()
+                        .hover(|this| this.opacity(0.9))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_external_url(&github_url, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child(img(url).size_full().rounded_md().with_fallback(move || {
+                            div()
+                                .size_full()
+                                .font_family(FONT_MONO)
+                                .text_size(px(14.))
+                                .text_color(rgb(theme.text_muted))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child("\u{f09b}")
+                                .into_any_element()
+                        }))
+                        .into_any_element(),
+                    (Some(url), None) => div()
                         .size(px(32.))
                         .rounded_md()
                         .overflow_hidden()
@@ -7406,9 +7438,25 @@ impl ArborWindow {
                                 .child("\u{f09b}")
                                 .into_any_element()
                         }))
-                        .into_any_element()
-                } else {
-                    div()
+                        .into_any_element(),
+                    (None, Some(github_url)) => div()
+                        .id(("collapsed-repository-github-link", repo_index))
+                        .size(px(24.))
+                        .font_family(FONT_MONO)
+                        .text_size(px(14.))
+                        .text_color(rgb(theme.text_muted))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|this| this.opacity(0.9))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_external_url(&github_url, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child("\u{f09b}")
+                        .into_any_element(),
+                    (None, None) => div()
                         .size(px(24.))
                         .font_family(FONT_MONO)
                         .text_size(px(14.))
@@ -7417,7 +7465,7 @@ impl ArborWindow {
                         .items_center()
                         .justify_center()
                         .child("\u{f09b}")
-                        .into_any_element()
+                        .into_any_element(),
                 };
                 pane = pane.child(repo_icon);
 
@@ -7494,6 +7542,10 @@ impl ArborWindow {
                             let is_collapsed =
                                 self.collapsed_repositories.contains(&repository_index);
                             let repository_avatar_url = repository.avatar_url.clone();
+                            let repository_github_url = repository
+                                .github_repo_slug
+                                .as_ref()
+                                .map(|repo_slug| github_repo_url(repo_slug));
                             let repo_worktrees: Vec<(usize, WorktreeSummary)> = worktrees
                                 .iter()
                                 .cloned()
@@ -7551,10 +7603,51 @@ impl ArborWindow {
                                         }))
                                         // GitHub icon or avatar outside the cell
                                         .child(
-                                            if let Some(url) =
-                                                repository_avatar_url.clone()
-                                            {
-                                                div()
+                                            match (
+                                                repository_avatar_url.clone(),
+                                                repository_github_url.clone(),
+                                            ) {
+                                                (Some(url), Some(github_url)) => div()
+                                                    .id((
+                                                        "repository-github-link",
+                                                        repository_index,
+                                                    ))
+                                                    .flex_none()
+                                                    .size(px(20.))
+                                                    .rounded_sm()
+                                                    .overflow_hidden()
+                                                    .cursor_pointer()
+                                                    .hover(|this| this.opacity(0.9))
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.open_external_url(
+                                                                &github_url,
+                                                                cx,
+                                                            );
+                                                            cx.stop_propagation();
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        img(url)
+                                                            .size_full()
+                                                            .rounded_sm()
+                                                            .with_fallback(move || {
+                                                                div()
+                                                                    .size_full()
+                                                                    .font_family(FONT_MONO)
+                                                                    .text_size(px(12.))
+                                                                    .text_color(rgb(
+                                                                        theme.text_muted,
+                                                                    ))
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .child("\u{f09b}")
+                                                                    .into_any_element()
+                                                            }),
+                                                    )
+                                                    .into_any_element(),
+                                                (Some(url), None) => div()
                                                     .flex_none()
                                                     .size(px(20.))
                                                     .rounded_sm()
@@ -7578,15 +7671,36 @@ impl ArborWindow {
                                                                     .into_any_element()
                                                             }),
                                                     )
-                                                    .into_any_element()
-                                            } else {
-                                                div()
+                                                    .into_any_element(),
+                                                (None, Some(github_url)) => div()
+                                                    .id((
+                                                        "repository-github-link",
+                                                        repository_index,
+                                                    ))
+                                                    .flex_none()
+                                                    .font_family(FONT_MONO)
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .cursor_pointer()
+                                                    .hover(|this| this.opacity(0.9))
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.open_external_url(
+                                                                &github_url,
+                                                                cx,
+                                                            );
+                                                            cx.stop_propagation();
+                                                        },
+                                                    ))
+                                                    .child("\u{f09b}")
+                                                    .into_any_element(),
+                                                (None, None) => div()
                                                     .flex_none()
                                                     .font_family(FONT_MONO)
                                                     .text_size(px(12.))
                                                     .text_color(rgb(theme.text_muted))
                                                     .child("\u{f09b}")
-                                                    .into_any_element()
+                                                    .into_any_element(),
                                             },
                                         )
                                         // Cell with chevron, name, count, etc.
@@ -13913,6 +14027,10 @@ fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
     Some(format!(
         "https://avatars.githubusercontent.com/{owner}?size=96"
     ))
+}
+
+fn github_repo_url(repo_slug: &str) -> String {
+    format!("https://github.com/{repo_slug}")
 }
 
 fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
