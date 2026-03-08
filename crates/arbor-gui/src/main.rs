@@ -26,10 +26,11 @@ use {
     },
     gpui::{
         App, Application, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
-        FocusHandle, FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding,
-        KeyDownEvent, Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent,
-        MouseUpEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType,
-        TextRun, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+        ElementInputHandler, EntityInputHandler, FocusHandle, FontFallbacks, FontFeatures,
+        FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent, Keystroke, Menu, MenuItem,
+        MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels,
+        ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun, TitlebarOptions,
+        UTF16Selection, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
         WindowDecorations, WindowOptions, actions, canvas, div, fill, font, img, point, prelude::*,
         px, rgb, size, uniform_list,
     },
@@ -765,12 +766,12 @@ struct DeleteModal {
 
 struct RepositoryContextMenu {
     repository_index: usize,
-    position: gpui::Point<gpui::Pixels>,
+    position: gpui::Point<Pixels>,
 }
 
 struct WorktreeContextMenu {
     worktree_index: usize,
-    position: gpui::Point<gpui::Pixels>,
+    position: gpui::Point<Pixels>,
 }
 
 struct CreatedWorktree {
@@ -873,6 +874,7 @@ struct ArborWindow {
     logs_tab_active: bool,
     quit_overlay_until: Option<Instant>,
     agent_ws_connected: bool,
+    ime_marked_text: Option<String>,
 }
 
 impl ArborWindow {
@@ -1069,6 +1071,7 @@ impl ArborWindow {
                     logs_tab_active: false,
                     quit_overlay_until: None,
                     agent_ws_connected: false,
+                    ime_marked_text: None,
                 };
             },
         };
@@ -1313,6 +1316,7 @@ impl ArborWindow {
             logs_tab_active: false,
             quit_overlay_until: None,
             agent_ws_connected: false,
+            ime_marked_text: None,
         };
 
         app.refresh_worktrees(cx);
@@ -6617,12 +6621,15 @@ impl ArborWindow {
         }
 
         self.clear_terminal_selection_for_session(active_terminal_id);
-        self.track_terminal_command_input(active_terminal_id, &event.keystroke);
 
         let Some(input) = terminal_keys::terminal_bytes_from_keystroke(&event.keystroke) else {
+            // No bytes for this key — let the event propagate to the IME /
+            // InputHandler so composed characters arrive via
+            // `replace_text_in_range`.
             return;
         };
 
+        self.track_terminal_command_input(active_terminal_id, &event.keystroke);
         if let Err(error) = self.write_input_to_terminal(active_terminal_id, &input) {
             self.notice = Some(format!("failed to write to terminal: {error}"));
         }
@@ -8683,6 +8690,27 @@ impl ArborWindow {
             .track_focus(&self.terminal_focus)
             .on_any_mouse_down(cx.listener(Self::focus_terminal_panel))
             .on_key_down(cx.listener(Self::handle_terminal_key_down))
+            .child({
+                let entity = cx.entity().clone();
+                let focus = self.terminal_focus.clone();
+                canvas(
+                    move |_, _, _| {},
+                    move |_, _, window, cx| {
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(
+                                Bounds {
+                                    origin: point(px(0.), px(0.)),
+                                    size: size(px(0.), px(0.)),
+                                },
+                                entity.clone(),
+                            ),
+                            cx,
+                        );
+                    },
+                )
+                .size(px(0.))
+            })
             .child(
                 div()
                     .h(px(32.))
@@ -9068,8 +9096,9 @@ impl ArborWindow {
                     )
                     .when_some(active_terminal, |this, session| {
                         let selection = self.terminal_selection_for_session(session.id);
+                        let ime_text = self.ime_marked_text.as_deref();
                         let styled_lines =
-                            styled_lines_for_session(&session, theme, true, selection);
+                            styled_lines_for_session(&session, theme, true, selection, ime_text);
                         let mono_font = terminal_mono_font(cx);
                         let cell_width = terminal_cell_width_px(cx);
                         let line_height = terminal_line_height_px(cx);
@@ -12046,6 +12075,103 @@ impl RepositorySummary {
             avatar_url,
             github_repo_slug,
         }
+    }
+}
+
+impl EntityInputHandler for ArborWindow {
+    fn text_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        self.ime_marked_text.as_ref().map(|text| {
+            let len: usize = text.encode_utf16().count();
+            0..len
+        })
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.ime_marked_text = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ime_marked_text = None;
+        if text.is_empty() {
+            cx.notify();
+            return;
+        }
+        let Some(session_id) = self.active_terminal_id_for_selected_worktree() else {
+            return;
+        };
+        self.append_pasted_text_to_pending_command(session_id, text);
+        if let Err(error) = self.write_input_to_terminal(session_id, text.as_bytes()) {
+            self.notice = Some(format!("failed to write to terminal: {error}"));
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ime_marked_text = if new_text.is_empty() {
+            None
+        } else {
+            Some(new_text.to_owned())
+        };
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: std::ops::Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        None
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
     }
 }
 
@@ -15328,6 +15454,7 @@ fn styled_lines_for_session(
     theme: ThemePalette,
     show_cursor: bool,
     selection: Option<&TerminalSelection>,
+    ime_marked_text: Option<&str>,
 ) -> Vec<TerminalStyledLine> {
     let mut lines = if !session.styled_output.is_empty() {
         session.styled_output.clone()
@@ -15363,7 +15490,11 @@ fn styled_lines_for_session(
         && session.state == TerminalState::Running
         && let Some(cursor) = session.cursor
     {
-        apply_cursor_to_lines(&mut lines, cursor, theme);
+        if let Some(marked) = ime_marked_text {
+            apply_ime_marked_text_to_lines(&mut lines, cursor, marked, theme);
+        } else {
+            apply_cursor_to_lines(&mut lines, cursor, theme);
+        }
     }
 
     if let Some(selection) = selection.filter(|selection| selection.session_id == session.id) {
@@ -15422,6 +15553,54 @@ fn apply_cursor_to_lines(
 
         line.runs = runs_from_cells(&line.cells);
     }
+}
+
+fn apply_ime_marked_text_to_lines(
+    lines: &mut [TerminalStyledLine],
+    cursor: TerminalCursor,
+    marked_text: &str,
+    theme: ThemePalette,
+) {
+    if lines.len() <= cursor.line {
+        return;
+    }
+
+    let Some(line) = lines.get_mut(cursor.line) else {
+        return;
+    };
+
+    if line.cells.is_empty() && !line.runs.is_empty() {
+        line.cells = cells_from_runs(&line.runs);
+    }
+
+    let insert_index = line
+        .cells
+        .iter()
+        .position(|cell| cell.column >= cursor.column)
+        .unwrap_or(line.cells.len());
+
+    // Insert marked text cell at cursor position with cursor highlight
+    if line
+        .cells
+        .get(insert_index)
+        .is_some_and(|cell| cell.column == cursor.column)
+    {
+        line.cells[insert_index] = TerminalStyledCell {
+            column: cursor.column,
+            text: marked_text.to_owned(),
+            fg: theme.text_primary,
+            bg: theme.terminal_cursor,
+        };
+    } else {
+        line.cells.insert(insert_index, TerminalStyledCell {
+            column: cursor.column,
+            text: marked_text.to_owned(),
+            fg: theme.text_primary,
+            bg: theme.terminal_cursor,
+        });
+    }
+
+    line.runs = runs_from_cells(&line.cells);
 }
 
 fn apply_selection_to_lines(
@@ -15801,7 +15980,7 @@ fn should_force_powerline(run: &PositionedTerminalRun) -> bool {
             .is_some_and(is_terminal_powerline_character)
 }
 
-fn snap_pixels_floor(value: gpui::Pixels, scale_factor: f32) -> gpui::Pixels {
+fn snap_pixels_floor(value: Pixels, scale_factor: f32) -> Pixels {
     if !(scale_factor.is_finite() && scale_factor > 0.) {
         return value.floor();
     }
@@ -15810,7 +15989,7 @@ fn snap_pixels_floor(value: gpui::Pixels, scale_factor: f32) -> gpui::Pixels {
     px(scaled.floor() / scale_factor)
 }
 
-fn snap_pixels_ceil(value: gpui::Pixels, scale_factor: f32) -> gpui::Pixels {
+fn snap_pixels_ceil(value: Pixels, scale_factor: f32) -> Pixels {
     if !(scale_factor.is_finite() && scale_factor > 0.) {
         return value.ceil();
     }
@@ -15870,9 +16049,9 @@ fn styled_line_to_string(line: &TerminalStyledLine) -> String {
 }
 
 fn terminal_grid_position_from_pointer(
-    position: gpui::Point<gpui::Pixels>,
-    bounds: Bounds<gpui::Pixels>,
-    scroll_offset: gpui::Point<gpui::Pixels>,
+    position: gpui::Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    scroll_offset: gpui::Point<Pixels>,
     line_height: f32,
     cell_width: f32,
     line_count: usize,
@@ -16261,9 +16440,7 @@ fn install_app_menu_and_keys(cx: &mut App) {
     ]);
 }
 
-fn bounds_from_window_geometry(
-    geometry: ui_state_store::WindowGeometry,
-) -> Option<Bounds<gpui::Pixels>> {
+fn bounds_from_window_geometry(geometry: ui_state_store::WindowGeometry) -> Option<Bounds<Pixels>> {
     if geometry.width == 0 || geometry.height == 0 {
         return None;
     }
@@ -16565,7 +16742,7 @@ mod tests {
             Some(TerminalCursor { line: 0, column: 2 }),
         );
 
-        let lines = styled_lines_for_session(&session, theme, true, None);
+        let lines = styled_lines_for_session(&session, theme, true, None, None);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].runs.len(), 3);
         assert_eq!(lines[0].runs[0].text, "ab");
@@ -16585,7 +16762,7 @@ mod tests {
             Some(TerminalCursor { line: 0, column: 5 }),
         );
 
-        let lines = styled_lines_for_session(&session, theme, true, None);
+        let lines = styled_lines_for_session(&session, theme, true, None, None);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].runs.len(), 2);
         assert_eq!(lines[0].runs[0].text, "abc");
@@ -16755,7 +16932,7 @@ mod tests {
             None,
         );
 
-        let lines = styled_lines_for_session(&session, theme, false, None);
+        let lines = styled_lines_for_session(&session, theme, false, None, None);
         assert_eq!(lines.len(), 1);
         assert!(
             lines[0]
