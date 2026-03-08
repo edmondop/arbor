@@ -73,8 +73,16 @@ pub fn launch_backend(
 
 impl EmbeddedTerminal {
     pub fn spawn(cwd: &Path, initial_rows: u16, initial_cols: u16) -> Result<Self, String> {
-        let rows = if initial_rows > 0 { initial_rows } else { TERMINAL_ROWS };
-        let cols = if initial_cols > 1 { initial_cols } else { TERMINAL_COLS };
+        let rows = if initial_rows > 0 {
+            initial_rows
+        } else {
+            TERMINAL_ROWS
+        };
+        let cols = if initial_cols > 1 {
+            initial_cols
+        } else {
+            TERMINAL_COLS
+        };
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
