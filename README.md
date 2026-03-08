@@ -8,70 +8,87 @@
 
 [![CI](https://github.com/penso/arbor/actions/workflows/ci.yml/badge.svg)](https://github.com/penso/arbor/actions/workflows/ci.yml)
 
-Arbor is a desktop Git worktree manager built with Rust and [GPUI](https://gpui.rs).
+Arbor is a **fully native app for agentic coding** built with Rust and [GPUI](https://gpui.rs).
+It gives you one place to manage repositories, parallel worktrees, embedded terminals, diffs, and AI coding agent activity.
 
-## Features
+## Why Arbor
 
-### Git Worktree Management
+- Fully native desktop app (UI + terminal stack, Rust + GPUI), optimized for long-running local workflows
+- One workspace for worktrees, terminals, file changes, and git actions
+- Built for parallel coding sessions across local repos and remote outposts
+
+## Core Capabilities
+
+### Worktree Management
 - List, create, and delete worktrees across multiple repositories
-- Delete confirmation modal with unpushed commits detection
+- Delete confirmation with unpushed commit detection
 - Optional branch cleanup on worktree deletion
 - Worktree navigation history (back/forward)
 - Last git activity timestamp per worktree
 
 ### Embedded Terminal
-- Built-in PTY terminal with truecolor and xterm-256color support
+- Built-in PTY terminal with truecolor and `xterm-256color` support
 - Multiple terminal tabs per worktree
 - Alternative backends: Alacritty, Ghostty
 - Persistent daemon-based sessions (survive app restarts)
-- Session attach/detach, signals (interrupt/terminate/kill)
+- Session attach/detach and signals (interrupt/terminate/kill)
 
-### Diff & Changes Viewer
+### Diff and Changes
 - Side-by-side diff display with addition/deletion line counts
 - Changed file listing per worktree
 - File tree browsing with directory expand/collapse
 - Multi-tab diff sessions
 
-### GitHub Integration
-- Automatic PR detection and linking per worktree
-- Repository avatars from GitHub
-- Git actions from the UI: commit, push
+### AI Agent Visibility
+- Detects running coding agents: Claude Code, Codex, OpenCode
+- Working/waiting state indicators with color-coded dots
+- Real-time updates over WebSocket streaming
 
 ### Remote Outposts
 - Create and manage remote worktrees over SSH
 - Multi-host configuration with custom ports and identity files
 - Mosh support for better connectivity
-- Remote terminal sessions via `arbor-httpd` daemon
+- Remote terminal sessions via `arbor-httpd`
 - Outpost status tracking (available, unreachable, provisioning)
 
-### AI Agent Activity
-- Detects running coding agents (Claude Code, Codex, OpenCode)
-- Working/waiting state indicators with color-coded dots
-- Real-time updates via WebSocket streaming
-
-### UI
-- Three-pane layout: repository sidebar, terminal center, changes/file tree right
-- Resizable panes with drag handles and collapsible sidebar
-- Twenty-five themes, including Omarchy defaults: Tokyo Night, Catppuccin, Ethereal, Everforest, Gruvbox, Miasma, Hackerman, Osaka Jade, Kanagawa, Nord, Matte Black, Vantablack, Ristretto, Flexoki Light, Rose Pine, Catppuccin Latte, White
-- Desktop notifications for terminal events
-- Keyboard-driven modal dialogs
-
-### Configuration
-- TOML config at `~/.config/arbor/config.toml`
-- Configurable: terminal backend, theme, daemon URL, notifications, remote hosts
-- Hot reload on config file changes
+### GitHub + UI + Config
+- Automatic PR detection and linking per worktree
+- Git actions in the UI: commit, push
+- Three-pane layout (repositories, terminal, changes/file tree)
+- Resizable panes, collapsible sidebar, desktop notifications
+- Twenty-five themes, including Omarchy defaults
+- TOML config at `~/.config/arbor/config.toml` with hot reload
 
 ## Install
 
 ### Homebrew (macOS)
 
-```
+```bash
 brew install penso/arbor/arbor
 ```
 
-### GitHub Releases
+### Prebuilt Binaries
 
 Download the latest build from [Releases](https://github.com/penso/arbor/releases).
+
+### Quick Start from Source
+
+```bash
+git clone https://github.com/penso/arbor
+cd arbor
+just run
+```
+
+## Website (Static)
+
+This repository includes a standalone static product site in `website/`.
+
+Local preview:
+
+```bash
+cd website
+python3 -m http.server 4173
+```
 
 ## Crates
 
@@ -200,3 +217,7 @@ This repo uses [`git-cliff`](https://git-cliff.org/) for changelog generation.
 - `just changelog-release <version>`: preview a release section tagged as `v<version>`
 
 Config lives in `cliff.toml`.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=penso/arbor&type=date&legend=top-left)](https://www.star-history.com/#penso/arbor&type=date&legend=top-left)
