@@ -1,4 +1,5 @@
 use {
+    schemars::JsonSchema,
     serde::{Deserialize, Serialize},
     std::{
         env, fs,
@@ -71,7 +72,7 @@ pub enum TerminalSignal {
     Kill,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TerminalSessionState {
     #[default]
@@ -80,19 +81,19 @@ pub enum TerminalSessionState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DaemonTerminalCursor {
     pub line: usize,
     pub column: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 pub struct DaemonTerminalModes {
     pub app_cursor: bool,
     pub alt_screen: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DaemonTerminalStyledCell {
     pub column: usize,
     pub text: String,
@@ -100,20 +101,20 @@ pub struct DaemonTerminalStyledCell {
     pub bg: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DaemonTerminalStyledRun {
     pub text: String,
     pub fg: u32,
     pub bg: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DaemonTerminalStyledLine {
     pub cells: Vec<DaemonTerminalStyledCell>,
     pub runs: Vec<DaemonTerminalStyledRun>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalSnapshot {
     pub session_id: String,
     pub output_tail: String,
@@ -128,7 +129,7 @@ pub struct TerminalSnapshot {
     pub updated_at_unix_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(default)]
 pub struct DaemonSessionRecord {
     pub session_id: String,

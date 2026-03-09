@@ -1,6 +1,7 @@
 [workspace]
 default-members = ["crates/arbor-core", "crates/arbor-gui", "crates/arbor-httpd"]
 members = [
+  "crates/arbor-daemon-client",
   "crates/arbor-core",
   "crates/arbor-gui",
   "crates/arbor-httpd",

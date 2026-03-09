@@ -14,7 +14,7 @@
 [![Linux](https://img.shields.io/badge/Linux-supported-brightgreen)](#install)
 
 Arbor is a **fully native app for agentic coding** built with Rust and [GPUI](https://gpui.rs).
-It gives you one place to manage repositories, parallel worktrees, embedded terminals, diffs, and AI coding agent activity.
+It gives you one place to manage repositories, parallel worktrees, embedded terminals, diffs, AI coding agent activity, and a daemon-backed MCP server.
 
 ## Why Arbor
 
@@ -48,6 +48,12 @@ It gives you one place to manage repositories, parallel worktrees, embedded term
 - Detects running coding agents: Claude Code, Codex, OpenCode
 - Working/waiting state indicators with color-coded dots
 - Real-time updates over WebSocket streaming
+
+### MCP Server
+- Dedicated `arbor-mcp` binary backed by Arbor's daemon API
+- Structured MCP tools for repositories, worktrees, terminals, processes, and agent activity
+- MCP resources for daemon snapshots and prompts for common Arbor workflows
+- Supports `ARBOR_DAEMON_URL` and `ARBOR_DAEMON_AUTH_TOKEN` for remote authenticated daemons
 
 ### Remote Outposts
 - Create and manage remote worktrees over SSH
@@ -84,6 +90,12 @@ cd arbor
 just run
 ```
 
+To run the MCP server against a local dev daemon:
+
+```bash
+just run-mcp
+```
+
 ## Documentation
 
 Full documentation is available at [penso.github.io/arbor/docs](https://penso.github.io/arbor/docs/).
@@ -92,10 +104,59 @@ Full documentation is available at [penso.github.io/arbor/docs](https://penso.gi
 
 | Crate | Description |
 |-------|-------------|
+| `arbor-daemon-client` | Typed client and shared API DTOs for `arbor-httpd` |
 | `arbor-core` | Worktree primitives, change detection, agent hooks |
 | `arbor-gui` | GPUI desktop app (`arbor` binary) |
 | `arbor-httpd` | Remote HTTP daemon (`arbor-httpd` binary) |
+| `arbor-mcp` | MCP server exposing Arbor via stdio (`arbor-mcp` binary) |
 | `arbor-web-ui` | TypeScript dashboard assets + helper crate |
+
+## MCP
+
+Arbor ships a dedicated `arbor-mcp` binary from the `arbor-mcp` crate. The stdio server is enabled by the crate's default `stdio-server` feature and talks to `arbor-httpd`, so the daemon must be reachable first.
+
+Enable it in a normal build:
+
+```bash
+cargo build -p arbor-mcp
+```
+
+Environment variables:
+
+- `ARBOR_DAEMON_URL` overrides the daemon base URL. Default: `http://127.0.0.1:8787`
+- `ARBOR_DAEMON_AUTH_TOKEN` sends a bearer token for remote authenticated daemons
+
+Remote access:
+
+1. On the daemon host, set `[daemon] auth_token = "your-secret"` in `~/.config/arbor/config.toml`.
+2. Start `arbor-httpd`. When an auth token is configured, Arbor binds remotely by default on `0.0.0.0:8787` unless `ARBOR_HTTPD_BIND` overrides it.
+3. Point `arbor-mcp` at that daemon with `ARBOR_DAEMON_URL=http://HOST:8787`.
+4. Pass the same secret with `ARBOR_DAEMON_AUTH_TOKEN=your-secret`.
+
+Loopback requests are allowed without a token. Non-loopback requests require `Authorization: Bearer <token>`.
+
+Example client config:
+
+```json
+{
+  "mcpServers": {
+    "arbor": {
+      "command": "/path/to/arbor-mcp",
+      "env": {
+        "ARBOR_DAEMON_URL": "http://127.0.0.1:8787"
+      }
+    }
+  }
+}
+```
+
+The `arbor-mcp` binary is feature-gated. To disable the stdio server binary in a build, use:
+
+```bash
+cargo build -p arbor-mcp --no-default-features
+```
+
+See [docs/mcp.md](docs/mcp.md) for the full MCP setup guide.
 
 ## Building from Source
 

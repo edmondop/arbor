@@ -24,6 +24,13 @@ if (Test-Path $HttpdPath) {
   Write-Output "bundled arbor-httpd from $HttpdPath"
 }
 
+# Bundle arbor-mcp alongside the main binary
+$McpPath = Join-Path (Split-Path $BinaryPath) 'arbor-mcp.exe'
+if (Test-Path $McpPath) {
+  Copy-Item -Path $McpPath -Destination (Join-Path $BinDir 'arbor-mcp.exe') -Force
+  Write-Output "bundled arbor-mcp from $McpPath"
+}
+
 # Bundle web UI assets
 $WebUiDist = Join-Path $PSScriptRoot '..\..\crates\arbor-web-ui\app\dist'
 if (Test-Path $WebUiDist) {
