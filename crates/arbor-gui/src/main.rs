@@ -1381,6 +1381,7 @@ struct ArborWindow {
     show_theme_picker: bool,
     settings_modal: Option<SettingsModal>,
     daemon_auth_modal: Option<DaemonAuthModal>,
+    start_daemon_modal: bool,
     connect_to_host_modal: Option<ConnectToHostModal>,
     daemon_auth_tokens: HashMap<String, String>,
     connected_daemon_label: Option<String>,
@@ -1601,6 +1602,7 @@ impl ArborWindow {
                     show_theme_picker: false,
                     settings_modal: None,
                     daemon_auth_modal: None,
+                    start_daemon_modal: false,
                     connect_to_host_modal: None,
                     daemon_auth_tokens: HashMap::new(),
                     connected_daemon_label: None,
@@ -1874,6 +1876,7 @@ impl ArborWindow {
             show_theme_picker: false,
             settings_modal: None,
             daemon_auth_modal: None,
+            start_daemon_modal: false,
             connect_to_host_modal: None,
             daemon_auth_tokens: HashMap::new(),
             connected_daemon_label: None,
@@ -4265,6 +4268,29 @@ impl ArborWindow {
         }
     }
 
+    fn try_start_and_connect_daemon(&mut self, cx: &mut Context<Self>) {
+        let daemon_base_url = self.daemon_base_url.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { try_auto_start_daemon(&daemon_base_url) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if let Some(client) = result {
+                    let records = client.list_sessions().unwrap_or_default();
+                    this.terminal_daemon = Some(client);
+                    this.restore_terminal_sessions_from_records(records, true);
+                    this.refresh_worktrees(cx);
+                } else {
+                    this.notice =
+                        Some("Failed to start daemon. Is arbor-httpd available?".to_owned());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn stop_active_ssh_daemon_tunnel(&mut self) {
         let _ = self.ssh_daemon_tunnel.take();
     }
@@ -6008,6 +6034,23 @@ impl ArborWindow {
             return;
         }
 
+        if self.start_daemon_modal {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.start_daemon_modal = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                },
+                "enter" | "return" => {
+                    self.start_daemon_modal = false;
+                    self.try_start_and_connect_daemon(cx);
+                    cx.stop_propagation();
+                },
+                _ => {},
+            }
+            return;
+        }
+
         if self.daemon_auth_modal.is_some() {
             if event.keystroke.modifiers.platform {
                 return;
@@ -7605,6 +7648,7 @@ impl ArborWindow {
             || self.manage_presets_modal.is_some()
             || self.manage_repo_presets_modal.is_some()
             || self.daemon_auth_modal.is_some()
+            || self.start_daemon_modal
             || self.connect_to_host_modal.is_some()
         {
             return;
@@ -8260,16 +8304,19 @@ impl ArborWindow {
                             } else {
                                 theme.text_disabled
                             }))
-                            .when(daemon_connected, |this| {
-                                this.cursor_pointer()
-                                    .hover(|this| {
-                                        this.bg(rgb(theme.panel_bg))
-                                            .text_color(rgb(theme.text_primary))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                        this.open_external_url(&web_ui_url, cx);
-                                    }))
+                            .cursor_pointer()
+                            .hover(|this| {
+                                this.bg(rgb(theme.panel_bg))
+                                    .text_color(rgb(theme.text_primary))
                             })
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                if this.terminal_daemon.is_some() {
+                                    this.open_external_url(&web_ui_url, cx);
+                                } else {
+                                    this.start_daemon_modal = true;
+                                    cx.notify();
+                                }
+                            }))
                             .child(
                                 div()
                                     .font_family(FONT_MONO)
@@ -13106,6 +13153,80 @@ impl ArborWindow {
             )
     }
 
+    fn render_start_daemon_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        if !self.start_daemon_modal {
+            return div();
+        }
+        let theme = self.theme();
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.start_daemon_modal = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.15))
+            .child(
+                div()
+                    .w(px(420.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_primary))
+                            .child("Start Daemon"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(
+                                "The terminal daemon (arbor-httpd) is not running. \
+                                 Start it to enable remote control and terminal persistence.",
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                action_button(theme, "cancel-start-daemon", "Cancel", false, false)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.start_daemon_modal = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                action_button(theme, "confirm-start-daemon", "Start", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.start_daemon_modal = false;
+                                        this.try_start_and_connect_daemon(cx);
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
     fn render_connect_to_host_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(ref modal) = self.connect_to_host_modal else {
             return div();
@@ -14505,6 +14626,7 @@ impl Render for ArborWindow {
             .child(self.render_theme_picker_modal(cx))
             .child(self.render_settings_modal(cx))
             .child(self.render_daemon_auth_modal(cx))
+            .child(self.render_start_daemon_modal(cx))
             .child(self.render_connect_to_host_modal(cx))
             .child(div().when_some(self.theme_toast.clone(), |this, toast| {
                 this.child(
@@ -16608,21 +16730,30 @@ fn highlight_lines_with_syntect(
         let mut highlighter = HighlightLines::new(syntax, theme);
         raw_lines
             .iter()
-            .map(|line| match highlighter.highlight_line(line, &syntax_set) {
-                Ok(ranges) => ranges
-                    .into_iter()
-                    .map(|(style, text)| {
-                        let c = style.foreground;
-                        FileViewSpan {
-                            text: text.to_owned(),
-                            color: (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32,
-                        }
-                    })
-                    .collect(),
-                Err(_) => vec![FileViewSpan {
-                    text: line.to_owned(),
-                    color: default_color,
-                }],
+            .map(|line| {
+                // Syntect grammars loaded with load_defaults_newlines() require
+                // newline-terminated lines for correct tokenisation.
+                let line_nl = format!("{line}\n");
+                match highlighter.highlight_line(&line_nl, &syntax_set) {
+                    Ok(ranges) => ranges
+                        .into_iter()
+                        .filter_map(|(style, text)| {
+                            let trimmed = text.trim_end_matches('\n');
+                            if trimmed.is_empty() {
+                                return None;
+                            }
+                            let c = style.foreground;
+                            Some(FileViewSpan {
+                                text: trimmed.to_owned(),
+                                color: (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32,
+                            })
+                        })
+                        .collect(),
+                    Err(_) => vec![FileViewSpan {
+                        text: line.to_owned(),
+                        color: default_color,
+                    }],
+                }
             })
             .collect()
     } else {
