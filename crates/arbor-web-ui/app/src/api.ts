@@ -48,6 +48,10 @@ function parseChangeKind(value: unknown): ChangeKind | null {
 
 async function fetchJson(url: string): Promise<unknown> {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("authentication required");
+  }
   if (!response.ok) {
     throw new Error(`request failed (${response.status}) for ${url}`);
   }
@@ -189,6 +193,10 @@ export async function createTerminal(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("authentication required");
+  }
   if (!response.ok) {
     throw new Error(`failed to create terminal (${response.status})`);
   }
@@ -303,6 +311,10 @@ async function postProcessAction(url: string): Promise<void> {
     method: "POST",
     headers: { Accept: "application/json" },
   });
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("authentication required");
+  }
   if (!response.ok) {
     throw new Error(`process action failed (${response.status})`);
   }

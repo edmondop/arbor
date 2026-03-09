@@ -50,7 +50,7 @@ run port="": web-ui-build-if-needed
     fi
     echo "daemon port: $DAEMON_PORT"
     export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
-    export ARBOR_HTTPD_BIND="127.0.0.1:${DAEMON_PORT}"
+    export ARBOR_HTTPD_PORT="${DAEMON_PORT}"
     cargo +{{nightly_toolchain}} run -p arbor-httpd &
     HTTPD_PID=$!
     trap "kill $HTTPD_PID 2>/dev/null" EXIT
@@ -76,7 +76,7 @@ run-mcp port="": web-ui-build-if-needed
       DAEMON_PORT="{{port}}"
     fi
     export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
-    export ARBOR_HTTPD_BIND="127.0.0.1:${DAEMON_PORT}"
+    export ARBOR_HTTPD_PORT="${DAEMON_PORT}"
     cargo +{{nightly_toolchain}} run -p arbor-httpd &
     HTTPD_PID=$!
     trap "kill $HTTPD_PID 2>/dev/null" EXIT

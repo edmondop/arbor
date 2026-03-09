@@ -48,6 +48,16 @@ else
   echo "warning: web-ui dist not found at ${WEB_UI_DIST}, skipping bundle"
 fi
 
+# Bundle fonts for the GUI.
+FONTS_DIR="${ROOT_DIR}/assets/fonts"
+if [[ -d "${FONTS_DIR}" ]]; then
+  mkdir -p "${STAGING_DIR}/share/arbor/fonts"
+  cp "${FONTS_DIR}"/*.ttf "${STAGING_DIR}/share/arbor/fonts/"
+  echo "bundled fonts from ${FONTS_DIR}"
+else
+  echo "warning: fonts not found at ${FONTS_DIR}, skipping bundle"
+fi
+
 tar -C "${OUTPUT_DIR}" -czf "${ARCHIVE_PATH}" "$(basename "${STAGING_DIR}")"
 
 echo "${ARCHIVE_PATH}"

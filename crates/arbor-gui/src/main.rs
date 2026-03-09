@@ -137,6 +137,76 @@ const PRESET_ICON_OPENCODE_SVG: &[u8] =
 const PRESET_ICON_COPILOT_SVG: &[u8] =
     include_bytes!("../../../assets/preset-icons/copilot-white.svg");
 
+const BUNDLED_FONT_FILES: &[&str] = &[
+    "CaskaydiaMonoNerdFontMono-Regular.ttf",
+    "CaskaydiaMonoNerdFontMono-Bold.ttf",
+];
+
+/// Load bundled fonts from disk and register them with the text system.
+///
+/// In a macOS `.app` bundle the fonts live under `Contents/Resources/fonts/`.
+/// During development they are read from the repo-root `assets/fonts/` directory.
+fn register_bundled_fonts(cx: &App) {
+    let fonts_dir = find_fonts_dir();
+    let Some(fonts_dir) = fonts_dir else {
+        tracing::warn!("bundled fonts directory not found; Nerd Font icons may not render");
+        return;
+    };
+
+    let mut font_data: Vec<std::borrow::Cow<'static, [u8]>> = Vec::new();
+    for name in BUNDLED_FONT_FILES {
+        let path = fonts_dir.join(name);
+        match fs::read(&path) {
+            Ok(bytes) => font_data.push(std::borrow::Cow::Owned(bytes)),
+            Err(error) => tracing::warn!("failed to read font {}: {error:#}", path.display()),
+        }
+    }
+
+    if font_data.is_empty() {
+        return;
+    }
+
+    if let Err(error) = cx.text_system().add_fonts(font_data) {
+        tracing::warn!("failed to register bundled fonts: {error:#}");
+    }
+}
+
+/// Locate the `fonts/` directory, checking packaged bundle paths first, then
+/// the repo-root `assets/` tree for development builds.
+fn find_fonts_dir() -> Option<PathBuf> {
+    if let Ok(exe) = env::current_exe() {
+        let exe_dir = exe.parent()?;
+
+        // macOS .app bundle: <exe>/../../Resources/fonts
+        let macos_bundle = exe_dir
+            .parent() // Contents/
+            .map(|p| p.join("Resources").join("fonts"));
+        if let Some(dir) = macos_bundle
+            && dir.is_dir()
+        {
+            return Some(dir);
+        }
+
+        // Linux package: <exe>/../share/arbor/fonts
+        let linux_share = exe_dir
+            .parent() // bin/ -> package root
+            .map(|p| p.join("share").join("arbor").join("fonts"));
+        if let Some(dir) = linux_share
+            && dir.is_dir()
+        {
+            return Some(dir);
+        }
+    }
+
+    // Development fallback: repo-root assets/fonts relative to the crate
+    let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    if dev_dir.is_dir() {
+        return Some(dev_dir);
+    }
+
+    None
+}
+
 fn terminal_mono_font(cx: &App) -> gpui::Font {
     let fallbacks = FontFallbacks::from_fonts(
         TERMINAL_FONT_FAMILIES
@@ -21705,6 +21775,7 @@ fn main() {
     tracing::info!("Arbor starting");
 
     Application::new().run(move |cx: &mut App| {
+        register_bundled_fonts(cx);
         set_dock_icon();
         cx.set_http_client(simple_http_client::create_http_client());
         install_app_menu_and_keys(cx);

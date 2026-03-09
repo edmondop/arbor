@@ -50,6 +50,16 @@ else
   echo "warning: web-ui dist not found at ${WEB_UI_DIST}, skipping bundle"
 fi
 
+# Bundle fonts for the GUI.
+FONTS_DIR="${ROOT_DIR}/assets/fonts"
+if [[ -d "${FONTS_DIR}" ]]; then
+  mkdir -p "${RESOURCES_DIR}/fonts"
+  cp "${FONTS_DIR}"/*.ttf "${RESOURCES_DIR}/fonts/"
+  echo "bundled fonts from ${FONTS_DIR}"
+else
+  echo "warning: fonts not found at ${FONTS_DIR}, skipping bundle"
+fi
+
 cp "${ROOT_DIR}/packaging/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 printf 'APPL????' > "${CONTENTS_DIR}/PkgInfo"
 

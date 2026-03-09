@@ -235,33 +235,45 @@ pub async fn auth_middleware(
         }
     }
 
-    let failure_reason = if request.headers().contains_key("authorization") {
-        "invalid bearer token"
-    } else if request.headers().contains_key("cookie") {
-        "invalid session cookie"
-    } else {
-        "missing credentials"
-    };
+    let has_credentials =
+        request.headers().contains_key("authorization") || request.headers().contains_key("cookie");
 
-    match auth.record_failure(addr.ip()) {
-        FailedAuthOutcome::Blocked { retry_after } => {
-            eprintln!(
-                "arbor-httpd auth: blocked {} after repeated failures on {} ({failure_reason}) for {}s",
-                addr.ip(),
-                request_path,
-                retry_after.as_secs().max(1)
-            );
-            blocked_response(retry_after)
-        },
-        FailedAuthOutcome::NotBlocked => {
-            eprintln!(
-                "arbor-httpd auth: unauthorized remote request from {} to {} ({failure_reason})",
-                addr.ip(),
-                request_path
-            );
-            (StatusCode::UNAUTHORIZED, Html(LOGIN_PAGE_HTML)).into_response()
-        },
+    // Only count failures when credentials were actually provided but wrong.
+    // Missing credentials (e.g. first browser visit) should not penalise the IP.
+    if has_credentials {
+        let failure_reason = if request.headers().contains_key("authorization") {
+            "invalid bearer token"
+        } else {
+            "invalid session cookie"
+        };
+
+        match auth.record_failure(addr.ip()) {
+            FailedAuthOutcome::Blocked { retry_after } => {
+                eprintln!(
+                    "arbor-httpd auth: blocked {} after repeated failures on {} ({failure_reason}) for {}s",
+                    addr.ip(),
+                    request_path,
+                    retry_after.as_secs().max(1)
+                );
+                return blocked_response(retry_after);
+            },
+            FailedAuthOutcome::NotBlocked => {
+                eprintln!(
+                    "arbor-httpd auth: unauthorized remote request from {} to {} ({failure_reason})",
+                    addr.ip(),
+                    request_path
+                );
+            },
+        }
+    } else {
+        eprintln!(
+            "arbor-httpd auth: unauthorized remote request from {} to {} (missing credentials)",
+            addr.ip(),
+            request_path
+        );
     }
+
+    StatusCode::UNAUTHORIZED.into_response()
 }
 
 /// Build a router for auth-related endpoints (login page + login POST).
@@ -334,9 +346,12 @@ async fn handle_login(
     }
 
     let session_value = auth.sign_session(configured_token);
+    // No `Secure` flag — arbor-httpd serves plain HTTP. On a LAN this is
+    // acceptable; if placed behind a TLS reverse proxy the proxy can add
+    // the Secure attribute via its own Set-Cookie rewriting.
     let cookie = format!(
         "{SESSION_COOKIE_NAME}={session_value}; Path=/; HttpOnly; SameSite=Strict; \
-         Secure; Max-Age={SESSION_MAX_AGE_SECS}"
+         Max-Age={SESSION_MAX_AGE_SECS}"
     );
 
     (
@@ -347,15 +362,39 @@ async fn handle_login(
         .into_response()
 }
 
+/// Outer middleware that redirects browser requests to `/login` when the inner
+/// handler returns 401.  API clients (JSON, Bearer token) receive the raw 401
+/// so they can handle it programmatically.
+async fn redirect_unauthorized(request: Request<Body>, next: Next) -> Response {
+    let accepts_html = request
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/html"));
+
+    let response = next.run(request).await;
+
+    if response.status() == StatusCode::UNAUTHORIZED && accepts_html {
+        return (StatusCode::SEE_OTHER, [(header::LOCATION, "/login")]).into_response();
+    }
+
+    response
+}
+
 /// Apply auth middleware to a router, adding login routes that bypass auth.
 pub fn with_auth(app: Router, auth_state: AuthState) -> Router {
     let login_routes = auth_routes().with_state(auth_state.clone());
 
-    // Login routes are NOT behind the auth middleware
-    let protected = app.route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
+    // `.layer()` (not `.route_layer()`) so auth covers both matched routes
+    // AND fallback services (e.g. ServeDir for the web UI static assets).
+    let protected = app.layer(middleware::from_fn_with_state(auth_state, auth_middleware));
 
-    // Merge: login routes first (unprotected), then protected routes
-    login_routes.merge(protected)
+    // Merge: login routes first (unprotected), then protected routes.
+    // The outer redirect layer catches 401s from the auth middleware and
+    // sends browsers to /login instead.
+    login_routes
+        .merge(protected)
+        .layer(middleware::from_fn(redirect_unauthorized))
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
