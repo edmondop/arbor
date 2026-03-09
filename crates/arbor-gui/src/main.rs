@@ -1975,10 +1975,15 @@ impl ArborWindow {
             tracing::warn!(%error, "failed to load daemon session metadata");
             notice_parts.push(format!("failed to load daemon session metadata: {error}"));
         }
+        // When opening a window for a remote daemon, skip the local daemon connection entirely.
+        let skip_local_daemon = pending_daemon.is_some();
         let daemon_base_url =
             daemon_base_url_from_config(loaded_config.config.daemon_url.as_deref());
-        tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
-        let mut terminal_daemon =
+        let mut terminal_daemon = if skip_local_daemon {
+            tracing::info!("skipping local daemon connection (remote daemon pending)");
+            None
+        } else {
+            tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
             match terminal_daemon_http::default_terminal_daemon_client(&daemon_base_url) {
                 Ok(client) => Some(client),
                 Err(error) => {
@@ -1986,69 +1991,78 @@ impl ArborWindow {
                     notice_parts.push(format!("invalid daemon_url `{daemon_base_url}`: {error}"));
                     None
                 },
-            };
-        let (initial_daemon_records, attach_daemon_runtime) =
-            if let Some(daemon) = terminal_daemon.as_ref() {
-                match daemon.list_sessions() {
-                    Ok(records) => {
-                        // Check for version mismatch on local daemons and restart if needed.
-                        if daemon_url_is_local(&daemon_base_url) {
-                            if let Some((records, restarted)) =
-                                check_daemon_version_and_restart(daemon, &daemon_base_url)
-                            {
-                                if let Some(new_daemon) = restarted {
-                                    terminal_daemon = Some(new_daemon);
-                                }
-                                (records, true)
-                            } else {
-                                (records, true)
+            }
+        };
+        let (initial_daemon_records, attach_daemon_runtime) = if skip_local_daemon {
+            (Vec::new(), false)
+        } else if let Some(daemon) = terminal_daemon.as_ref() {
+            match daemon.list_sessions() {
+                Ok(records) => {
+                    // Check for version mismatch on local daemons and restart if needed.
+                    if daemon_url_is_local(&daemon_base_url) {
+                        if let Some((records, restarted)) =
+                            check_daemon_version_and_restart(daemon, &daemon_base_url)
+                        {
+                            if let Some(new_daemon) = restarted {
+                                terminal_daemon = Some(new_daemon);
                             }
+                            (records, true)
                         } else {
                             (records, true)
                         }
-                    },
-                    Err(error) => {
-                        let error_text = error.to_string();
-                        if daemon_error_is_connection_refused(&error_text) {
-                            tracing::debug!("daemon not running, attempting auto-start");
-                            if let Some(started) = try_auto_start_daemon(&daemon_base_url) {
-                                let records = started.list_sessions().unwrap_or_default();
-                                terminal_daemon = Some(started);
-                                (records, true)
-                            } else {
-                                tracing::debug!("auto-start failed, falling back to cold restore");
-                                terminal_daemon = None;
-                                let cold_records = daemon_session_store.load().unwrap_or_default();
-                                (cold_records, false)
-                            }
+                    } else {
+                        (records, true)
+                    }
+                },
+                Err(error) => {
+                    let error_text = error.to_string();
+                    if daemon_error_is_connection_refused(&error_text) {
+                        tracing::debug!("daemon not running, attempting auto-start");
+                        if let Some(started) = try_auto_start_daemon(&daemon_base_url) {
+                            let records = started.list_sessions().unwrap_or_default();
+                            terminal_daemon = Some(started);
+                            (records, true)
                         } else {
-                            notice_parts.push(format!(
-                                "failed to list terminal sessions from daemon at {}: {error}",
-                                daemon.base_url()
-                            ));
-                            (Vec::new(), false)
+                            tracing::debug!("auto-start failed, falling back to cold restore");
+                            terminal_daemon = None;
+                            let cold_records = daemon_session_store.load().unwrap_or_default();
+                            (cold_records, false)
                         }
-                    },
-                }
-            } else {
-                (Vec::new(), false)
-            };
+                    } else {
+                        notice_parts.push(format!(
+                            "failed to list terminal sessions from daemon at {}: {error}",
+                            daemon.base_url()
+                        ));
+                        (Vec::new(), false)
+                    }
+                },
+            }
+        } else {
+            (Vec::new(), false)
+        };
 
         let repository_store_file_exists = repository_store.has_store_file();
         let mut loaded_entries_were_empty = false;
-        let mut repositories = match repository_store.load_entries() {
-            Ok(entries) => {
-                loaded_entries_were_empty = entries.is_empty();
-                repository_store::resolve_repositories_from_entries(entries)
-            },
-            Err(error) => {
-                notice_parts.push(format!("failed to load saved repositories: {error}"));
-                Vec::new()
-            },
+        // Skip loading local repositories for remote daemon windows — the remote
+        // daemon provides its own repos/worktrees via the API.
+        let mut repositories = if skip_local_daemon {
+            Vec::new()
+        } else {
+            match repository_store.load_entries() {
+                Ok(entries) => {
+                    loaded_entries_were_empty = entries.is_empty();
+                    repository_store::resolve_repositories_from_entries(entries)
+                },
+                Err(error) => {
+                    notice_parts.push(format!("failed to load saved repositories: {error}"));
+                    Vec::new()
+                },
+            }
         };
         let mut persist_repositories = false;
 
-        if let Some(ref root) = repo_root
+        if !skip_local_daemon
+            && let Some(ref root) = repo_root
             && !repositories
                 .iter()
                 .any(|repository| repository.contains_checkout_root(root))
