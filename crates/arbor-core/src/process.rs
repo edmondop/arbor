@@ -1,7 +1,10 @@
-use serde::{Deserialize, Serialize};
+use {
+    schemars::JsonSchema,
+    serde::{Deserialize, Serialize},
+};
 
 /// Status of a managed process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProcessStatus {
     Running,
@@ -11,7 +14,7 @@ pub enum ProcessStatus {
 }
 
 /// Runtime information about a managed process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProcessInfo {
     pub name: String,
     pub command: String,

@@ -13,12 +13,15 @@ path = "src/main.rs"
 vendored-openssl = ["arbor-core/vendored-openssl"]
 
 [dependencies]
+arbor-daemon-client = { path = "../arbor-daemon-client" }
 arbor-core   = { path = "../arbor-core" }
 arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 arbor-web-ui = { path = "../arbor-web-ui" }
 axum         = { features = ["ws"], workspace = true }
 config       = { workspace = true }
 futures-util = "0.3"
+git2         = { workspace = true }
+gix          = { workspace = true }
 hmac         = { workspace = true }
 hostname     = "0.4"
 mdns-sd      = { workspace = true }

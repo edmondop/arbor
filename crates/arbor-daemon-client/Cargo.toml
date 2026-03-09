@@ -1,0 +1,17 @@
+[package]
+name = "arbor-daemon-client"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arbor-core = { path = "../arbor-core" }
+schemars = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+
+[lints]
+workspace = true

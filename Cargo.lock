@@ -129,10 +129,23 @@ dependencies = [
  "gix",
  "gix-diff",
  "openssl-sys",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "arbor-daemon-client"
+version = "0.1.0"
+dependencies = [
+ "arbor-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "ureq",
 ]
 
 [[package]]
@@ -176,11 +189,14 @@ name = "arbor-httpd"
 version = "0.1.0"
 dependencies = [
  "arbor-core",
+ "arbor-daemon-client",
  "arbor-terminal-emulator",
  "arbor-web-ui",
  "axum",
  "config",
  "futures-util",
+ "git2",
+ "gix",
  "hmac",
  "hostname",
  "mdns-sd",
@@ -203,12 +219,12 @@ name = "arbor-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arbor-core",
+ "arbor-daemon-client",
  "rmcp",
  "schemars",
  "serde",
- "serde_json",
  "tokio",
- "ureq",
 ]
 
 [[package]]

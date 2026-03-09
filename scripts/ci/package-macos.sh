@@ -31,6 +31,16 @@ else
   echo "note: arbor-httpd not found at ${HTTPD_PATH}, skipping bundle"
 fi
 
+# Bundle arbor-mcp alongside the main binary so packaged installs can expose
+# Arbor as an MCP server without a separate build.
+MCP_PATH="$(dirname "${BINARY_PATH}")/arbor-mcp"
+if [[ -f "${MCP_PATH}" ]]; then
+  install -m 0755 "${MCP_PATH}" "${MACOS_DIR}/arbor-mcp"
+  echo "bundled arbor-mcp from ${MCP_PATH}"
+else
+  echo "note: arbor-mcp not found at ${MCP_PATH}, skipping bundle"
+fi
+
 # Bundle web UI assets for arbor-httpd.
 WEB_UI_DIST="${ROOT_DIR}/crates/arbor-web-ui/app/dist"
 if [[ -d "${WEB_UI_DIST}" ]]; then

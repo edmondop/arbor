@@ -22,6 +22,12 @@ use {
         process::ProcessInfo,
         worktree,
     },
+    arbor_daemon_client::{
+        AgentSessionDto, ChangedFileDto, CommitWorktreeRequest, CreateTerminalRequest,
+        CreateTerminalResponse, CreateWorktreeRequest, DeleteWorktreeRequest, GitActionResponse,
+        HealthResponse, PushWorktreeRequest, RepositoryDto, TerminalResizeRequest,
+        TerminalSignalRequest, WorktreeDto, WorktreeMutationResponse,
+    },
     axum::{
         Json, Router,
         body::Bytes,
@@ -109,13 +115,6 @@ enum AgentWsEvent {
     Update { session: AgentSessionDto },
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct AgentSessionDto {
-    cwd: String,
-    state: String,
-    updated_at_unix_ms: u64,
-}
-
 #[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
@@ -123,33 +122,6 @@ struct ApiError {
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 type ApiResponse = Result<Response, (StatusCode, Json<ApiError>)>;
-
-#[derive(Debug, Serialize)]
-struct HealthResponse {
-    status: &'static str,
-    version: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct RepositoryDto {
-    root: String,
-    label: String,
-    github_repo_slug: Option<String>,
-    avatar_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct WorktreeDto {
-    repo_root: String,
-    path: String,
-    branch: String,
-    is_primary_checkout: bool,
-    last_activity_unix_ms: Option<u64>,
-    diff_additions: Option<usize>,
-    diff_deletions: Option<usize>,
-    pr_number: Option<u64>,
-    pr_url: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct WorktreeQuery {
@@ -161,46 +133,9 @@ struct ChangesQuery {
     path: String,
 }
 
-#[derive(Debug, Serialize)]
-struct ChangedFileDto {
-    path: String,
-    kind: String,
-    additions: usize,
-    deletions: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateTerminalRequest {
-    session_id: Option<String>,
-    workspace_id: Option<String>,
-    cwd: String,
-    shell: Option<String>,
-    cols: Option<u16>,
-    rows: Option<u16>,
-    title: Option<String>,
-    command: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateTerminalResponse {
-    is_new_session: bool,
-    session: DaemonSessionRecord,
-}
-
 #[derive(Debug, Deserialize)]
 struct SnapshotQuery {
     max_lines: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TerminalResizeRequest {
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Debug, Deserialize)]
-struct TerminalSignalRequest {
-    signal: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,8 +383,11 @@ fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/repositories", get(list_repositories))
-        .route("/worktrees", get(list_worktrees))
+        .route("/worktrees", get(list_worktrees).post(create_worktree))
+        .route("/worktrees/delete", post(delete_worktree))
         .route("/worktrees/changes", get(list_worktree_changes))
+        .route("/worktrees/commit", post(commit_worktree))
+        .route("/worktrees/push", post(push_worktree))
         .route("/terminals", get(list_terminals).post(create_terminal))
         .route(
             "/terminals/{session_id}/snapshot",
@@ -462,6 +400,7 @@ fn router(state: AppState) -> Router {
         .route("/terminals/{session_id}", delete(kill_terminal))
         .route("/terminals/{session_id}/ws", get(terminal_ws))
         .route("/agent/notify", post(agent_notify))
+        .route("/agent/activity", get(list_agent_activity))
         .route("/agent/activity/ws", get(agent_activity_ws))
         .route("/processes", get(list_processes))
         .route("/processes/start-all", post(start_all_processes))
@@ -485,8 +424,8 @@ fn router(state: AppState) -> Router {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
-        status: "ok",
-        version: HTTPD_VERSION,
+        status: "ok".to_owned(),
+        version: HTTPD_VERSION.to_owned(),
     })
 }
 
@@ -643,6 +582,93 @@ async fn list_worktrees(
     Ok(Json(worktrees))
 }
 
+async fn create_worktree(
+    Json(request): Json<CreateWorktreeRequest>,
+) -> ApiResult<WorktreeMutationResponse> {
+    let repo_root = PathBuf::from(&request.repo_root);
+    let worktree_path = PathBuf::from(&request.path);
+    let branch = request
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    if paths_equivalent(&repo_root, &worktree_path) {
+        return Err(internal_error(
+            "refusing to create a worktree over the primary checkout",
+        ));
+    }
+
+    if worktree_path.exists() {
+        return Err(internal_error(format!(
+            "worktree path already exists: {}",
+            worktree_path.display()
+        )));
+    }
+
+    let Some(parent) = worktree_path.parent() else {
+        return Err(internal_error("invalid worktree path"));
+    };
+    std::fs::create_dir_all(parent).map_err(|error| {
+        internal_error(format!(
+            "failed to create worktree parent directory `{}`: {error}",
+            parent.display()
+        ))
+    })?;
+
+    worktree::add(&repo_root, &worktree_path, worktree::AddWorktreeOptions {
+        branch: branch.as_deref(),
+        detach: request.detach.unwrap_or(false),
+        force: request.force.unwrap_or(false),
+    })
+    .map_err(|error| internal_error(format!("failed to create worktree: {error}")))?;
+
+    let resolved_branch = git_branch_name_for_worktree(&worktree_path).ok();
+    Ok(Json(WorktreeMutationResponse {
+        repo_root: repo_root.display().to_string(),
+        path: worktree_path.display().to_string(),
+        branch: resolved_branch,
+        deleted_branch: None,
+        message: format!("created worktree at {}", worktree_path.display()),
+    }))
+}
+
+async fn delete_worktree(
+    Json(request): Json<DeleteWorktreeRequest>,
+) -> ApiResult<WorktreeMutationResponse> {
+    let repo_root = PathBuf::from(&request.repo_root);
+    let worktree_path = PathBuf::from(&request.path);
+
+    if paths_equivalent(&repo_root, &worktree_path) {
+        return Err(internal_error("refusing to delete the primary checkout"));
+    }
+
+    let branch = git_branch_name_for_worktree(&worktree_path).ok();
+    worktree::remove(&repo_root, &worktree_path, request.force.unwrap_or(false))
+        .map_err(|error| internal_error(format!("failed to delete worktree: {error}")))?;
+
+    let deleted_branch = if request.delete_branch.unwrap_or(false)
+        && branch.as_deref().is_some_and(|name| !name.is_empty())
+    {
+        let branch_name = branch.clone().unwrap_or_default();
+        worktree::delete_branch(&repo_root, &branch_name).map_err(|error| {
+            internal_error(format!("failed to delete branch `{branch_name}`: {error}"))
+        })?;
+        Some(branch_name)
+    } else {
+        None
+    };
+
+    Ok(Json(WorktreeMutationResponse {
+        repo_root: repo_root.display().to_string(),
+        path: worktree_path.display().to_string(),
+        branch,
+        deleted_branch,
+        message: format!("deleted worktree at {}", worktree_path.display()),
+    }))
+}
+
 async fn list_worktree_changes(
     Query(query): Query<ChangesQuery>,
 ) -> ApiResult<Vec<ChangedFileDto>> {
@@ -665,6 +691,41 @@ async fn list_worktree_changes(
         .collect();
 
     Ok(Json(dtos))
+}
+
+async fn commit_worktree(
+    Json(request): Json<CommitWorktreeRequest>,
+) -> ApiResult<GitActionResponse> {
+    let worktree_path = PathBuf::from(&request.path);
+    let changed_files = changes::changed_files(&worktree_path).map_err(|error| {
+        internal_error(format!(
+            "failed to gather changed files for `{}`: {error}",
+            worktree_path.display()
+        ))
+    })?;
+
+    let commit_message =
+        run_git_commit_for_worktree(&worktree_path, &changed_files, request.message.as_deref())
+            .map_err(internal_error)?;
+
+    Ok(Json(GitActionResponse {
+        path: worktree_path.display().to_string(),
+        branch: git_branch_name_for_worktree(&worktree_path).ok(),
+        message: "commit complete".to_owned(),
+        commit_message: Some(commit_message),
+    }))
+}
+
+async fn push_worktree(Json(request): Json<PushWorktreeRequest>) -> ApiResult<GitActionResponse> {
+    let worktree_path = PathBuf::from(&request.path);
+    let push_message = run_git_push_for_worktree(&worktree_path).map_err(internal_error)?;
+
+    Ok(Json(GitActionResponse {
+        path: worktree_path.display().to_string(),
+        branch: git_branch_name_for_worktree(&worktree_path).ok(),
+        message: push_message,
+        commit_message: None,
+    }))
 }
 
 async fn list_terminals(State(state): State<AppState>) -> ApiResult<Vec<DaemonSessionRecord>> {
@@ -1047,6 +1108,11 @@ async fn agent_notify(
     StatusCode::OK
 }
 
+async fn list_agent_activity(State(state): State<AppState>) -> ApiResult<Vec<AgentSessionDto>> {
+    let mut sessions = state.agent_sessions.lock().await;
+    Ok(Json(agent_session_snapshot(&mut sessions)))
+}
+
 async fn agent_activity_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| handle_agent_activity_ws(state, socket))
         .into_response()
@@ -1054,18 +1120,8 @@ async fn agent_activity_ws(State(state): State<AppState>, ws: WebSocketUpgrade) 
 
 async fn handle_agent_activity_ws(state: AppState, mut socket: WebSocket) {
     let snapshot = {
-        let sessions = state.agent_sessions.lock().await;
-        let dtos: Vec<AgentSessionDto> = sessions
-            .values()
-            .map(|session| AgentSessionDto {
-                cwd: session.cwd.clone(),
-                state: match session.state {
-                    AgentState::Working => "working".to_owned(),
-                    AgentState::Waiting => "waiting".to_owned(),
-                },
-                updated_at_unix_ms: session.updated_at_unix_ms,
-            })
-            .collect();
+        let mut sessions = state.agent_sessions.lock().await;
+        let dtos = agent_session_snapshot(&mut sessions);
         AgentWsEvent::Snapshot { sessions: dtos }
     };
 
@@ -1093,6 +1149,25 @@ async fn send_ws_json(socket: &mut WebSocket, value: &impl Serialize) -> Result<
         .send(Message::Text(payload.into()))
         .await
         .map_err(|_| ())
+}
+
+fn agent_session_snapshot(sessions: &mut HashMap<String, AgentSession>) -> Vec<AgentSessionDto> {
+    let cutoff = current_unix_timestamp_millis().saturating_sub(AGENT_SESSION_EXPIRY_SECS * 1000);
+    sessions.retain(|_, session| session.updated_at_unix_ms > cutoff);
+
+    let mut snapshot: Vec<AgentSessionDto> = sessions
+        .values()
+        .map(|session| AgentSessionDto {
+            cwd: session.cwd.clone(),
+            state: match session.state {
+                AgentState::Working => "working".to_owned(),
+                AgentState::Waiting => "waiting".to_owned(),
+            },
+            updated_at_unix_ms: session.updated_at_unix_ms,
+        })
+        .collect();
+    snapshot.sort_by(|left, right| left.cwd.cmp(&right.cwd));
+    snapshot
 }
 
 /// Dynamic SPA fallback: serves `index.html` if it exists (for client-side
@@ -1211,12 +1286,238 @@ fn repository_display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+fn auto_commit_subject(changed_files: &[changes::ChangedFile]) -> String {
+    if changed_files.len() == 1 {
+        let file_label = changed_files[0]
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| changed_files[0].path.display().to_string());
+        return format!("chore: update {file_label}");
+    }
+
+    let has_added = changed_files.iter().any(|change| {
+        matches!(
+            change.kind,
+            changes::ChangeKind::Added | changes::ChangeKind::IntentToAdd
+        )
+    });
+    let has_removed = changed_files
+        .iter()
+        .any(|change| matches!(change.kind, changes::ChangeKind::Removed));
+    let has_renamed = changed_files
+        .iter()
+        .any(|change| matches!(change.kind, changes::ChangeKind::Renamed));
+    let verb = if has_added && !has_removed && !has_renamed {
+        "add"
+    } else if has_removed && !has_added && !has_renamed {
+        "remove"
+    } else if has_renamed && !has_added && !has_removed {
+        "rename"
+    } else {
+        "update"
+    };
+
+    format!("chore: {verb} {} files", changed_files.len())
+}
+
+fn auto_commit_body(changed_files: &[changes::ChangedFile]) -> String {
+    let mut lines = vec!["Auto-generated by Arbor.".to_owned(), String::new()];
+
+    for change in changed_files.iter().take(12) {
+        let mut line = format!("- {} {}", change_code(change.kind), change.path.display());
+        if change.additions > 0 || change.deletions > 0 {
+            line.push_str(&format!(" (+{} -{})", change.additions, change.deletions));
+        }
+        lines.push(line);
+    }
+
+    if changed_files.len() > 12 {
+        lines.push(format!("- ... and {} more", changed_files.len() - 12));
+    }
+
+    lines.join("\n")
+}
+
+fn change_code(kind: changes::ChangeKind) -> &'static str {
+    match kind {
+        changes::ChangeKind::Added => "A",
+        changes::ChangeKind::Modified => "M",
+        changes::ChangeKind::Removed => "D",
+        changes::ChangeKind::Renamed => "R",
+        changes::ChangeKind::Copied => "C",
+        changes::ChangeKind::TypeChange => "T",
+        changes::ChangeKind::Conflict => "U",
+        changes::ChangeKind::IntentToAdd => "I",
+    }
+}
+
+fn run_git_commit_for_worktree(
+    worktree_path: &Path,
+    changed_files: &[changes::ChangedFile],
+    message_override: Option<&str>,
+) -> Result<String, String> {
+    if changed_files.is_empty() {
+        return Err("nothing to commit".to_owned());
+    }
+
+    let repo = git2::Repository::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
+
+    let mut index = repo
+        .index()
+        .map_err(|error| format!("failed to read index: {error}"))?;
+    index
+        .add_all(["."], git2::IndexAddOption::DEFAULT, None)
+        .map_err(|error| format!("failed to stage changes: {error}"))?;
+    index
+        .update_all(["."], None)
+        .map_err(|error| format!("failed to update index: {error}"))?;
+    index
+        .write()
+        .map_err(|error| format!("failed to write index: {error}"))?;
+
+    let tree_oid = index
+        .write_tree()
+        .map_err(|error| format!("failed to write tree: {error}"))?;
+    let tree = repo
+        .find_tree(tree_oid)
+        .map_err(|error| format!("failed to find tree: {error}"))?;
+
+    if let Ok(head) = repo.head()
+        && let Ok(head_commit) = head.peel_to_commit()
+        && head_commit.tree_id() == tree_oid
+    {
+        return Err("nothing to commit".to_owned());
+    }
+
+    let message = message_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let subject = auto_commit_subject(changed_files);
+            let body = auto_commit_body(changed_files);
+            format!("{subject}\n\n{body}")
+        });
+
+    let signature = repo
+        .signature()
+        .map_err(|error| format!("failed to create signature: {error}"))?;
+    let parent_commits: Vec<git2::Commit<'_>> = match repo.head() {
+        Ok(head) => match head.peel_to_commit() {
+            Ok(commit) => vec![commit],
+            Err(_) => vec![],
+        },
+        Err(_) => vec![],
+    };
+    let parents: Vec<&git2::Commit<'_>> = parent_commits.iter().collect();
+
+    repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        &message,
+        &tree,
+        &parents,
+    )
+    .map_err(|error| format!("failed to create commit: {error}"))?;
+
+    Ok(message)
+}
+
+fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, String> {
+    let repo = git2::Repository::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
+
+    let head_ref = repo
+        .head()
+        .map_err(|error| format!("failed to read HEAD: {error}"))?;
+    let branch_name = head_ref
+        .shorthand()
+        .ok_or_else(|| "cannot push detached HEAD".to_owned())?
+        .to_owned();
+    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
+
+    let mut remote = repo
+        .find_remote("origin")
+        .map_err(|error| format!("failed to find remote `origin`: {error}"))?;
+
+    let mut callbacks = git2::RemoteCallbacks::new();
+    callbacks.credentials(|_url, username_from_url, allowed_types| {
+        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+            let username = username_from_url.unwrap_or("git");
+            git2::Cred::ssh_key_from_agent(username)
+        } else if allowed_types.contains(git2::CredentialType::DEFAULT) {
+            git2::Cred::default()
+        } else {
+            Err(git2::Error::from_str(
+                "no suitable credential type available",
+            ))
+        }
+    });
+
+    let mut push_options = git2::PushOptions::new();
+    push_options.remote_callbacks(callbacks);
+
+    remote
+        .push(&[&refspec], Some(&mut push_options))
+        .map_err(|error| format!("push failed: {error}"))?;
+
+    let mut config = repo
+        .config()
+        .map_err(|error| format!("failed to read config: {error}"))?;
+    let _ = config.set_str(&format!("branch.{branch_name}.remote"), "origin");
+    let _ = config.set_str(
+        &format!("branch.{branch_name}.merge"),
+        &format!("refs/heads/{branch_name}"),
+    );
+
+    Ok(format!(
+        "push complete: {branch_name} -> origin/{branch_name}"
+    ))
+}
+
+fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, String> {
+    let repo = git2::Repository::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
+
+    let head_ref = repo
+        .head()
+        .map_err(|error| format!("failed to read HEAD: {error}"))?;
+
+    head_ref
+        .shorthand()
+        .map(str::to_owned)
+        .ok_or_else(|| "worktree has detached HEAD".to_owned())
+}
+
 fn short_branch(value: &str) -> String {
     worktree::short_branch(value)
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
     worktree::paths_equivalent(left, right)
+}
+
+fn current_unix_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn github_repo_slug_for_path(repo_root: &Path) -> Option<String> {
