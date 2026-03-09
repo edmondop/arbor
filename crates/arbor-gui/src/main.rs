@@ -11779,7 +11779,6 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x10131a))
             .flex()
             .items_center()
             .justify_center()
@@ -11797,6 +11796,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                 }),
             )
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(620.))
@@ -11820,32 +11820,16 @@ impl ArborWindow {
                     // Header
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_primary))
-                                    .child("Add"),
-                            )
-                            .child(
-                                action_button(
-                                    theme,
-                                    "close-create-modal",
-                                    "Close",
-                                    ActionButtonStyle::Secondary,
-                                    true,
-                                )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_create_modal(cx);
-                                    })),
-                            ),
+                            .flex_none()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_primary))
+                            .child("Add"),
                     )
                     // Tab bar
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .gap_0()
                             .border_b_1()
@@ -11913,12 +11897,14 @@ impl ArborWindow {
                     .when(is_worktree_tab, |this| {
                         this.child(
                             div()
+                                .flex_none()
                                 .text_xs()
                                 .text_color(rgb(theme.text_muted))
                                 .child("Target base: ~/.arbor/worktrees/<repo>/<worktree>/"),
                         )
                         .child(
                             div()
+                                .flex_none()
                                 .id("create-discrete-clone-checkbox")
                                 .cursor_pointer()
                                 .rounded_sm()
@@ -11980,7 +11966,6 @@ impl ArborWindow {
                                 )
                                 .child(
                                     div()
-                                        .flex_1()
                                         .min_w_0()
                                         .flex()
                                         .flex_col()
@@ -11996,7 +11981,7 @@ impl ArborWindow {
                                             div()
                                                 .text_xs()
                                                 .text_color(rgb(theme.text_muted))
-                                                .child(CheckoutKind::DiscreteClone.description()),
+                                                .child(checkout_kind.description()),
                                         ),
                                 ),
                         )
@@ -12040,6 +12025,7 @@ impl ArborWindow {
                         )
                         .child(
                             div()
+                                .flex_none()
                                 .rounded_sm()
                                 .border_1()
                                 .border_color(rgb(theme.border))
@@ -12061,6 +12047,7 @@ impl ArborWindow {
                         )
                         .child(
                             div()
+                                .flex_none()
                                 .rounded_sm()
                                 .border_1()
                                 .border_color(rgb(theme.border))
@@ -12080,21 +12067,12 @@ impl ArborWindow {
                                         .child(target_path_preview),
                                 ),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme.text_muted))
-                                .child(if is_discrete_clone {
-                                    "Discrete clones get their own .git directory. Leave this unchecked for faster shared worktrees."
-                                } else {
-                                    "Linked worktrees share objects with the main repository. Enable discrete clone when you need a fully separate checkout."
-                                }),
-                        )
                     })
                     // Remote Outpost tab content
                     .when(is_outpost_tab, |this| {
                         this.child(
                             div()
+                                .flex_none()
                                 .id("outpost-host-selector")
                                 .cursor_pointer()
                                 .rounded_sm()
@@ -12258,20 +12236,25 @@ impl ArborWindow {
                         )
                     })
                     // Error
-                    .child(div().when_some(modal.error.clone(), |this, error| {
-                        this.rounded_sm()
-                            .border_1()
-                            .border_color(rgb(0xa44949))
-                            .bg(rgb(0x4d2a2a))
-                            .px_2()
-                            .py_1()
-                            .text_xs()
-                            .text_color(rgb(0xffd7d7))
-                            .child(error)
-                    }))
+                    .when_some(modal.error.clone(), |this, error| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(0xa44949))
+                                .bg(rgb(0x4d2a2a))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(0xffd7d7))
+                                .child(error),
+                        )
+                    })
                     // Buttons
                     .child(
                         div()
+                            .flex_none()
                             .w_full()
                             .min_w_0()
                             .flex()
@@ -12343,7 +12326,6 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x10131a))
             .flex()
             .items_center()
             .justify_center()
@@ -12361,6 +12343,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                 }),
             )
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(560.))
@@ -13186,7 +13169,6 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x10131a))
             .flex()
             .items_center()
             .justify_center()
@@ -13204,6 +13186,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                 }),
             )
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(440.))
@@ -13396,7 +13379,6 @@ impl ArborWindow {
             return div()
                 .absolute()
                 .inset_0()
-                .bg(rgb(0x10131a))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -13414,6 +13396,7 @@ impl ArborWindow {
                         cx.stop_propagation();
                     }),
                 )
+                .child(modal_backdrop())
                 .child(
                     div()
                         .w(px(620.))
@@ -13580,7 +13563,6 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x10131a))
             .flex()
             .items_center()
             .justify_center()
@@ -13598,6 +13580,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                 }),
             )
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(620.))
@@ -13791,7 +13774,6 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x10131a))
             .flex()
             .items_center()
             .justify_center()
@@ -13809,6 +13791,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                 }),
             )
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(620.))
@@ -13942,7 +13925,6 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x10131a))
             .flex()
             .items_center()
             .justify_center()
@@ -14061,14 +14043,7 @@ impl ArborWindow {
                     cx.notify();
                 }),
             )
-            // Semi-transparent backdrop (separate child so opacity doesn't affect modal)
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .bg(rgb(0x000000))
-                    .opacity(0.15),
-            )
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(820.))
@@ -14191,7 +14166,7 @@ impl ArborWindow {
                     cx.notify();
                 }),
             )
-            .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.15))
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(420.))
@@ -14329,7 +14304,7 @@ impl ArborWindow {
                     cx.notify();
                 }),
             )
-            .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.15))
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(420.))
@@ -14424,7 +14399,7 @@ impl ArborWindow {
                     cx.notify();
                 }),
             )
-            .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.15))
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(420.))
@@ -14907,7 +14882,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                 }),
             )
-            .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.15))
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(500.))
@@ -15171,7 +15146,6 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x10131a))
             .flex()
             .items_center()
             .justify_center()
@@ -15189,6 +15163,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                 }),
             )
+            .child(modal_backdrop())
             .child(
                 div()
                     .w(px(620.))
@@ -18841,6 +18816,10 @@ fn git_action_button(
                 .child(icon),
         )
         .child(div().text_xs().text_color(rgb(text_color)).child(label))
+}
+
+fn modal_backdrop() -> Div {
+    div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.28)
 }
 
 fn modal_input_field(
