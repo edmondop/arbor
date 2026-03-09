@@ -115,11 +115,12 @@ impl MoshShell {
     }
 
     pub fn snapshot(&self) -> TerminalSnapshot {
-        let (output, styled_lines, cursor) = match self.emulator.lock() {
+        let (output, styled_lines, cursor, modes) = match self.emulator.lock() {
             Ok(emulator) => (
                 emulator.snapshot_output(),
                 emulator.collect_styled_lines(),
                 emulator.snapshot_cursor(),
+                emulator.snapshot_modes(),
             ),
             Err(poisoned) => {
                 let emulator = poisoned.into_inner();
@@ -127,6 +128,7 @@ impl MoshShell {
                     emulator.snapshot_output(),
                     emulator.collect_styled_lines(),
                     emulator.snapshot_cursor(),
+                    emulator.snapshot_modes(),
                 )
             },
         };
@@ -139,6 +141,7 @@ impl MoshShell {
             output,
             styled_lines,
             cursor,
+            modes,
             exit_code,
         }
     }

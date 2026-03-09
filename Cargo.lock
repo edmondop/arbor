@@ -176,6 +176,7 @@ name = "arbor-httpd"
 version = "0.1.0"
 dependencies = [
  "arbor-core",
+ "arbor-terminal-emulator",
  "arbor-web-ui",
  "axum",
  "config",

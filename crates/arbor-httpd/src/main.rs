@@ -24,6 +24,7 @@ use {
     },
     axum::{
         Json, Router,
+        body::Bytes,
         extract::{
             Path as AxumPath, Query, State,
             ws::{Message, WebSocket, WebSocketUpgrade},
@@ -192,11 +193,6 @@ struct SnapshotQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct TerminalWriteRequest {
-    data: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct TerminalResizeRequest {
     cols: u16,
     rows: u16,
@@ -210,7 +206,6 @@ struct TerminalSignalRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum WsClientEvent {
-    Input { data: String },
     Resize { cols: u16, rows: u16 },
     Signal { signal: String },
     Detach,
@@ -224,9 +219,6 @@ enum WsServerEvent {
         state: arbor_core::daemon::TerminalSessionState,
         exit_code: Option<i32>,
         updated_at_unix_ms: Option<u64>,
-    },
-    Output {
-        data: String,
     },
     Exit {
         state: arbor_core::daemon::TerminalSessionState,
@@ -716,13 +708,13 @@ async fn get_terminal_snapshot(
 async fn write_terminal(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
-    Json(request): Json<TerminalWriteRequest>,
+    body: Bytes,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let mut daemon = state.daemon.lock().await;
     daemon
         .write(WriteRequest {
             session_id,
-            bytes: request.data.into_bytes(),
+            bytes: body.to_vec(),
         })
         .map_err(map_daemon_error)?;
 
@@ -870,7 +862,7 @@ async fn handle_terminal_ws(state: AppState, session_id: String, mut socket: Web
             event = subscription.recv() => {
                 match event {
                     Ok(SessionEvent::Output(data)) => {
-                        if send_ws_event(&mut socket, WsServerEvent::Output { data }).await.is_err() {
+                        if send_ws_binary(&mut socket, &data).await.is_err() {
                             break;
                         }
                     },
@@ -912,15 +904,6 @@ async fn process_ws_client_message(
                 .map_err(|error| format!("invalid websocket payload: {error}"))?;
 
             match parsed {
-                WsClientEvent::Input { data } => {
-                    let mut daemon = state.daemon.lock().await;
-                    daemon
-                        .write(WriteRequest {
-                            session_id: session_id.to_owned(),
-                            bytes: data.into_bytes(),
-                        })
-                        .map_err(|error| error.to_string())?;
-                },
                 WsClientEvent::Resize { cols, rows } => {
                     let mut daemon = state.daemon.lock().await;
                     daemon
@@ -972,6 +955,13 @@ async fn process_ws_client_message(
     }
 
     Ok(true)
+}
+
+async fn send_ws_binary(socket: &mut WebSocket, payload: &[u8]) -> Result<(), ()> {
+    socket
+        .send(Message::Binary(payload.to_vec().into()))
+        .await
+        .map_err(|_| ())
 }
 
 async fn send_ws_event(socket: &mut WebSocket, event: WsServerEvent) -> Result<(), ()> {
@@ -1415,6 +1405,175 @@ async fn handle_process_status_ws(state: AppState, mut socket: WebSocket) {
             },
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::repository_store::JsonRepositoryStore, std::time::Duration};
+
+    #[tokio::test]
+    async fn write_terminal_accepts_raw_request_bytes() {
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(error) => panic!("failed to create temp dir: {error}"),
+        };
+        let state = test_app_state(temp.path().to_path_buf());
+        let session_id = create_raw_echo_session(&state, "rest-binary").await;
+        let mut subscription = subscribe_to_session(&state, &session_id).await;
+        let payload = vec![0xff, 0x00, 0x1b, b'[', b'6', b'n'];
+
+        let response = write_terminal(
+            State(state.clone()),
+            AxumPath(session_id.clone()),
+            Bytes::from(payload.clone()),
+        )
+        .await;
+        let status = match response {
+            Ok(status) => status,
+            Err((status, Json(error))) => {
+                panic!("write handler failed with {status}: {}", error.error)
+            },
+        };
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let echoed = collect_output_bytes(&mut subscription, payload.len()).await;
+        assert_eq!(echoed, payload);
+
+        kill_session(&state, &session_id).await;
+    }
+
+    #[tokio::test]
+    async fn websocket_binary_frames_write_raw_terminal_bytes() {
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(error) => panic!("failed to create temp dir: {error}"),
+        };
+        let state = test_app_state(temp.path().to_path_buf());
+        let session_id = create_raw_echo_session(&state, "ws-binary").await;
+        let mut subscription = subscribe_to_session(&state, &session_id).await;
+        let payload = vec![0xde, 0xad, 0x00, 0xbe, 0xef];
+
+        let keep_open = match process_ws_client_message(
+            &state,
+            &session_id,
+            Message::Binary(payload.clone().into()),
+        )
+        .await
+        {
+            Ok(keep_open) => keep_open,
+            Err(error) => panic!("binary websocket write failed: {error}"),
+        };
+        assert!(
+            keep_open,
+            "binary terminal input unexpectedly closed the socket"
+        );
+
+        let echoed = collect_output_bytes(&mut subscription, payload.len()).await;
+        assert_eq!(echoed, payload);
+
+        kill_session(&state, &session_id).await;
+    }
+
+    fn test_app_state(repo_root: PathBuf) -> AppState {
+        let daemon_store = JsonDaemonSessionStore::new(repo_root.join("daemon-sessions.json"));
+        let repository_store = Arc::new(JsonRepositoryStore::new(
+            repo_root.join("repositories.json"),
+        ));
+        let (agent_broadcast, _) = tokio::sync::broadcast::channel(16);
+
+        AppState {
+            repository_store,
+            daemon: Arc::new(Mutex::new(LocalTerminalDaemon::new(daemon_store))),
+            process_manager: Arc::new(Mutex::new(ProcessManager::new(repo_root))),
+            github_service: github_service::default_github_pr_service(),
+            agent_sessions: Arc::new(Mutex::new(HashMap::new())),
+            agent_broadcast,
+            pr_cache: Arc::new(Mutex::new(HashMap::new())),
+            repo_cache: Arc::new(Mutex::new(HashMap::new())),
+            shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn create_raw_echo_session(state: &AppState, session_id: &str) -> String {
+        let cwd = match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(error) => panic!("failed to read current directory: {error}"),
+        };
+        let response = {
+            let mut daemon = state.daemon.lock().await;
+            daemon.create_or_attach(CreateOrAttachRequest {
+                session_id: session_id.to_owned(),
+                workspace_id: cwd.display().to_string(),
+                cwd,
+                shell: String::new(),
+                cols: 120,
+                rows: 35,
+                title: Some("binary-test".to_owned()),
+                command: Some("stty raw -echo; cat".to_owned()),
+            })
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => panic!("failed to create test terminal session: {error}"),
+        };
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        response.session.session_id
+    }
+
+    async fn subscribe_to_session(
+        state: &AppState,
+        session_id: &str,
+    ) -> tokio::sync::broadcast::Receiver<SessionEvent> {
+        let daemon = state.daemon.lock().await;
+        match daemon.subscribe(session_id) {
+            Ok(subscription) => subscription,
+            Err(error) => panic!("failed to subscribe to session `{session_id}`: {error}"),
+        }
+    }
+
+    async fn collect_output_bytes(
+        subscription: &mut tokio::sync::broadcast::Receiver<SessionEvent>,
+        expected_len: usize,
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        while output.len() < expected_len {
+            let event =
+                match tokio::time::timeout(Duration::from_secs(3), subscription.recv()).await {
+                    Ok(Ok(event)) => event,
+                    Ok(Err(error)) => panic!("terminal event stream failed: {error}"),
+                    Err(_) => panic!("timed out waiting for terminal output"),
+                };
+
+            match event {
+                SessionEvent::Output(bytes) => output.extend_from_slice(&bytes),
+                SessionEvent::Exit { exit_code, state } => {
+                    panic!(
+                        "terminal session exited before output arrived: state={state:?} exit_code={exit_code:?}"
+                    )
+                },
+                SessionEvent::Error(message) => {
+                    panic!("terminal session reported an error: {message}")
+                },
+            }
+        }
+
+        output
+    }
+
+    async fn kill_session(state: &AppState, session_id: &str) {
+        let result = {
+            let mut daemon = state.daemon.lock().await;
+            daemon.kill(KillRequest {
+                session_id: session_id.to_owned(),
+            })
+        };
+
+        if let Err(error) = result {
+            panic!("failed to kill test session `{session_id}`: {error}");
         }
     }
 }

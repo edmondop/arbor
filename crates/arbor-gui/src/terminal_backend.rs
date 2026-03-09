@@ -1,5 +1,5 @@
 pub use arbor_terminal_emulator::{
-    TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+    TerminalCursor, TerminalModes, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
 };
 use {
     arbor_terminal_emulator::{
@@ -164,11 +164,12 @@ impl EmbeddedTerminal {
     }
 
     pub fn snapshot(&self) -> EmbeddedSnapshot {
-        let (output, styled_lines, cursor) = match self.emulator.lock() {
+        let (output, styled_lines, cursor, modes) = match self.emulator.lock() {
             Ok(emulator) => (
                 emulator.snapshot_output(),
                 emulator.collect_styled_lines(),
                 emulator.snapshot_cursor(),
+                emulator.snapshot_modes(),
             ),
             Err(poisoned) => {
                 let emulator = poisoned.into_inner();
@@ -176,6 +177,7 @@ impl EmbeddedTerminal {
                     emulator.snapshot_output(),
                     emulator.collect_styled_lines(),
                     emulator.snapshot_cursor(),
+                    emulator.snapshot_modes(),
                 )
             },
         };
@@ -188,6 +190,7 @@ impl EmbeddedTerminal {
             output,
             styled_lines,
             cursor,
+            modes,
             exit_code,
         }
     }

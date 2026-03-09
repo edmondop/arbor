@@ -50,7 +50,7 @@ use {
     syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet},
     terminal_backend::{
         EMBEDDED_TERMINAL_DEFAULT_BG, EMBEDDED_TERMINAL_DEFAULT_FG, EmbeddedTerminal,
-        TerminalBackendKind, TerminalCursor, TerminalLaunch, TerminalStyledCell,
+        TerminalBackendKind, TerminalCursor, TerminalLaunch, TerminalModes, TerminalStyledCell,
         TerminalStyledLine, TerminalStyledRun,
     },
     theme::{ThemeKind, ThemePalette},
@@ -118,6 +118,10 @@ const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
 const GIT_ACTION_ICON_PR: &str = "\u{f126}";
 const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 const THEME_TOAST_DURATION: Duration = Duration::from_millis(1600);
+const WORKTREE_HOVER_POPOVER_HIDE_DELAY: Duration = Duration::from_millis(300);
+const WORKTREE_HOVER_POPOVER_CARD_WIDTH_PX: f32 = 300.;
+const WORKTREE_HOVER_POPOVER_ZONE_PADDING_PX: f32 = 12.;
+const WORKTREE_HOVER_TRIGGER_ZONE_HEIGHT_PX: f32 = 44.;
 const PRESET_ICON_CLAUDE_PNG: &[u8] = include_bytes!("../../../assets/preset-icons/claude.png");
 const PRESET_ICON_CODEX_SVG: &[u8] = include_bytes!("../../../assets/preset-icons/codex-white.svg");
 const PRESET_ICON_OPENCODE_SVG: &[u8] =
@@ -230,6 +234,7 @@ struct TerminalSession {
     output: String,
     styled_output: Vec<TerminalStyledLine>,
     cursor: Option<TerminalCursor>,
+    modes: TerminalModes,
     runtime: Option<SharedTerminalRuntime>,
 }
 
@@ -312,11 +317,12 @@ impl SshTerminalShell {
     }
 
     fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
-        let (output, styled_lines, cursor) = match self.emulator.lock() {
+        let (output, styled_lines, cursor, modes) = match self.emulator.lock() {
             Ok(emulator) => (
                 emulator.snapshot_output(),
                 emulator.collect_styled_lines(),
                 emulator.snapshot_cursor(),
+                emulator.snapshot_modes(),
             ),
             Err(poisoned) => {
                 let emulator = poisoned.into_inner();
@@ -324,6 +330,7 @@ impl SshTerminalShell {
                     emulator.snapshot_output(),
                     emulator.collect_styled_lines(),
                     emulator.snapshot_cursor(),
+                    emulator.snapshot_modes(),
                 )
             },
         };
@@ -338,6 +345,7 @@ impl SshTerminalShell {
             output,
             styled_lines,
             cursor,
+            modes,
             exit_code: if is_closed {
                 Some(0)
             } else {
@@ -673,14 +681,7 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
         }) {
             Ok(Some(snapshot)) => {
                 let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
-                if session.output != snapshot.output_tail {
-                    session.output = snapshot.output_tail;
-                    let (styled, cursor) =
-                        emulate_raw_output(&session.output, session.rows, session.cols);
-                    session.styled_output = styled;
-                    session.cursor = cursor;
-                    outcome.changed = true;
-                }
+                outcome.changed |= apply_daemon_snapshot(session, &snapshot);
                 if session.state != snapshot_state {
                     session.state = snapshot_state;
                     outcome.changed = true;
@@ -1423,6 +1424,7 @@ struct ArborWindow {
     worktree_context_menu: Option<WorktreeContextMenu>,
     worktree_hover_popover: Option<WorktreeHoverPopover>,
     _hover_dismiss_task: Option<gpui::Task<()>>,
+    last_mouse_position: gpui::Point<Pixels>,
     outpost_context_menu: Option<OutpostContextMenu>,
     discovered_daemons: Vec<mdns_browser::DiscoveredDaemon>,
     mdns_browser: Option<Box<dyn mdns_browser::MdnsDiscovery>>,
@@ -1646,6 +1648,7 @@ impl ArborWindow {
                     worktree_context_menu: None,
                     worktree_hover_popover: None,
                     _hover_dismiss_task: None,
+                    last_mouse_position: point(px(0.), px(0.)),
                     outpost_context_menu: None,
                     discovered_daemons: Vec::new(),
                     mdns_browser: None,
@@ -1924,6 +1927,7 @@ impl ArborWindow {
             worktree_context_menu: None,
             worktree_hover_popover: None,
             _hover_dismiss_task: None,
+            last_mouse_position: point(px(0.), px(0.)),
             outpost_context_menu: None,
             discovered_daemons: Vec::new(),
             mdns_browser: None,
@@ -2409,6 +2413,7 @@ impl ArborWindow {
                     session.output = output.clone();
                     session.styled_output.clear();
                     session.cursor = None;
+                    session.modes = TerminalModes::default();
                     changed = true;
                 }
                 if session.state != session_state {
@@ -2452,6 +2457,7 @@ impl ArborWindow {
                     output,
                     styled_output: Vec::new(),
                     cursor: None,
+                    modes: TerminalModes::default(),
                     runtime: attach_runtime
                         .then(|| {
                             self.terminal_daemon
@@ -4171,6 +4177,100 @@ impl ArborWindow {
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
         cx.notify();
+    }
+
+    fn show_worktree_hover_popover(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.last_mouse_position = window.mouse_position();
+        self._hover_dismiss_task = None;
+        let checks_expanded = self
+            .worktree_hover_popover
+            .as_ref()
+            .filter(|popover| popover.worktree_index == index)
+            .is_some_and(|popover| popover.checks_expanded);
+        self.worktree_hover_popover = Some(WorktreeHoverPopover {
+            worktree_index: index,
+            mouse_y: self.last_mouse_position.y,
+            checks_expanded,
+        });
+        cx.notify();
+    }
+
+    fn cancel_worktree_hover_popover_dismiss(&mut self) {
+        self._hover_dismiss_task = None;
+    }
+
+    fn update_worktree_hover_mouse_position(&mut self, position: gpui::Point<Pixels>) {
+        self.last_mouse_position = position;
+        if self.worktree_hover_safe_zone_contains_mouse() {
+            self.cancel_worktree_hover_popover_dismiss();
+        }
+    }
+
+    fn worktree_hover_safe_zone_contains_mouse(&self) -> bool {
+        let Some(popover) = self.worktree_hover_popover.as_ref() else {
+            return false;
+        };
+        let Some(worktree) = self.worktrees.get(popover.worktree_index) else {
+            return false;
+        };
+        worktree_hover_safe_zone_contains(
+            self.left_pane_width,
+            popover,
+            worktree,
+            self.last_mouse_position,
+        )
+    }
+
+    fn handle_worktree_hover_overlay_click(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(popover) = self.worktree_hover_popover.as_ref() else {
+            return;
+        };
+
+        let trigger_bounds =
+            worktree_hover_trigger_zone_bounds(self.left_pane_width, popover.mouse_y);
+        if trigger_bounds.contains(&position) {
+            self.select_worktree(popover.worktree_index, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        self.worktree_hover_popover = None;
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn schedule_worktree_hover_popover_dismiss(
+        &mut self,
+        worktree_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_spawn(async {
+                smol::Timer::after(WORKTREE_HOVER_POPOVER_HIDE_DELAY).await;
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .worktree_hover_popover
+                    .as_ref()
+                    .is_some_and(|popover| popover.worktree_index == worktree_index)
+                    && !this.worktree_hover_safe_zone_contains_mouse()
+                {
+                    this.worktree_hover_popover = None;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
@@ -6917,6 +7017,7 @@ impl ArborWindow {
             output: String::new(),
             styled_output: Vec::new(),
             cursor: None,
+            modes: TerminalModes::default(),
             runtime: None,
         };
 
@@ -7125,6 +7226,7 @@ impl ArborWindow {
             output: String::new(),
             styled_output: Vec::new(),
             cursor: None,
+            modes: TerminalModes::default(),
             runtime: None,
         };
 
@@ -7617,42 +7719,7 @@ impl ArborWindow {
             return;
         };
 
-        if keystroke.modifiers.platform {
-            return;
-        }
-
-        if keystroke.modifiers.control {
-            if keystroke.key.eq_ignore_ascii_case("u") {
-                session.pending_command.clear();
-            }
-            return;
-        }
-
-        if keystroke.modifiers.alt {
-            return;
-        }
-
-        match keystroke.key.as_str() {
-            "enter" | "return" => {
-                let command = session.pending_command.trim();
-                if !command.is_empty() {
-                    session.last_command = Some(command.to_owned());
-                }
-                session.pending_command.clear();
-            },
-            "backspace" => {
-                session.pending_command.pop();
-            },
-            "tab" => session.pending_command.push('\t'),
-            "space" => session.pending_command.push(' '),
-            _ => {
-                if let Some(key_char) = keystroke.key_char.as_ref() {
-                    session.pending_command.push_str(key_char);
-                } else if keystroke.key.len() == 1 {
-                    session.pending_command.push_str(&keystroke.key);
-                }
-            },
-        }
+        track_terminal_command_keystroke(session, keystroke);
     }
 
     fn copy_terminal_content_to_clipboard(&mut self, session_id: u64, cx: &mut Context<Self>) {
@@ -7766,7 +7833,16 @@ impl ArborWindow {
 
         self.clear_terminal_selection_for_session(active_terminal_id);
 
-        let Some(input) = terminal_keys::terminal_bytes_from_keystroke(&event.keystroke) else {
+        let terminal_modes = self
+            .terminals
+            .iter()
+            .find(|session| session.id == active_terminal_id)
+            .map(|session| session.modes)
+            .unwrap_or_default();
+
+        let Some(input) =
+            terminal_keys::terminal_bytes_from_keystroke(&event.keystroke, terminal_modes)
+        else {
             // No bytes for this key — let the event propagate to the IME /
             // InputHandler so composed characters arrive via
             // `replace_text_in_range`.
@@ -9392,28 +9468,9 @@ impl ArborWindow {
                                                     })
                                                     .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                                                         if *hovered {
-                                                            // Cancel any pending dismiss
-                                                            this._hover_dismiss_task = None;
-                                                            let mouse_y = window.mouse_position().y;
-                                                            this.worktree_hover_popover = Some(WorktreeHoverPopover {
-                                                                worktree_index: index,
-                                                                mouse_y,
-                                                                checks_expanded: false,
-                                                            });
-                                                            cx.notify();
+                                                            this.show_worktree_hover_popover(index, window, cx);
                                                         } else if this.worktree_hover_popover.as_ref().is_some_and(|p| p.worktree_index == index) {
-                                                            // Delay dismiss so user can move mouse to popover
-                                                            this._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
-                                                                cx.background_spawn(async {
-                                                                    smol::Timer::after(Duration::from_millis(300)).await;
-                                                                }).await;
-                                                                let _ = this.update(cx, |this, cx| {
-                                                                    if this.worktree_hover_popover.as_ref().is_some_and(|p| p.worktree_index == index) {
-                                                                        this.worktree_hover_popover = None;
-                                                                        cx.notify();
-                                                                    }
-                                                                });
-                                                            }));
+                                                            this.schedule_worktree_hover_popover_dismiss(index, cx);
                                                         }
                                                     }))
                                                     // Bordered cell
@@ -9435,8 +9492,13 @@ impl ArborWindow {
                                                         .flex_row()
                                                         .items_center()
                                                         .gap(px(4.))
+                                                        .hover(|this| {
+                                                            this.bg(rgb(theme.panel_active_bg))
+                                                                .border_color(rgb(theme.accent))
+                                                        })
                                                         .when(is_active, |this| {
                                                             this.bg(rgb(theme.panel_active_bg))
+                                                                .border_color(rgb(theme.accent))
                                                         })
                                                     // Git branch icon — vertically centered
                                                     .child(
@@ -12059,16 +12121,16 @@ impl ArborWindow {
         };
 
         let theme = self.theme();
-        let left_pane_x = px(self.left_pane_width);
-        let mouse_y = popover.mouse_y;
         let checks_expanded = popover.checks_expanded;
+        let popover_zone_bounds =
+            worktree_hover_popover_zone_bounds(self.left_pane_width, popover, worktree);
 
         // Build popover card content
         let popover_wt_index = popover.worktree_index;
         let mut card = div()
             .id("worktree-hover-popover-card")
             .font_family(FONT_MONO)
-            .w(px(300.))
+            .w(px(WORKTREE_HOVER_POPOVER_CARD_WIDTH_PX))
             .bg(rgb(theme.panel_bg))
             .border_1()
             .border_color(rgb(theme.border))
@@ -12079,26 +12141,9 @@ impl ArborWindow {
             .gap_1()
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
-                    // Cancel pending dismiss — mouse entered the popover
-                    this._hover_dismiss_task = None;
+                    this.cancel_worktree_hover_popover_dismiss();
                 } else {
-                    // Mouse left the popover — start delayed dismiss
-                    this._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
-                        cx.background_spawn(async {
-                            smol::Timer::after(Duration::from_millis(300)).await;
-                        })
-                        .await;
-                        let _ = this.update(cx, |this, cx| {
-                            if this
-                                .worktree_hover_popover
-                                .as_ref()
-                                .is_some_and(|p| p.worktree_index == popover_wt_index)
-                            {
-                                this.worktree_hover_popover = None;
-                                cx.notify();
-                            }
-                        });
-                    }));
+                    this.schedule_worktree_hover_popover_dismiss(popover_wt_index, cx);
                 }
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -12385,41 +12430,27 @@ impl ArborWindow {
         div()
             .absolute()
             .inset_0()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
+                this.update_worktree_hover_mouse_position(event.position);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.worktree_hover_popover = None;
-                    cx.stop_propagation();
-                    cx.notify();
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.handle_worktree_hover_overlay_click(event.position, window, cx);
                 }),
             )
             .child(
                 div()
                     .id("worktree-hover-popover-zone")
                     .absolute()
-                    .left(left_pane_x + px(4.) - px(12.))
-                    .top(mouse_y - px(8.) - px(12.))
-                    .p(px(12.))
+                    .left(popover_zone_bounds.origin.x)
+                    .top(popover_zone_bounds.origin.y)
+                    .p(px(WORKTREE_HOVER_POPOVER_ZONE_PADDING_PX))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered {
-                            this._hover_dismiss_task = None;
+                            this.cancel_worktree_hover_popover_dismiss();
                         } else {
-                            this._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
-                                cx.background_spawn(async {
-                                    smol::Timer::after(Duration::from_millis(300)).await;
-                                })
-                                .await;
-                                let _ = this.update(cx, |this, cx| {
-                                    if this
-                                        .worktree_hover_popover
-                                        .as_ref()
-                                        .is_some_and(|p| p.worktree_index == popover_wt_index)
-                                    {
-                                        this.worktree_hover_popover = None;
-                                        cx.notify();
-                                    }
-                                });
-                            }));
+                            this.schedule_worktree_hover_popover_dismiss(popover_wt_index, cx);
                         }
                     }))
                     .child(card),
@@ -14668,10 +14699,12 @@ fn apply_terminal_emulator_snapshot(
     if session.output != snapshot.output
         || session.styled_output != snapshot.styled_lines
         || session.cursor != snapshot.cursor
+        || session.modes != snapshot.modes
     {
         session.output = snapshot.output;
         session.styled_output = snapshot.styled_lines;
         session.cursor = snapshot.cursor;
+        session.modes = snapshot.modes;
         session.updated_at_unix_ms = current_unix_timestamp_millis();
         changed = true;
     }
@@ -14683,6 +14716,48 @@ fn apply_terminal_emulator_snapshot(
     }
 
     changed
+}
+
+fn track_terminal_command_keystroke(session: &mut TerminalSession, keystroke: &Keystroke) {
+    if keystroke.modifiers.platform {
+        return;
+    }
+
+    if keystroke.modifiers.control {
+        if keystroke.key.eq_ignore_ascii_case("u") {
+            session.pending_command.clear();
+        }
+        return;
+    }
+
+    if keystroke.modifiers.alt {
+        return;
+    }
+
+    match keystroke.key.as_str() {
+        "enter" | "return" if keystroke.modifiers.shift => {
+            session.pending_command.push('\n');
+        },
+        "enter" | "return" => {
+            let command = session.pending_command.trim();
+            if !command.is_empty() {
+                session.last_command = Some(command.to_owned());
+            }
+            session.pending_command.clear();
+        },
+        "backspace" => {
+            session.pending_command.pop();
+        },
+        "tab" => session.pending_command.push('\t'),
+        "space" => session.pending_command.push(' '),
+        _ => {
+            if let Some(key_char) = keystroke.key_char.as_ref() {
+                session.pending_command.push_str(key_char);
+            } else if keystroke.key.len() == 1 {
+                session.pending_command.push_str(&keystroke.key);
+            }
+        },
+    }
 }
 
 fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
@@ -14697,10 +14772,99 @@ fn emulate_raw_output(
     raw: &str,
     rows: u16,
     cols: u16,
-) -> (Vec<TerminalStyledLine>, Option<TerminalCursor>) {
+) -> (
+    Vec<TerminalStyledLine>,
+    Option<TerminalCursor>,
+    TerminalModes,
+) {
     let mut emulator = arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols);
     emulator.process(raw.as_bytes());
-    (emulator.collect_styled_lines(), emulator.snapshot_cursor())
+    (
+        emulator.collect_styled_lines(),
+        emulator.snapshot_cursor(),
+        emulator.snapshot_modes(),
+    )
+}
+
+fn daemon_cursor_to_terminal_cursor(cursor: daemon::DaemonTerminalCursor) -> TerminalCursor {
+    TerminalCursor {
+        line: cursor.line,
+        column: cursor.column,
+    }
+}
+
+fn daemon_modes_to_terminal_modes(modes: daemon::DaemonTerminalModes) -> TerminalModes {
+    TerminalModes {
+        app_cursor: modes.app_cursor,
+        alt_screen: modes.alt_screen,
+    }
+}
+
+fn daemon_styled_line_to_terminal_line(
+    line: daemon::DaemonTerminalStyledLine,
+) -> TerminalStyledLine {
+    TerminalStyledLine {
+        cells: line
+            .cells
+            .into_iter()
+            .map(|cell| TerminalStyledCell {
+                column: cell.column,
+                text: cell.text,
+                fg: cell.fg,
+                bg: cell.bg,
+            })
+            .collect(),
+        runs: line
+            .runs
+            .into_iter()
+            .map(|run| TerminalStyledRun {
+                text: run.text,
+                fg: run.fg,
+                bg: run.bg,
+            })
+            .collect(),
+    }
+}
+
+fn apply_daemon_snapshot(
+    session: &mut TerminalSession,
+    snapshot: &daemon::TerminalSnapshot,
+) -> bool {
+    let mut changed = false;
+
+    if session.output != snapshot.output_tail {
+        session.output = snapshot.output_tail.clone();
+        changed = true;
+    }
+
+    let (styled_output, cursor, modes) = if snapshot.styled_lines.is_empty() {
+        emulate_raw_output(&snapshot.output_tail, session.rows, session.cols)
+    } else {
+        (
+            snapshot
+                .styled_lines
+                .iter()
+                .cloned()
+                .map(daemon_styled_line_to_terminal_line)
+                .collect(),
+            snapshot.cursor.map(daemon_cursor_to_terminal_cursor),
+            daemon_modes_to_terminal_modes(snapshot.modes),
+        )
+    };
+
+    if session.styled_output != styled_output || session.cursor != cursor || session.modes != modes
+    {
+        session.styled_output = styled_output;
+        session.cursor = cursor;
+        session.modes = modes;
+        changed = true;
+    }
+
+    if changed {
+        session.updated_at_unix_ms = current_unix_timestamp_millis();
+    }
+
+    changed
 }
 
 fn terminal_state_from_daemon_state(state: TerminalSessionState) -> TerminalState {
@@ -15792,6 +15956,76 @@ fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary])
             || left.branch != right.branch
             || left.is_primary_checkout != right.is_primary_checkout
     })
+}
+
+fn estimated_worktree_hover_popover_card_height(
+    worktree: &WorktreeSummary,
+    checks_expanded: bool,
+) -> Pixels {
+    let mut height = 72.;
+
+    if worktree
+        .diff_summary
+        .is_some_and(|summary| summary.additions > 0 || summary.deletions > 0)
+    {
+        height += 18.;
+    }
+
+    if worktree.agent_state.is_some() {
+        height += 18.;
+    }
+
+    if let Some(pr) = worktree.pr_details.as_ref() {
+        height += 110.;
+        if checks_expanded
+            && !pr.checks.is_empty()
+            && matches!(
+                pr.state,
+                github_service::PrState::Open | github_service::PrState::Draft
+            )
+        {
+            height += pr.checks.len() as f32 * 18.;
+        }
+    }
+
+    px(height)
+}
+
+fn worktree_hover_popover_zone_bounds(
+    left_pane_width: f32,
+    popover: &WorktreeHoverPopover,
+    worktree: &WorktreeSummary,
+) -> Bounds<Pixels> {
+    let padding = px(WORKTREE_HOVER_POPOVER_ZONE_PADDING_PX);
+    Bounds::new(
+        point(
+            px(left_pane_width) + px(4.) - padding,
+            popover.mouse_y - px(8.) - padding,
+        ),
+        size(
+            px(WORKTREE_HOVER_POPOVER_CARD_WIDTH_PX) + padding * 2.,
+            estimated_worktree_hover_popover_card_height(worktree, popover.checks_expanded)
+                + padding * 2.,
+        ),
+    )
+}
+
+fn worktree_hover_trigger_zone_bounds(left_pane_width: f32, mouse_y: Pixels) -> Bounds<Pixels> {
+    let height = px(WORKTREE_HOVER_TRIGGER_ZONE_HEIGHT_PX);
+    Bounds::new(
+        point(px(0.), mouse_y - height / 2.),
+        size(px(left_pane_width), height),
+    )
+}
+
+fn worktree_hover_safe_zone_contains(
+    left_pane_width: f32,
+    popover: &WorktreeHoverPopover,
+    worktree: &WorktreeSummary,
+    position: gpui::Point<Pixels>,
+) -> bool {
+    worktree_hover_popover_zone_bounds(left_pane_width, popover, worktree).contains(&position)
+        || worktree_hover_trigger_zone_bounds(left_pane_width, popover.mouse_y).contains(&position)
 }
 
 fn format_relative_time(unix_ms: u64) -> String {
@@ -20095,15 +20329,24 @@ fn main() {
 mod tests {
     use {
         crate::{
-            DiffLineKind, TerminalSession, TerminalState, auto_commit_body, auto_commit_subject,
-            build_side_by_side_diff_lines, extract_first_url,
-            resolve_github_access_token_from_sources, styled_lines_for_session,
+            DiffLineKind, TerminalSession, TerminalState, WorktreeHoverPopover, WorktreeSummary,
+            apply_daemon_snapshot, auto_commit_body, auto_commit_subject,
+            build_side_by_side_diff_lines, estimated_worktree_hover_popover_card_height,
+            extract_first_url, resolve_github_access_token_from_sources, styled_lines_for_session,
             terminal_backend::{
-                TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+                TerminalCursor, TerminalModes, TerminalStyledCell, TerminalStyledLine,
+                TerminalStyledRun,
             },
             theme::ThemeKind,
+            track_terminal_command_keystroke, worktree_hover_popover_zone_bounds,
+            worktree_hover_safe_zone_contains,
         },
-        arbor_core::changes::{ChangeKind, ChangedFile},
+        arbor_core::{
+            agent::AgentState,
+            changes::{ChangeKind, ChangedFile, DiffLineSummary},
+            daemon,
+        },
+        gpui::{Keystroke, point, px},
     };
 
     fn session_with_styled_line(
@@ -20145,7 +20388,28 @@ mod tests {
                 }],
             }],
             cursor,
+            modes: TerminalModes::default(),
             runtime: None,
+        }
+    }
+
+    fn sample_worktree_summary() -> WorktreeSummary {
+        WorktreeSummary {
+            repo_root: "/tmp/repo".into(),
+            path: "/tmp/repo/wt".into(),
+            label: "wt".to_owned(),
+            branch: "feature/hover".to_owned(),
+            is_primary_checkout: false,
+            pr_number: None,
+            pr_url: None,
+            pr_details: None,
+            diff_summary: Some(DiffLineSummary {
+                additions: 3,
+                deletions: 1,
+            }),
+            agent_state: Some(AgentState::Working),
+            agent_task: Some("Investigating hover".to_owned()),
+            last_activity_unix_ms: None,
         }
     }
 
@@ -20159,6 +20423,142 @@ mod tests {
     fn derives_default_branch_name_when_empty() {
         let branch = crate::derive_branch_name(" !!! ");
         assert_eq!(branch, "worktree");
+    }
+
+    #[test]
+    fn worktree_hover_safe_zone_covers_trigger_row_and_popover() {
+        let worktree = sample_worktree_summary();
+        let popover = WorktreeHoverPopover {
+            worktree_index: 0,
+            mouse_y: px(100.),
+            checks_expanded: false,
+        };
+
+        assert!(worktree_hover_safe_zone_contains(
+            290.,
+            &popover,
+            &worktree,
+            point(px(40.), px(100.)),
+        ));
+        assert!(worktree_hover_safe_zone_contains(
+            290.,
+            &popover,
+            &worktree,
+            point(px(320.), px(112.)),
+        ));
+        assert!(!worktree_hover_safe_zone_contains(
+            290.,
+            &popover,
+            &worktree,
+            point(px(700.), px(100.)),
+        ));
+    }
+
+    #[test]
+    fn expanded_checks_increase_worktree_hover_popover_height() {
+        let mut worktree = sample_worktree_summary();
+        worktree.pr_details = Some(crate::github_service::PrDetails {
+            number: 42,
+            title: "Improve hover stability".to_owned(),
+            url: "https://example.com/pr/42".to_owned(),
+            state: crate::github_service::PrState::Open,
+            additions: 12,
+            deletions: 4,
+            review_decision: crate::github_service::ReviewDecision::Pending,
+            checks_status: crate::github_service::CheckStatus::Pending,
+            checks: vec![
+                ("ci".to_owned(), crate::github_service::CheckStatus::Pending),
+                (
+                    "lint".to_owned(),
+                    crate::github_service::CheckStatus::Success,
+                ),
+            ],
+        });
+
+        let collapsed = estimated_worktree_hover_popover_card_height(&worktree, false);
+        let expanded = estimated_worktree_hover_popover_card_height(&worktree, true);
+        let collapsed_bounds = worktree_hover_popover_zone_bounds(
+            290.,
+            &WorktreeHoverPopover {
+                worktree_index: 0,
+                mouse_y: px(120.),
+                checks_expanded: false,
+            },
+            &worktree,
+        );
+        let expanded_bounds = worktree_hover_popover_zone_bounds(
+            290.,
+            &WorktreeHoverPopover {
+                worktree_index: 0,
+                mouse_y: px(120.),
+                checks_expanded: true,
+            },
+            &worktree,
+        );
+
+        assert!(expanded > collapsed);
+        assert!(expanded_bounds.size.height > collapsed_bounds.size.height);
+    }
+
+    #[test]
+    fn shift_enter_does_not_submit_pending_terminal_command() {
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.pending_command = "hello".to_owned();
+
+        track_terminal_command_keystroke(
+            &mut session,
+            &Keystroke::parse("shift-enter").expect("valid keystroke"),
+        );
+
+        assert_eq!(session.pending_command, "hello\n");
+        assert_eq!(session.last_command, None);
+    }
+
+    #[test]
+    fn daemon_snapshot_applies_structured_terminal_state() {
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+        session.modes = TerminalModes::default();
+
+        let changed = apply_daemon_snapshot(&mut session, &daemon::TerminalSnapshot {
+            session_id: "daemon-test-1".to_owned(),
+            output_tail: "READY".to_owned(),
+            styled_lines: vec![daemon::DaemonTerminalStyledLine {
+                cells: vec![daemon::DaemonTerminalStyledCell {
+                    column: 0,
+                    text: "READY".to_owned(),
+                    fg: 0x123456,
+                    bg: 0x654321,
+                }],
+                runs: vec![daemon::DaemonTerminalStyledRun {
+                    text: "READY".to_owned(),
+                    fg: 0x123456,
+                    bg: 0x654321,
+                }],
+            }],
+            cursor: Some(daemon::DaemonTerminalCursor { line: 0, column: 5 }),
+            modes: daemon::DaemonTerminalModes {
+                app_cursor: true,
+                alt_screen: true,
+            },
+            exit_code: None,
+            state: daemon::TerminalSessionState::Running,
+            updated_at_unix_ms: Some(1),
+        });
+
+        assert!(changed);
+        assert_eq!(session.output, "READY");
+        assert_eq!(session.cursor, Some(TerminalCursor { line: 0, column: 5 }));
+        assert_eq!(session.modes, TerminalModes {
+            app_cursor: true,
+            alt_screen: true,
+        });
+        assert_eq!(session.styled_output.len(), 1);
+        assert_eq!(session.styled_output[0].runs[0].text, "READY");
+        assert_eq!(session.styled_output[0].runs[0].fg, 0x123456);
+        assert_eq!(session.styled_output[0].runs[0].bg, 0x654321);
     }
 
     #[test]

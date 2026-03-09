@@ -39,6 +39,7 @@ pub struct TerminalSnapshot {
     pub output: String,
     pub styled_lines: Vec<TerminalStyledLine>,
     pub cursor: Option<TerminalCursor>,
+    pub modes: TerminalModes,
     pub exit_code: Option<i32>,
 }
 
@@ -46,6 +47,12 @@ pub struct TerminalSnapshot {
 pub struct TerminalCursor {
     pub line: usize,
     pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalModes {
+    pub app_cursor: bool,
+    pub alt_screen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +153,10 @@ impl TerminalEmulator {
         snapshot_cursor(&self.term)
     }
 
+    pub fn snapshot_modes(&self) -> TerminalModes {
+        snapshot_modes(&self.term)
+    }
+
     pub fn collect_styled_lines(&self) -> Vec<TerminalStyledLine> {
         collect_styled_lines(&self.term)
     }
@@ -193,6 +204,14 @@ fn snapshot_cursor(term: &Term<VoidListener>) -> Option<TerminalCursor> {
     let line = usize::try_from(cursor.line.0 - top).ok()?;
     let column = cursor.column.0;
     Some(TerminalCursor { line, column })
+}
+
+fn snapshot_modes(term: &Term<VoidListener>) -> TerminalModes {
+    let mode = term.mode();
+    TerminalModes {
+        app_cursor: mode.contains(TermMode::APP_CURSOR),
+        alt_screen: mode.contains(TermMode::ALT_SCREEN),
+    }
 }
 
 fn collect_styled_lines(term: &Term<VoidListener>) -> Vec<TerminalStyledLine> {
@@ -490,6 +509,27 @@ mod tests {
 
         emulator.process("\u{1b}[?25h".as_bytes());
         assert!(emulator.snapshot_cursor().is_some());
+    }
+
+    #[test]
+    fn snapshot_modes_track_terminal_state() {
+        let mut emulator = TerminalEmulator::new();
+        assert_eq!(emulator.snapshot_modes(), TerminalModes::default());
+
+        emulator.process("\u{1b}[?1h".as_bytes());
+        assert_eq!(emulator.snapshot_modes(), TerminalModes {
+            app_cursor: true,
+            alt_screen: false,
+        });
+
+        emulator.process("\u{1b}[?1049h".as_bytes());
+        assert_eq!(emulator.snapshot_modes(), TerminalModes {
+            app_cursor: true,
+            alt_screen: true,
+        });
+
+        emulator.process("\u{1b}[?1l\u{1b}[?1049l".as_bytes());
+        assert_eq!(emulator.snapshot_modes(), TerminalModes::default());
     }
 
     #[test]

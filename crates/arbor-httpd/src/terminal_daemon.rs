@@ -1,10 +1,12 @@
 use {
     arbor_core::daemon::{
         CreateOrAttachRequest, CreateOrAttachResponse, DaemonSessionRecord, DaemonSessionStore,
-        DaemonSessionStoreError, DetachRequest, KillRequest, ResizeRequest, SignalRequest,
-        SnapshotRequest, TerminalDaemon, TerminalSessionState, TerminalSignal, TerminalSnapshot,
-        WriteRequest,
+        DaemonSessionStoreError, DaemonTerminalCursor, DaemonTerminalModes,
+        DaemonTerminalStyledCell, DaemonTerminalStyledLine, DaemonTerminalStyledRun, DetachRequest,
+        KillRequest, ResizeRequest, SignalRequest, SnapshotRequest, TerminalDaemon,
+        TerminalSessionState, TerminalSignal, TerminalSnapshot, WriteRequest,
     },
+    arbor_terminal_emulator::{TerminalEmulator, TerminalModes},
     portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system},
     std::{
         collections::{HashMap, HashSet},
@@ -24,7 +26,7 @@ const DAEMON_SESSION_PREFIX: &str = "daemon-";
 
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    Output(String),
+    Output(Vec<u8>),
     Exit {
         exit_code: Option<i32>,
         state: TerminalSessionState,
@@ -61,6 +63,7 @@ struct LiveSession {
     last_command: Arc<Mutex<Option<String>>>,
     pending_command: Arc<Mutex<String>>,
     output_tail: Arc<Mutex<String>>,
+    emulator: Arc<Mutex<TerminalEmulator>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     state: Arc<Mutex<TerminalSessionState>>,
     updated_at_unix_ms: Arc<Mutex<Option<u64>>>,
@@ -130,6 +133,7 @@ impl LiveSession {
         let master = pair.master;
 
         let (sender, _) = broadcast::channel(512);
+        let emulator = Arc::new(Mutex::new(TerminalEmulator::with_size(rows, cols)));
 
         let session = Arc::new(Self {
             session_id: request.session_id,
@@ -142,6 +146,7 @@ impl LiveSession {
             last_command: Arc::new(Mutex::new(None)),
             pending_command: Arc::new(Mutex::new(String::new())),
             output_tail: Arc::new(Mutex::new(String::new())),
+            emulator: emulator.clone(),
             exit_code: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(TerminalSessionState::Running)),
             updated_at_unix_ms: Arc::new(Mutex::new(current_unix_timestamp_millis())),
@@ -212,6 +217,7 @@ impl LiveSession {
 
         *lock_or_recover(&self.cols) = cols;
         *lock_or_recover(&self.rows) = rows;
+        lock_or_recover(&self.emulator).resize(rows, cols);
         self.touch();
         Ok(())
     }
@@ -255,27 +261,7 @@ impl LiveSession {
 
     fn track_command_input(&self, bytes: &[u8]) {
         let mut pending = lock_or_recover(&self.pending_command);
-        let mut next_last_command: Option<String> = None;
-
-        for ch in String::from_utf8_lossy(bytes).chars() {
-            match ch {
-                '\r' | '\n' => {
-                    let trimmed = pending.trim();
-                    if !trimmed.is_empty() {
-                        next_last_command = Some(trimmed.to_owned());
-                    }
-                    pending.clear();
-                },
-                '\u{08}' | '\u{7f}' => {
-                    let _ = pending.pop();
-                },
-                _ => {
-                    if !ch.is_control() {
-                        pending.push(ch);
-                    }
-                },
-            }
-        }
+        let next_last_command = apply_input_to_pending_command(&mut pending, bytes);
 
         drop(pending);
 
@@ -318,9 +304,43 @@ impl LiveSession {
             }
         };
 
+        let (styled_lines, cursor, modes) = {
+            let emulator = lock_or_recover(&self.emulator);
+            let mut styled_lines = emulator.collect_styled_lines();
+            let keep_from = if max_lines == 0 {
+                0
+            } else {
+                styled_lines.len().saturating_sub(max_lines)
+            };
+
+            let cursor = emulator.snapshot_cursor().and_then(|cursor| {
+                (cursor.line >= keep_from).then_some(DaemonTerminalCursor {
+                    line: cursor.line - keep_from,
+                    column: cursor.column,
+                })
+            });
+
+            if keep_from > 0 {
+                styled_lines.drain(..keep_from);
+            }
+
+            let modes = emulator.snapshot_modes();
+            (
+                styled_lines
+                    .into_iter()
+                    .map(convert_styled_line)
+                    .collect::<Vec<_>>(),
+                cursor,
+                convert_terminal_modes(modes),
+            )
+        };
+
         TerminalSnapshot {
             session_id: self.session_id.clone(),
             output_tail,
+            styled_lines,
+            cursor,
+            modes,
             exit_code: *lock_or_recover(&self.exit_code),
             state: *lock_or_recover(&self.state),
             updated_at_unix_ms: *lock_or_recover(&self.updated_at_unix_ms),
@@ -335,13 +355,15 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, session: Arc<LiveSessio
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(bytes_read) => {
-                    let text = String::from_utf8_lossy(&buffer[..bytes_read]).into_owned();
+                    let chunk = buffer[..bytes_read].to_vec();
+                    lock_or_recover(&session.emulator).process(&chunk);
+                    let text = String::from_utf8_lossy(&chunk).into_owned();
                     if text.is_empty() {
                         continue;
                     }
 
                     session.append_output_chunk(&text);
-                    let _ = session.sender.send(SessionEvent::Output(text));
+                    let _ = session.sender.send(SessionEvent::Output(chunk));
                 },
                 Err(error) => {
                     let _ = session.sender.send(SessionEvent::Error(format!(
@@ -550,6 +572,66 @@ fn current_unix_timestamp_millis() -> Option<u64> {
     arbor_core::daemon::current_unix_timestamp_millis()
 }
 
+fn apply_input_to_pending_command(pending: &mut String, bytes: &[u8]) -> Option<String> {
+    let mut next_last_command: Option<String> = None;
+
+    for ch in String::from_utf8_lossy(bytes).chars() {
+        match ch {
+            '\r' => {
+                let trimmed = pending.trim();
+                if !trimmed.is_empty() {
+                    next_last_command = Some(trimmed.to_owned());
+                }
+                pending.clear();
+            },
+            '\n' => pending.push('\n'),
+            '\u{08}' | '\u{7f}' => {
+                let _ = pending.pop();
+            },
+            _ => {
+                if !ch.is_control() {
+                    pending.push(ch);
+                }
+            },
+        }
+    }
+
+    next_last_command
+}
+
+fn convert_styled_line(
+    line: arbor_terminal_emulator::TerminalStyledLine,
+) -> DaemonTerminalStyledLine {
+    DaemonTerminalStyledLine {
+        cells: line
+            .cells
+            .into_iter()
+            .map(|cell| DaemonTerminalStyledCell {
+                column: cell.column,
+                text: cell.text,
+                fg: cell.fg,
+                bg: cell.bg,
+            })
+            .collect(),
+        runs: line
+            .runs
+            .into_iter()
+            .map(|run| DaemonTerminalStyledRun {
+                text: run.text,
+                fg: run.fg,
+                bg: run.bg,
+            })
+            .collect(),
+    }
+}
+
+fn convert_terminal_modes(modes: TerminalModes) -> DaemonTerminalModes {
+    DaemonTerminalModes {
+        app_cursor: modes.app_cursor,
+        alt_screen: modes.alt_screen,
+    }
+}
+
 fn trim_to_last_lines(text: &str, max_lines: usize) -> String {
     if max_lines == 0 {
         return String::new();
@@ -727,6 +809,24 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_command_treats_line_feed_as_multiline_input() {
+        let mut pending = String::from("hello");
+        let last_command = apply_input_to_pending_command(&mut pending, b"\nworld");
+
+        assert_eq!(pending, "hello\nworld");
+        assert_eq!(last_command, None);
+    }
+
+    #[test]
+    fn pending_command_treats_carriage_return_as_submit() {
+        let mut pending = String::from("hello\nworld");
+        let last_command = apply_input_to_pending_command(&mut pending, b"\r");
+
+        assert!(pending.is_empty());
+        assert_eq!(last_command.as_deref(), Some("hello\nworld"));
+    }
 
     #[test]
     fn tail_trim_does_not_start_inside_osc_sequence() {

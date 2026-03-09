@@ -97,11 +97,6 @@ struct CreateTerminalResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct TerminalWriteRequest {
-    data: String,
-}
-
-#[derive(Debug, Serialize)]
 struct TerminalResizeRequest {
     cols: u16,
     rows: u16,
@@ -155,19 +150,11 @@ impl HttpTerminalDaemon {
     }
 
     pub fn write(&self, request: WriteRequest) -> Result<(), HttpTerminalDaemonError> {
-        let data = String::from_utf8(request.bytes).map_err(|error| {
-            HttpTerminalDaemonError::new(format!(
-                "terminal input for session `{}` is not valid UTF-8: {error}",
-                request.session_id
-            ))
-        })?;
-        let payload = TerminalWriteRequest { data };
-
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}/write",
             encode_path_segment(&request.session_id)
         );
-        let response = self.send_json("POST", &path, &payload)?;
+        let response = self.send_bytes("POST", &path, &request.bytes)?;
         self.expect_status(response, &[204])
     }
 
@@ -254,7 +241,7 @@ impl HttpTerminalDaemon {
         method: &str,
         path: &str,
     ) -> Result<HttpResponse, HttpTerminalDaemonError> {
-        self.send_request(method, path, None)
+        self.send_request(method, path, None, None)
     }
 
     fn send_json<T: Serialize>(
@@ -266,7 +253,26 @@ impl HttpTerminalDaemon {
         let body = serde_json::to_vec(payload).map_err(|error| {
             HttpTerminalDaemonError::new(format!("failed to encode request payload: {error}"))
         })?;
-        self.send_request(method, path, Some(body.as_slice()))
+        self.send_request(
+            method,
+            path,
+            Some(body.as_slice()),
+            Some("application/json"),
+        )
+    }
+
+    fn send_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        payload: &[u8],
+    ) -> Result<HttpResponse, HttpTerminalDaemonError> {
+        self.send_request(
+            method,
+            path,
+            Some(payload),
+            Some("application/octet-stream"),
+        )
     }
 
     fn send_request(
@@ -274,6 +280,7 @@ impl HttpTerminalDaemon {
         method: &str,
         path: &str,
         body: Option<&[u8]>,
+        content_type: Option<&str>,
     ) -> Result<HttpResponse, HttpTerminalDaemonError> {
         let mut stream = self.endpoint.connect()?;
         let request_path = self.endpoint.request_path(path);
@@ -288,7 +295,9 @@ impl HttpTerminalDaemon {
             headers.push_str(&format!("Authorization: Bearer {token}\r\n"));
         }
         if !body.is_empty() {
-            headers.push_str("Content-Type: application/json\r\n");
+            if let Some(content_type) = content_type {
+                headers.push_str(&format!("Content-Type: {content_type}\r\n"));
+            }
             headers.push_str(&format!("Content-Length: {}\r\n", body.len()));
         }
         headers.push_str("\r\n");
@@ -744,5 +753,160 @@ fn hex_upper(value: u8) -> char {
         0..=9 => char::from(b'0' + value),
         10..=15 => char::from(b'A' + (value - 10)),
         _ => '0',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        std::{net::TcpListener, sync::mpsc, thread},
+    };
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        headers: String,
+        body: Vec<u8>,
+    }
+
+    #[test]
+    fn write_sends_raw_octets_with_binary_content_type() {
+        let (base_url, receiver, handle) = spawn_capture_server();
+        let daemon = match HttpTerminalDaemon::new(&base_url) {
+            Ok(daemon) => daemon,
+            Err(error) => panic!("failed to create daemon client: {error}"),
+        };
+        let payload = vec![0xff, 0x00, 0x1b, b'[', b'2', b'J'];
+
+        if let Err(error) = daemon.write(WriteRequest {
+            session_id: "daemon-raw".to_owned(),
+            bytes: payload.clone(),
+        }) {
+            panic!("write request failed: {error}");
+        }
+
+        let captured = match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(captured) => captured,
+            Err(error) => panic!("did not capture HTTP request: {error}"),
+        };
+        assert!(
+            captured
+                .headers
+                .starts_with("POST /api/v1/terminals/daemon-raw/write HTTP/1.1\r\n"),
+            "unexpected request line: {:?}",
+            captured.headers
+        );
+        assert!(
+            captured
+                .headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/octet-stream\r\n"),
+            "missing binary content type: {:?}",
+            captured.headers
+        );
+        assert_eq!(captured.body, payload);
+
+        match handle.join() {
+            Ok(()) => {},
+            Err(_) => panic!("capture server thread panicked"),
+        }
+    }
+
+    fn spawn_capture_server() -> (
+        String,
+        mpsc::Receiver<CapturedRequest>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = match TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => listener,
+            Err(error) => panic!("failed to bind capture server: {error}"),
+        };
+        let local_addr = match listener.local_addr() {
+            Ok(local_addr) => local_addr,
+            Err(error) => panic!("failed to read capture server address: {error}"),
+        };
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => panic!("failed to accept capture connection: {error}"),
+            };
+            if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(2))) {
+                panic!("failed to set capture read timeout: {error}");
+            }
+
+            let request = match read_http_request(&mut stream) {
+                Ok(request) => request,
+                Err(error) => panic!("failed to read HTTP request: {error}"),
+            };
+            if let Err(error) = sender.send(request) {
+                panic!("failed to send captured request: {error}");
+            }
+            if let Err(error) =
+                stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            {
+                panic!("failed to write HTTP response: {error}");
+            }
+            if let Err(error) = stream.flush() {
+                panic!("failed to flush HTTP response: {error}");
+            }
+        });
+
+        (
+            format!("http://127.0.0.1:{}", local_addr.port()),
+            receiver,
+            handle,
+        )
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> Result<CapturedRequest, String> {
+        let mut raw = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let (header_end, content_length) = loop {
+            let bytes_read = stream
+                .read(&mut buffer)
+                .map_err(|error| format!("failed to read request bytes: {error}"))?;
+            if bytes_read == 0 {
+                return Err("unexpected EOF while reading request".to_owned());
+            }
+            raw.extend_from_slice(&buffer[..bytes_read]);
+
+            let Some(header_end) = find_subslice(&raw, b"\r\n\r\n") else {
+                continue;
+            };
+            let content_length = parse_content_length(&raw[..header_end])?;
+            if raw.len() >= header_end + 4 + content_length {
+                break (header_end, content_length);
+            }
+        };
+
+        let headers = String::from_utf8(raw[..header_end].to_vec())
+            .map_err(|error| format!("request headers were not valid UTF-8: {error}"))?;
+        let body_start = header_end + 4;
+        let body_end = body_start + content_length;
+        Ok(CapturedRequest {
+            headers,
+            body: raw[body_start..body_end].to_vec(),
+        })
+    }
+
+    fn parse_content_length(header_bytes: &[u8]) -> Result<usize, String> {
+        let headers = String::from_utf8(header_bytes.to_vec())
+            .map_err(|error| format!("request headers were not valid UTF-8: {error}"))?;
+        for line in headers.lines() {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if !name.trim().eq_ignore_ascii_case("content-length") {
+                continue;
+            }
+
+            return value
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| format!("invalid content length: {error}"));
+        }
+
+        Ok(0)
     }
 }

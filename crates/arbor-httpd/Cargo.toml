@@ -14,6 +14,7 @@ vendored-openssl = ["arbor-core/vendored-openssl"]
 
 [dependencies]
 arbor-core   = { path = "../arbor-core" }
+arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 arbor-web-ui = { path = "../arbor-web-ui" }
 axum         = { features = ["ws"], workspace = true }
 config       = { workspace = true }

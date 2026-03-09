@@ -80,10 +80,49 @@ pub enum TerminalSessionState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonTerminalCursor {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DaemonTerminalModes {
+    pub app_cursor: bool,
+    pub alt_screen: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonTerminalStyledCell {
+    pub column: usize,
+    pub text: String,
+    pub fg: u32,
+    pub bg: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonTerminalStyledRun {
+    pub text: String,
+    pub fg: u32,
+    pub bg: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonTerminalStyledLine {
+    pub cells: Vec<DaemonTerminalStyledCell>,
+    pub runs: Vec<DaemonTerminalStyledRun>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
     pub session_id: String,
     pub output_tail: String,
+    #[serde(default)]
+    pub styled_lines: Vec<DaemonTerminalStyledLine>,
+    #[serde(default)]
+    pub cursor: Option<DaemonTerminalCursor>,
+    #[serde(default)]
+    pub modes: DaemonTerminalModes,
     pub exit_code: Option<i32>,
     pub state: TerminalSessionState,
     pub updated_at_unix_ms: Option<u64>,

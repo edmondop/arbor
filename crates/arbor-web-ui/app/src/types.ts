@@ -69,13 +69,11 @@ export type AgentSession = {
 };
 
 export type WsClientEvent =
-  | { type: "input"; data: string }
   | { type: "resize"; cols: number; rows: number }
   | { type: "signal"; signal: "interrupt" | "terminate" | "kill" }
   | { type: "detach" };
 
 export type WsServerEvent =
   | { type: "snapshot"; output_tail: string; state: TerminalState; exit_code: number | null; updated_at_unix_ms: number | null }
-  | { type: "output"; data: string }
   | { type: "exit"; state: TerminalState; exit_code: number | null }
   | { type: "error"; message: string };

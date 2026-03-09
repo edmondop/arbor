@@ -227,11 +227,6 @@ export function parseWsServerEvent(data: string): WsServerEvent | null {
         updated_at_unix_ms: readNumber(parsed["updated_at_unix_ms"]),
       };
     }
-    case "output": {
-      const outputData = readString(parsed["data"]);
-      if (outputData === null) return null;
-      return { type: "output", data: outputData };
-    }
     case "exit": {
       const state = parseTerminalState(parsed["state"]);
       if (state === null) return null;

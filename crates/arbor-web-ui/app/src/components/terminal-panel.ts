@@ -19,13 +19,14 @@ import type { TerminalSession } from "../types";
 
 const INPUT_FLUSH_MS = 16;
 const TERMINAL_TAB_COMMAND_MAX_CHARS = 14;
+const TEXT_ENCODER = new TextEncoder();
 
 type TerminalInstance = {
   sessionId: string;
   xterm: Terminal;
   fitAddon: FitAddon;
   socket: WebSocket | null;
-  inputQueue: string[];
+  inputQueue: Uint8Array[];
   inputTimer: ReturnType<typeof setTimeout> | null;
   resizeObserver: ResizeObserver | null;
 };
@@ -216,6 +217,7 @@ function createXtermInstance(sessionId: string): void {
 function connectWebSocket(instance: TerminalInstance): void {
   const wsUrl = buildWsUrl(instance.sessionId);
   const socket = new WebSocket(wsUrl);
+  socket.binaryType = "arraybuffer";
   instance.socket = socket;
 
   socket.addEventListener("open", () => {
@@ -227,29 +229,32 @@ function connectWebSocket(instance: TerminalInstance): void {
   });
 
   socket.addEventListener("message", (event) => {
-    if (typeof event.data !== "string") return;
-    const parsed = parseWsServerEvent(event.data);
-    if (parsed === null) return;
+    if (typeof event.data === "string") {
+      const parsed = parseWsServerEvent(event.data);
+      if (parsed === null) return;
 
-    switch (parsed.type) {
-      case "snapshot":
-        instance.xterm.write(parsed.output_tail);
-        setStatus(`Live: ${instance.sessionId} (${parsed.state})`);
-        // Re-fit after snapshot so programs like tmux get the correct size
-        scheduleFit(instance);
-        break;
-      case "output":
-        instance.xterm.write(parsed.data);
-        break;
-      case "exit":
-        instance.xterm.write(
-          `\r\n\x1b[90m[session exited: ${parsed.state}, code=${String(parsed.exit_code)}]\x1b[0m\r\n`,
-        );
-        setStatus(`Closed: ${instance.sessionId}`);
-        break;
-      case "error":
-        instance.xterm.write(`\r\n\x1b[31m[error] ${parsed.message}\x1b[0m\r\n`);
-        break;
+      switch (parsed.type) {
+        case "snapshot":
+          instance.xterm.write(parsed.output_tail);
+          setStatus(`Live: ${instance.sessionId} (${parsed.state})`);
+          // Re-fit after snapshot so programs like tmux get the correct size
+          scheduleFit(instance);
+          break;
+        case "exit":
+          instance.xterm.write(
+            `\r\n\x1b[90m[session exited: ${parsed.state}, code=${String(parsed.exit_code)}]\x1b[0m\r\n`,
+          );
+          setStatus(`Closed: ${instance.sessionId}`);
+          break;
+        case "error":
+          instance.xterm.write(`\r\n\x1b[31m[error] ${parsed.message}\x1b[0m\r\n`);
+          break;
+      }
+      return;
+    }
+
+    if (event.data instanceof ArrayBuffer) {
+      instance.xterm.write(new Uint8Array(event.data));
     }
   });
 
@@ -265,7 +270,7 @@ function connectWebSocket(instance: TerminalInstance): void {
 }
 
 function queueInput(instance: TerminalInstance, data: string): void {
-  instance.inputQueue.push(data);
+  instance.inputQueue.push(TEXT_ENCODER.encode(data));
   if (instance.inputTimer === null) {
     instance.inputTimer = setTimeout(() => flushInput(instance), INPUT_FLUSH_MS);
   }
@@ -274,10 +279,10 @@ function queueInput(instance: TerminalInstance, data: string): void {
 function flushInput(instance: TerminalInstance): void {
   instance.inputTimer = null;
   if (instance.socket === null || instance.socket.readyState !== WebSocket.OPEN) return;
-  const batch = instance.inputQueue.join("");
+  const batch = concatBytes(instance.inputQueue);
   instance.inputQueue.length = 0;
-  if (batch.length > 0) {
-    instance.socket.send(serializeWsClientEvent({ type: "input", data: batch }));
+  if (batch.byteLength > 0) {
+    instance.socket.send(batch);
   }
 }
 
@@ -428,6 +433,21 @@ function truncateWithEllipsis(value: string, maxChars: number): string {
   const chars = Array.from(value);
   if (chars.length <= maxChars) return value;
   return `${chars.slice(0, maxChars - 1).join("")}\u2026`;
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const chunk of chunks) {
+    total += chunk.byteLength;
+  }
+
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
 }
 
 function registerOscGuards(xterm: Terminal): void {
