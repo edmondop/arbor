@@ -223,7 +223,7 @@ fn to_esc_str(keystroke: &Keystroke, modes: TerminalModes) -> Option<Cow<'static
     None
 }
 
-fn normalized_key<'a>(keystroke: &'a Keystroke) -> &'a str {
+fn normalized_key(keystroke: &Keystroke) -> &str {
     match keystroke.key.as_str() {
         "return" => "enter",
         key => key,

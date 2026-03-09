@@ -706,7 +706,7 @@ mod tests {
                 .contains("content-type: application/octet-stream\r\n")
         );
         assert_eq!(captured.body, payload);
-        let _ = handle.join().expect("capture server should exit cleanly");
+        let _ = handle.join().map_err(|_| "capture server panicked")?;
         Ok(())
     }
 
@@ -726,7 +726,7 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("authorization: bearer secret-token\r\n")
         );
-        let _ = handle.join().expect("capture server should exit cleanly");
+        let _ = handle.join().map_err(|_| "capture server panicked")?;
         Ok(())
     }
 

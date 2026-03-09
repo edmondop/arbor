@@ -137,7 +137,7 @@ impl HttpTerminalDaemon {
         path: &str,
     ) -> Result<WebsocketConnectConfig, HttpTerminalDaemonError> {
         Ok(WebsocketConnectConfig {
-            url: self.endpoint.websocket_url(&path),
+            url: self.endpoint.websocket_url(path),
             auth_token: self.auth_token.lock().ok().and_then(|guard| guard.clone()),
         })
     }

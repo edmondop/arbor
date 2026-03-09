@@ -798,16 +798,18 @@ impl ServerHandler for ArborMcp {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
         std::future::ready({
-            let mut result = ListResourcesResult::default();
-            result.resources = default_mcp_resources()
-                .into_iter()
-                .map(|(uri, name, description)| {
-                    RawResource::new(uri, name)
-                        .with_description(description)
-                        .with_mime_type("application/json")
-                        .no_annotation()
-                })
-                .collect();
+            let result = ListResourcesResult {
+                resources: default_mcp_resources()
+                    .into_iter()
+                    .map(|(uri, name, description)| {
+                        RawResource::new(uri, name)
+                            .with_description(description)
+                            .with_mime_type("application/json")
+                            .no_annotation()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
             Ok(result)
         })
     }
@@ -818,16 +820,18 @@ impl ServerHandler for ArborMcp {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + Send + '_ {
         std::future::ready({
-            let mut result = ListResourceTemplatesResult::default();
-            result.resource_templates = default_mcp_resource_templates()
-                .into_iter()
-                .map(|(uri_template, name, description)| {
-                    RawResourceTemplate::new(uri_template, name)
-                        .with_description(description)
-                        .with_mime_type("application/json")
-                        .no_annotation()
-                })
-                .collect();
+            let result = ListResourceTemplatesResult {
+                resource_templates: default_mcp_resource_templates()
+                    .into_iter()
+                    .map(|(uri_template, name, description)| {
+                        RawResourceTemplate::new(uri_template, name)
+                            .with_description(description)
+                            .with_mime_type("application/json")
+                            .no_annotation()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
             Ok(result)
         })
     }
@@ -846,8 +850,10 @@ impl ServerHandler for ArborMcp {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListPromptsResult, ErrorData>> + Send + '_ {
         std::future::ready({
-            let mut result = ListPromptsResult::default();
-            result.prompts = self.prompt_definitions();
+            let result = ListPromptsResult {
+                prompts: self.prompt_definitions(),
+                ..Default::default()
+            };
             Ok(result)
         })
     }
@@ -1183,7 +1189,7 @@ mod tests {
         let server = ArborMcp::with_client(Arc::new(FakeDaemon));
         let result = server
             .read_resource_contents("arbor://health")
-            .expect("health resource should be readable");
+            .unwrap_or_else(|e| panic!("health resource should be readable: {e:?}"));
         assert_eq!(result.contents.len(), 1);
     }
 
