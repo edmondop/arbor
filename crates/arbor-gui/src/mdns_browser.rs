@@ -1,6 +1,11 @@
-use mdns_sd::{ServiceDaemon, ServiceEvent};
+use std::sync::mpsc;
+use std::thread;
 
-const SERVICE_TYPE: &str = "_arbor._tcp.local.";
+use zeroconf::prelude::*;
+use zeroconf::{BrowserEvent, MdnsBrowser, ServiceType};
+
+const SERVICE_NAME: &str = "arbor";
+const SERVICE_PROTOCOL: &str = "tcp";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredDaemon {
@@ -15,11 +20,7 @@ pub struct DiscoveredDaemon {
 
 impl DiscoveredDaemon {
     pub fn base_url(&self) -> String {
-        let scheme = if self.tls {
-            "https"
-        } else {
-            "http"
-        };
+        let scheme = if self.tls { "https" } else { "http" };
         let host = self
             .addresses
             .first()
@@ -45,60 +46,92 @@ pub trait MdnsDiscovery {
     fn poll_updates(&self) -> Vec<MdnsEvent>;
 }
 
-struct MdnsSdBrowser {
-    _daemon: ServiceDaemon,
-    receiver: mdns_sd::Receiver<ServiceEvent>,
+struct ZeroconfBrowser {
+    receiver: mpsc::Receiver<MdnsEvent>,
+    _handle: thread::JoinHandle<()>,
 }
 
 /// Start browsing for `_arbor._tcp` services on the local network.
 pub fn start_browsing() -> Result<Box<dyn MdnsDiscovery>, String> {
-    let daemon = ServiceDaemon::new().map_err(|e| format!("failed to create mDNS daemon: {e}"))?;
-    let receiver = daemon
-        .browse(SERVICE_TYPE)
-        .map_err(|e| format!("failed to browse for {SERVICE_TYPE}: {e}"))?;
-    Ok(Box::new(MdnsSdBrowser {
-        _daemon: daemon,
-        receiver,
+    let service_type = ServiceType::new(SERVICE_NAME, SERVICE_PROTOCOL)
+        .map_err(|e| format!("failed to create service type: {e}"))?;
+
+    let (tx, rx) = mpsc::channel();
+
+    let handle = thread::Builder::new()
+        .name("mdns-browse".into())
+        .spawn(move || {
+            let mut browser = MdnsBrowser::new(service_type);
+
+            browser.set_service_callback(Box::new(move |result, _| {
+                match result {
+                    Ok(BrowserEvent::Add(service)) => {
+                        let tls = service
+                            .txt()
+                            .as_ref()
+                            .and_then(|t| t.get("tls"))
+                            .is_some_and(|v| v == "true");
+                        let has_auth = service
+                            .txt()
+                            .as_ref()
+                            .and_then(|t| t.get("auth"))
+                            .is_some_and(|v| v == "true");
+                        let version = service
+                            .txt()
+                            .as_ref()
+                            .and_then(|t| t.get("version"))
+                            .unwrap_or_default();
+
+                        let daemon = DiscoveredDaemon {
+                            instance_name: service.name().to_owned(),
+                            host: service.host_name().to_owned(),
+                            addresses: vec![service.address().to_owned()],
+                            port: *service.port(),
+                            tls,
+                            has_auth,
+                            version,
+                        };
+
+                        let _ = tx.send(MdnsEvent::Added(daemon));
+                    }
+                    Ok(BrowserEvent::Remove(removal)) => {
+                        let _ = tx.send(MdnsEvent::Removed(removal.name().to_owned()));
+                    }
+                    Err(err) => {
+                        tracing::warn!("mDNS browse error: {err}");
+                    }
+                }
+            }));
+
+            let event_loop = match browser.browse_services() {
+                Ok(el) => el,
+                Err(err) => {
+                    tracing::error!("mDNS browse_services failed: {err}");
+                    return;
+                }
+            };
+
+            loop {
+                if let Err(err) = event_loop.poll(std::time::Duration::from_secs(1)) {
+                    tracing::warn!("mDNS browse event loop error: {err}");
+                    break;
+                }
+            }
+        })
+        .map_err(|e| format!("failed to spawn mDNS browse thread: {e}"))?;
+
+    Ok(Box::new(ZeroconfBrowser {
+        receiver: rx,
+        _handle: handle,
     }))
 }
 
-impl MdnsDiscovery for MdnsSdBrowser {
+impl MdnsDiscovery for ZeroconfBrowser {
     /// Non-blocking drain of pending mDNS events.
     fn poll_updates(&self) -> Vec<MdnsEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.receiver.try_recv() {
-            match event {
-                ServiceEvent::ServiceResolved(info) => {
-                    let tls = info
-                        .get_property_val_str("tls")
-                        .is_some_and(|v| v == "true");
-                    let has_auth = info
-                        .get_property_val_str("auth")
-                        .is_some_and(|v| v == "true");
-                    let version = info
-                        .get_property_val_str("version")
-                        .unwrap_or_default()
-                        .to_owned();
-
-                    let addresses: Vec<String> =
-                        info.get_addresses().iter().map(|a| a.to_string()).collect();
-
-                    let daemon = DiscoveredDaemon {
-                        instance_name: info.get_fullname().to_owned(),
-                        host: info.get_hostname().to_owned(),
-                        addresses,
-                        port: info.get_port(),
-                        tls,
-                        has_auth,
-                        version,
-                    };
-                    events.push(MdnsEvent::Added(daemon));
-                },
-                ServiceEvent::ServiceRemoved(_, fullname) => {
-                    events.push(MdnsEvent::Removed(fullname));
-                },
-                _ => {},
-            }
+            events.push(event);
         }
         events
     }

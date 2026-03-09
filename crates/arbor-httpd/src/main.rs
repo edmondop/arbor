@@ -262,6 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         daemon_config.auth_token.as_deref(),
         daemon_config.bind.as_deref(),
     )?;
+    let has_auth = daemon_config.auth_token.is_some();
     let auth_state = auth::AuthState::new(daemon_config.auth_token, allow_remote);
 
     let daemon_store = JsonDaemonSessionStore::default();
@@ -335,7 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("arbor-httpd listening on http://{local_addr}");
 
     // Announce on the local network via mDNS — hold handle to keep registration alive
-    let _mdns = match mdns::register_service(local_addr.port(), false, false) {
+    let _mdns = match mdns::register_service(local_addr.port(), false, has_auth) {
         Ok(registration) => {
             println!(
                 "  mDNS: announcing _arbor._tcp on port {}",
