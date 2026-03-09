@@ -30,7 +30,7 @@ use {
         Algorithm as DiffAlgorithm, Diff as BlobDiff, InternedInput as BlobInternedInput,
     },
     gpui::{
-        Animation, AnimationExt, App, Application, Bounds, ClipboardItem, Context, Div,
+        Animation, AnimationExt, AnyElement, App, Application, Bounds, ClipboardItem, Context, Div,
         DragMoveEvent, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle,
         FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent,
         Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -125,7 +125,6 @@ const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
 const GIT_ACTION_ICON_PR: &str = "\u{f126}";
 const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 const THEME_TOAST_DURATION: Duration = Duration::from_millis(1600);
-const WORKTREE_HOVER_POPOVER_SHOW_DELAY: Duration = Duration::from_millis(80);
 const WORKTREE_HOVER_POPOVER_HIDE_DELAY: Duration = Duration::from_millis(300);
 const WORKTREE_HOVER_POPOVER_CARD_WIDTH_PX: f32 = 300.;
 const WORKTREE_HOVER_POPOVER_ZONE_PADDING_PX: f32 = 12.;
@@ -982,7 +981,7 @@ struct AgentPreset {
 struct SettingsModal {
     active_field: SettingsField,
     daemon_url: String,
-    preferred_editor: String,
+    daemon_url_cursor: usize,
     notifications: bool,
     daemon_auth_token: String,
     error: Option<String>,
@@ -991,25 +990,19 @@ struct SettingsModal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsField {
     DaemonUrl,
-    PreferredEditor,
 }
 
 impl SettingsField {
     fn cycle(self, reverse: bool) -> Self {
-        match (self, reverse) {
-            (SettingsField::DaemonUrl, false) => SettingsField::PreferredEditor,
-            (SettingsField::DaemonUrl, true) => SettingsField::PreferredEditor,
-            (SettingsField::PreferredEditor, false) => SettingsField::DaemonUrl,
-            (SettingsField::PreferredEditor, true) => SettingsField::DaemonUrl,
-        }
+        let _ = reverse;
+        self
     }
 }
 
 enum SettingsModalInputEvent {
     SetActiveField(SettingsField),
     CycleField(bool),
-    Backspace,
-    Append(String),
+    Edit(TextEditAction),
     ToggleNotifications,
     ClearError,
 }
@@ -1018,14 +1011,14 @@ enum SettingsModalInputEvent {
 struct ManagePresetsModal {
     active_preset: AgentPresetKind,
     command: String,
+    command_cursor: usize,
     error: Option<String>,
 }
 
 enum PresetsModalInputEvent {
     SetActivePreset(AgentPresetKind),
     CycleActivePreset(bool),
-    Backspace,
-    Append(String),
+    Edit(TextEditAction),
     RestoreDefault,
     ClearError,
 }
@@ -1062,8 +1055,11 @@ impl RepoPresetModalField {
 struct ManageRepoPresetsModal {
     editing_index: Option<usize>,
     icon: String,
+    icon_cursor: usize,
     name: String,
+    name_cursor: usize,
     command: String,
+    command_cursor: usize,
     active_tab: RepoPresetModalTab,
     active_field: RepoPresetModalField,
     error: Option<String>,
@@ -1079,8 +1075,7 @@ enum RepoPresetsModalInputEvent {
     SetActiveTab(RepoPresetModalTab),
     SetActiveField(RepoPresetModalField),
     MoveActiveField(bool),
-    Backspace,
-    Append(String),
+    Edit(TextEditAction),
     ClearError,
 }
 
@@ -1250,13 +1245,17 @@ struct CreateModal {
     tab: CreateModalTab,
     // Worktree fields
     repository_path: String,
+    repository_path_cursor: usize,
     worktree_name: String,
+    worktree_name_cursor: usize,
     checkout_kind: CheckoutKind,
     worktree_active_field: CreateWorktreeField,
     // Outpost fields
     host_index: usize,
     clone_url: String,
+    clone_url_cursor: usize,
     outpost_name: String,
+    outpost_name_cursor: usize,
     outpost_active_field: CreateOutpostField,
     // Shared
     is_creating: bool,
@@ -1272,8 +1271,7 @@ struct GitHubAuthModal {
 enum ModalInputEvent {
     SetActiveField(CreateWorktreeField),
     MoveActiveField,
-    Backspace,
-    Append(String),
+    Edit(TextEditAction),
     ClearError,
 }
 
@@ -1281,8 +1279,7 @@ enum OutpostModalInputEvent {
     SetActiveField(CreateOutpostField),
     MoveActiveField(bool),
     CycleHost(bool),
-    Backspace,
-    Append(String),
+    Edit(TextEditAction),
     ClearError,
 }
 
@@ -1290,8 +1287,11 @@ enum OutpostModalInputEvent {
 struct ManageHostsModal {
     adding: bool,
     name: String,
+    name_cursor: usize,
     hostname: String,
+    hostname_cursor: usize,
     user: String,
+    user_cursor: usize,
     active_field: ManageHostsField,
     error: Option<String>,
 }
@@ -1306,8 +1306,7 @@ enum ManageHostsField {
 enum HostsModalInputEvent {
     SetActiveField(ManageHostsField),
     MoveActiveField(bool),
-    Backspace,
-    Append(String),
+    Edit(TextEditAction),
     ClearError,
 }
 
@@ -1332,12 +1331,25 @@ struct DeleteModal {
 struct DaemonAuthModal {
     daemon_url: String,
     token: String,
+    token_cursor: usize,
     error: Option<String>,
 }
 
 struct ConnectToHostModal {
     address: String,
+    address_cursor: usize,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum TextEditAction {
+    Insert(String),
+    Backspace,
+    Delete,
+    MoveLeft,
+    MoveRight,
+    MoveHome,
+    MoveEnd,
 }
 
 enum ConnectHostTarget {
@@ -1555,6 +1567,7 @@ struct ArborWindow {
     theme_toast_generation: u64,
     right_pane_tab: RightPaneTab,
     right_pane_search: String,
+    right_pane_search_cursor: usize,
     right_pane_search_active: bool,
     file_tree_entries: Vec<FileTreeEntry>,
     expanded_dirs: HashSet<PathBuf>,
@@ -1583,6 +1596,7 @@ struct ArborWindow {
     quit_overlay_until: Option<Instant>,
     ime_marked_text: Option<String>,
     welcome_clone_url: String,
+    welcome_clone_url_cursor: usize,
     welcome_clone_url_active: bool,
     welcome_cloning: bool,
     welcome_clone_error: Option<String>,
@@ -1783,6 +1797,7 @@ impl ArborWindow {
                     theme_toast_generation: 0,
                     right_pane_tab: RightPaneTab::Changes,
                     right_pane_search: String::new(),
+                    right_pane_search_cursor: 0,
                     right_pane_search_active: false,
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
@@ -1811,6 +1826,7 @@ impl ArborWindow {
                     quit_overlay_until: None,
                     ime_marked_text: None,
                     welcome_clone_url: String::new(),
+                    welcome_clone_url_cursor: 0,
                     welcome_clone_url_active: false,
                     welcome_cloning: false,
                     welcome_clone_error: None,
@@ -2103,6 +2119,7 @@ impl ArborWindow {
             theme_toast_generation: 0,
             right_pane_tab: RightPaneTab::Changes,
             right_pane_search: String::new(),
+            right_pane_search_cursor: 0,
             right_pane_search_active: false,
             file_tree_entries: Vec::new(),
             expanded_dirs: HashSet::new(),
@@ -2117,6 +2134,7 @@ impl ArborWindow {
             quit_overlay_until: None,
             ime_marked_text: None,
             welcome_clone_url: String::new(),
+            welcome_clone_url_cursor: 0,
             welcome_clone_url_active: false,
             welcome_cloning: false,
             welcome_clone_error: None,
@@ -4065,6 +4083,7 @@ impl ArborWindow {
                                     theme,
                                     "welcome-clone-url",
                                     &self.welcome_clone_url,
+                                    self.welcome_clone_url_cursor,
                                     "https://github.com/user/repo or git@github.com:user/repo.git",
                                     clone_url_active,
                                 )
@@ -4074,11 +4093,15 @@ impl ArborWindow {
                                     cx.listener(|this, _: &MouseDownEvent, window, cx| {
                                         window.focus(&this.welcome_clone_focus);
                                         this.welcome_clone_url_active = true;
+                                        this.welcome_clone_url_cursor =
+                                            char_count(&this.welcome_clone_url);
                                         cx.notify();
                                     }),
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.welcome_clone_url_active = true;
+                                    this.welcome_clone_url_cursor =
+                                        char_count(&this.welcome_clone_url);
                                     cx.notify();
                                 })),
                             )
@@ -4193,6 +4216,19 @@ impl ArborWindow {
             });
         })
         .detach();
+    }
+
+    fn copy_settings_daemon_auth_token_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.settings_modal.as_ref() else {
+            return;
+        };
+        if modal.daemon_auth_token.trim().is_empty() {
+            return;
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(modal.daemon_auth_token.clone()));
+        self.notice = Some("Daemon auth token copied to clipboard".to_owned());
+        cx.notify();
     }
 
     fn open_github_auth_verification_page(&mut self, cx: &mut Context<Self>) {
@@ -4587,19 +4623,10 @@ impl ArborWindow {
             return;
         }
 
-        self._hover_show_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_spawn(async {
-                smol::Timer::after(WORKTREE_HOVER_POPOVER_SHOW_DELAY).await;
-            })
-            .await;
-            let _ = this.update(cx, |this, cx| {
-                if worktree_hover_trigger_zone_bounds(this.left_pane_width, mouse_y)
-                    .contains(&this.last_mouse_position)
-                {
-                    this.show_worktree_hover_popover(worktree_index, mouse_y, cx);
-                }
-            });
-        }));
+        // Show immediately — no delay. This avoids timing issues where the
+        // dismiss timer of the previous cell races with the show timer of the
+        // new cell, causing the tooltip to not appear.
+        self.show_worktree_hover_popover(worktree_index, mouse_y, cx);
     }
 
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
@@ -4754,6 +4781,7 @@ impl ArborWindow {
                     self.daemon_auth_modal = Some(DaemonAuthModal {
                         daemon_url: token_key,
                         token: String::new(),
+                        token_cursor: 0,
                         error: None,
                     });
                     self.terminal_daemon = Some(client);
@@ -4806,6 +4834,7 @@ impl ArborWindow {
         let token = modal.token.trim().to_owned();
         if token.is_empty() {
             self.daemon_auth_modal = Some(DaemonAuthModal {
+                token_cursor: 0,
                 error: Some("Token cannot be empty".to_owned()),
                 ..modal
             });
@@ -4829,6 +4858,7 @@ impl ArborWindow {
                     if error.is_unauthorized() || error.is_forbidden() {
                         self.daemon_auth_modal = Some(DaemonAuthModal {
                             daemon_url: modal.daemon_url,
+                            token_cursor: char_count(&modal.token),
                             token: modal.token,
                             error: Some("Invalid token".to_owned()),
                         });
@@ -5274,6 +5304,7 @@ impl ArborWindow {
         }
         self.right_pane_tab = tab;
         self.right_pane_search.clear();
+        self.right_pane_search_cursor = 0;
         self.right_pane_search_active = false;
         if tab == RightPaneTab::FileTree && self.file_tree_entries.is_empty() {
             self.rebuild_file_tree();
@@ -5301,6 +5332,14 @@ impl ArborWindow {
         }
 
         self.theme_kind = theme_kind;
+        if let Err(error) = self
+            .app_config_store
+            .save_scalar_settings(&[("theme", Some(theme_kind.slug()))])
+        {
+            self.notice = Some(format!("failed to save theme setting: {error}"));
+        } else {
+            self.config_last_modified = None;
+        }
         if !self.show_theme_picker {
             self.theme_toast = Some(format!("Theme switched to {}", theme_kind.label()));
         }
@@ -5342,13 +5381,17 @@ impl ArborWindow {
             .unwrap_or_default();
         self.create_modal = Some(CreateModal {
             tab,
+            repository_path_cursor: char_count(&repository_path),
             repository_path,
             worktree_name: String::new(),
+            worktree_name_cursor: 0,
             checkout_kind: self.preferred_checkout_kind,
             worktree_active_field: CreateWorktreeField::WorktreeName,
             host_index: 0,
+            clone_url_cursor: char_count(&clone_url),
             clone_url,
             outpost_name: String::new(),
+            outpost_name_cursor: 0,
             outpost_active_field: CreateOutpostField::CloneUrl,
             is_creating: false,
             error: None,
@@ -5574,6 +5617,14 @@ impl ArborWindow {
         match input {
             ModalInputEvent::SetActiveField(field) => {
                 modal.worktree_active_field = field;
+                match field {
+                    CreateWorktreeField::RepositoryPath => {
+                        modal.repository_path_cursor = char_count(&modal.repository_path);
+                    },
+                    CreateWorktreeField::WorktreeName => {
+                        modal.worktree_name_cursor = char_count(&modal.worktree_name);
+                    },
+                }
             },
             ModalInputEvent::MoveActiveField => {
                 modal.worktree_active_field = match modal.worktree_active_field {
@@ -5581,19 +5632,21 @@ impl ArborWindow {
                     CreateWorktreeField::WorktreeName => CreateWorktreeField::RepositoryPath,
                 };
             },
-            ModalInputEvent::Backspace => {
-                let field_value = match modal.worktree_active_field {
-                    CreateWorktreeField::RepositoryPath => &mut modal.repository_path,
-                    CreateWorktreeField::WorktreeName => &mut modal.worktree_name,
-                };
-                let _ = field_value.pop();
-            },
-            ModalInputEvent::Append(text) => {
-                let field_value = match modal.worktree_active_field {
-                    CreateWorktreeField::RepositoryPath => &mut modal.repository_path,
-                    CreateWorktreeField::WorktreeName => &mut modal.worktree_name,
-                };
-                field_value.push_str(&text);
+            ModalInputEvent::Edit(action) => match modal.worktree_active_field {
+                CreateWorktreeField::RepositoryPath => {
+                    apply_text_edit_action(
+                        &mut modal.repository_path,
+                        &mut modal.repository_path_cursor,
+                        &action,
+                    );
+                },
+                CreateWorktreeField::WorktreeName => {
+                    apply_text_edit_action(
+                        &mut modal.worktree_name,
+                        &mut modal.worktree_name_cursor,
+                        &action,
+                    );
+                },
             },
             ModalInputEvent::ClearError => {
                 modal.error = None;
@@ -5704,8 +5757,11 @@ impl ArborWindow {
         self.manage_hosts_modal = Some(ManageHostsModal {
             adding: false,
             name: String::new(),
+            name_cursor: 0,
             hostname: String::new(),
+            hostname_cursor: 0,
             user: String::new(),
+            user_cursor: 0,
             active_field: ManageHostsField::Name,
             error: None,
         });
@@ -5729,6 +5785,13 @@ impl ArborWindow {
         match input {
             HostsModalInputEvent::SetActiveField(field) => {
                 modal.active_field = field;
+                match field {
+                    ManageHostsField::Name => modal.name_cursor = char_count(&modal.name),
+                    ManageHostsField::Hostname => {
+                        modal.hostname_cursor = char_count(&modal.hostname);
+                    },
+                    ManageHostsField::User => modal.user_cursor = char_count(&modal.user),
+                }
             },
             HostsModalInputEvent::MoveActiveField(reverse) => {
                 modal.active_field = match (modal.active_field, reverse) {
@@ -5740,21 +5803,20 @@ impl ArborWindow {
                     (ManageHostsField::User, true) => ManageHostsField::Hostname,
                 };
             },
-            HostsModalInputEvent::Backspace => {
-                let field_value = match modal.active_field {
-                    ManageHostsField::Name => &mut modal.name,
-                    ManageHostsField::Hostname => &mut modal.hostname,
-                    ManageHostsField::User => &mut modal.user,
-                };
-                let _ = field_value.pop();
-            },
-            HostsModalInputEvent::Append(text) => {
-                let field_value = match modal.active_field {
-                    ManageHostsField::Name => &mut modal.name,
-                    ManageHostsField::Hostname => &mut modal.hostname,
-                    ManageHostsField::User => &mut modal.user,
-                };
-                field_value.push_str(&text);
+            HostsModalInputEvent::Edit(action) => match modal.active_field {
+                ManageHostsField::Name => {
+                    apply_text_edit_action(&mut modal.name, &mut modal.name_cursor, &action);
+                },
+                ManageHostsField::Hostname => {
+                    apply_text_edit_action(
+                        &mut modal.hostname,
+                        &mut modal.hostname_cursor,
+                        &action,
+                    );
+                },
+                ManageHostsField::User => {
+                    apply_text_edit_action(&mut modal.user, &mut modal.user_cursor, &action);
+                },
             },
             HostsModalInputEvent::ClearError => {
                 modal.error = None;
@@ -5808,8 +5870,11 @@ impl ArborWindow {
         if let Some(modal) = self.manage_hosts_modal.as_mut() {
             modal.adding = false;
             modal.name.clear();
+            modal.name_cursor = 0;
             modal.hostname.clear();
+            modal.hostname_cursor = 0;
             modal.user.clear();
+            modal.user_cursor = 0;
             modal.error = None;
         }
         cx.notify();
@@ -5868,9 +5933,11 @@ impl ArborWindow {
 
     fn open_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
         let active_preset = self.active_preset_tab.unwrap_or(AgentPresetKind::Codex);
+        let command = self.preset_command_for_kind(active_preset);
         self.manage_presets_modal = Some(ManagePresetsModal {
             active_preset,
-            command: self.preset_command_for_kind(active_preset),
+            command_cursor: char_count(&command),
+            command,
             error: None,
         });
         cx.notify();
@@ -5894,19 +5961,19 @@ impl ArborWindow {
             PresetsModalInputEvent::SetActivePreset(kind) => {
                 modal.active_preset = kind;
                 modal.command = self.preset_command_for_kind(kind);
+                modal.command_cursor = char_count(&modal.command);
             },
             PresetsModalInputEvent::CycleActivePreset(reverse) => {
                 modal.active_preset = modal.active_preset.cycle(reverse);
                 modal.command = self.preset_command_for_kind(modal.active_preset);
+                modal.command_cursor = char_count(&modal.command);
             },
-            PresetsModalInputEvent::Backspace => {
-                let _ = modal.command.pop();
-            },
-            PresetsModalInputEvent::Append(text) => {
-                modal.command.push_str(&text);
+            PresetsModalInputEvent::Edit(action) => {
+                apply_text_edit_action(&mut modal.command, &mut modal.command_cursor, &action);
             },
             PresetsModalInputEvent::RestoreDefault => {
                 modal.command = modal.active_preset.default_command().to_owned();
+                modal.command_cursor = char_count(&modal.command);
             },
             PresetsModalInputEvent::ClearError => {
                 modal.error = None;
@@ -6056,8 +6123,11 @@ impl ArborWindow {
 
         self.manage_repo_presets_modal = Some(ManageRepoPresetsModal {
             editing_index,
+            icon_cursor: char_count(&icon),
             icon,
+            name_cursor: char_count(&name),
             name,
+            command_cursor: char_count(&command),
             command,
             active_tab: RepoPresetModalTab::Edit,
             active_field: RepoPresetModalField::Icon,
@@ -6091,6 +6161,13 @@ impl ArborWindow {
                     return;
                 }
                 modal.active_field = field;
+                match field {
+                    RepoPresetModalField::Icon => modal.icon_cursor = char_count(&modal.icon),
+                    RepoPresetModalField::Name => modal.name_cursor = char_count(&modal.name),
+                    RepoPresetModalField::Command => {
+                        modal.command_cursor = char_count(&modal.command);
+                    },
+                }
             },
             RepoPresetsModalInputEvent::MoveActiveField(reverse) => {
                 if modal.active_tab != RepoPresetModalTab::Edit {
@@ -6104,31 +6181,27 @@ impl ArborWindow {
                     modal.active_field.next()
                 };
             },
-            RepoPresetsModalInputEvent::Backspace => {
+            RepoPresetsModalInputEvent::Edit(action) => {
                 if modal.active_tab != RepoPresetModalTab::Edit {
                     self.manage_repo_presets_modal = Some(modal);
                     cx.notify();
                     return;
                 }
-                let field = match modal.active_field {
-                    RepoPresetModalField::Icon => &mut modal.icon,
-                    RepoPresetModalField::Name => &mut modal.name,
-                    RepoPresetModalField::Command => &mut modal.command,
-                };
-                let _ = field.pop();
-            },
-            RepoPresetsModalInputEvent::Append(text) => {
-                if modal.active_tab != RepoPresetModalTab::Edit {
-                    self.manage_repo_presets_modal = Some(modal);
-                    cx.notify();
-                    return;
+                match modal.active_field {
+                    RepoPresetModalField::Icon => {
+                        apply_text_edit_action(&mut modal.icon, &mut modal.icon_cursor, &action);
+                    },
+                    RepoPresetModalField::Name => {
+                        apply_text_edit_action(&mut modal.name, &mut modal.name_cursor, &action);
+                    },
+                    RepoPresetModalField::Command => {
+                        apply_text_edit_action(
+                            &mut modal.command,
+                            &mut modal.command_cursor,
+                            &action,
+                        );
+                    },
                 }
-                let field = match modal.active_field {
-                    RepoPresetModalField::Icon => &mut modal.icon,
-                    RepoPresetModalField::Name => &mut modal.name,
-                    RepoPresetModalField::Command => &mut modal.command,
-                };
-                field.push_str(&text);
             },
             RepoPresetsModalInputEvent::ClearError => {
                 modal.error = None;
@@ -6251,6 +6324,15 @@ impl ArborWindow {
         match input {
             OutpostModalInputEvent::SetActiveField(field) => {
                 modal.outpost_active_field = field;
+                match field {
+                    CreateOutpostField::HostSelector => {},
+                    CreateOutpostField::CloneUrl => {
+                        modal.clone_url_cursor = char_count(&modal.clone_url);
+                    },
+                    CreateOutpostField::OutpostName => {
+                        modal.outpost_name_cursor = char_count(&modal.outpost_name);
+                    },
+                }
             },
             OutpostModalInputEvent::MoveActiveField(reverse) => {
                 modal.outpost_active_field = match (modal.outpost_active_field, reverse) {
@@ -6272,27 +6354,27 @@ impl ArborWindow {
                     }
                 }
             },
-            OutpostModalInputEvent::Backspace => {
+            OutpostModalInputEvent::Edit(action) => {
                 if modal.outpost_active_field == CreateOutpostField::HostSelector {
                     return;
                 }
-                let field_value = match modal.outpost_active_field {
+                match modal.outpost_active_field {
                     CreateOutpostField::HostSelector => return,
-                    CreateOutpostField::CloneUrl => &mut modal.clone_url,
-                    CreateOutpostField::OutpostName => &mut modal.outpost_name,
-                };
-                let _ = field_value.pop();
-            },
-            OutpostModalInputEvent::Append(text) => {
-                if modal.outpost_active_field == CreateOutpostField::HostSelector {
-                    return;
+                    CreateOutpostField::CloneUrl => {
+                        apply_text_edit_action(
+                            &mut modal.clone_url,
+                            &mut modal.clone_url_cursor,
+                            &action,
+                        );
+                    },
+                    CreateOutpostField::OutpostName => {
+                        apply_text_edit_action(
+                            &mut modal.outpost_name,
+                            &mut modal.outpost_name_cursor,
+                            &action,
+                        );
+                    },
                 }
-                let field_value = match modal.outpost_active_field {
-                    CreateOutpostField::HostSelector => return,
-                    CreateOutpostField::CloneUrl => &mut modal.clone_url,
-                    CreateOutpostField::OutpostName => &mut modal.outpost_name,
-                };
-                field_value.push_str(&text);
             },
             OutpostModalInputEvent::ClearError => {
                 modal.error = None;
@@ -6425,13 +6507,6 @@ impl ArborWindow {
                     cx.stop_propagation();
                     return;
                 },
-                "backspace" => {
-                    self.welcome_clone_url.pop();
-                    self.welcome_clone_error = None;
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                },
                 "enter" | "return" => {
                     self.submit_welcome_clone(cx);
                     cx.stop_propagation();
@@ -6439,31 +6514,12 @@ impl ArborWindow {
                 },
                 _ => {},
             }
-            if event.keystroke.modifiers.platform {
-                if event.keystroke.key.as_str() == "v"
-                    && let Some(clipboard) = cx.read_from_clipboard()
-                {
-                    let text = clipboard.text().unwrap_or_default();
-                    self.welcome_clone_url.push_str(&text);
-                    self.welcome_clone_error = None;
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                return;
-            }
-            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
-                return;
-            }
-            let key_text = event.keystroke.key_char.as_deref().or_else(|| {
-                let key = event.keystroke.key.as_str();
-                if key.chars().count() == 1 {
-                    Some(key)
-                } else {
-                    None
-                }
-            });
-            if let Some(key_text) = key_text {
-                self.welcome_clone_url.push_str(key_text);
+            if let Some(action) = text_edit_action_for_event(event, cx) {
+                apply_text_edit_action(
+                    &mut self.welcome_clone_url,
+                    &mut self.welcome_clone_url_cursor,
+                    &action,
+                );
                 self.welcome_clone_error = None;
                 cx.notify();
                 cx.stop_propagation();
@@ -6472,30 +6528,20 @@ impl ArborWindow {
         }
 
         if self.right_pane_search_active {
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    self.right_pane_search.clear();
-                    self.right_pane_search_active = false;
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                },
-                "backspace" => {
-                    self.right_pane_search.pop();
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                },
-                _ => {},
-            }
-            if event.keystroke.modifiers.platform
-                || event.keystroke.modifiers.control
-                || event.keystroke.modifiers.alt
-            {
+            if event.keystroke.key.as_str() == "escape" {
+                self.right_pane_search.clear();
+                self.right_pane_search_cursor = 0;
+                self.right_pane_search_active = false;
+                cx.notify();
+                cx.stop_propagation();
                 return;
             }
-            if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                self.right_pane_search.push_str(key_char);
+            if let Some(action) = text_edit_action_for_event(event, cx) {
+                apply_text_edit_action(
+                    &mut self.right_pane_search,
+                    &mut self.right_pane_search_cursor,
+                    &action,
+                );
                 cx.notify();
                 cx.stop_propagation();
             }
@@ -6512,10 +6558,6 @@ impl ArborWindow {
         }
 
         if self.settings_modal.is_some() {
-            if event.keystroke.modifiers.platform {
-                return;
-            }
-
             match event.keystroke.key.as_str() {
                 "escape" => {
                     self.close_settings_modal(cx);
@@ -6535,28 +6577,11 @@ impl ArborWindow {
                     cx.stop_propagation();
                     return;
                 },
-                "backspace" | "delete" => {
-                    self.update_settings_modal_input(SettingsModalInputEvent::Backspace, cx);
-                    cx.stop_propagation();
-                    return;
-                },
-                "space" | " " => {
-                    cx.stop_propagation();
-                    return;
-                },
                 _ => {},
             }
-
-            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
-                return;
-            }
-
-            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+            if let Some(action) = text_edit_action_for_event(event, cx) {
                 self.update_settings_modal_input(SettingsModalInputEvent::ClearError, cx);
-                self.update_settings_modal_input(
-                    SettingsModalInputEvent::Append(key_char.to_owned()),
-                    cx,
-                );
+                self.update_settings_modal_input(SettingsModalInputEvent::Edit(action), cx);
                 cx.stop_propagation();
             }
             return;
@@ -6619,9 +6644,6 @@ impl ArborWindow {
         }
 
         if self.daemon_auth_modal.is_some() {
-            if event.keystroke.modifiers.platform {
-                return;
-            }
             match event.keystroke.key.as_str() {
                 "escape" => {
                     self.daemon_auth_modal = None;
@@ -6632,21 +6654,17 @@ impl ArborWindow {
                     self.submit_daemon_auth(cx);
                     cx.stop_propagation();
                 },
-                "backspace" => {
-                    if let Some(modal) = self.daemon_auth_modal.as_mut() {
-                        modal.token.pop();
+                _ => {
+                    if let Some(modal) = self.daemon_auth_modal.as_mut()
+                        && let Some(action) = text_edit_action_for_event(event, cx)
+                    {
+                        apply_text_edit_action(
+                            &mut modal.token,
+                            &mut modal.token_cursor,
+                            &action,
+                        );
                         modal.error = None;
                         cx.notify();
-                    }
-                    cx.stop_propagation();
-                },
-                _ => {
-                    if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                        if let Some(modal) = self.daemon_auth_modal.as_mut() {
-                            modal.token.push_str(key_char);
-                            modal.error = None;
-                            cx.notify();
-                        }
                         cx.stop_propagation();
                     }
                 },
@@ -6655,9 +6673,6 @@ impl ArborWindow {
         }
 
         if self.connect_to_host_modal.is_some() {
-            if event.keystroke.modifiers.platform {
-                return;
-            }
             match event.keystroke.key.as_str() {
                 "escape" => {
                     self.connect_to_host_modal = None;
@@ -6668,21 +6683,17 @@ impl ArborWindow {
                     self.submit_connect_to_host(cx);
                     cx.stop_propagation();
                 },
-                "backspace" => {
-                    if let Some(modal) = self.connect_to_host_modal.as_mut() {
-                        modal.address.pop();
+                _ => {
+                    if let Some(modal) = self.connect_to_host_modal.as_mut()
+                        && let Some(action) = text_edit_action_for_event(event, cx)
+                    {
+                        apply_text_edit_action(
+                            &mut modal.address,
+                            &mut modal.address_cursor,
+                            &action,
+                        );
                         modal.error = None;
                         cx.notify();
-                    }
-                    cx.stop_propagation();
-                },
-                _ => {
-                    if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                        if let Some(modal) = self.connect_to_host_modal.as_mut() {
-                            modal.address.push_str(key_char);
-                            modal.error = None;
-                            cx.notify();
-                        }
                         cx.stop_propagation();
                     }
                 },
@@ -6725,24 +6736,12 @@ impl ArborWindow {
                         cx.stop_propagation();
                         return;
                     },
-                    "backspace" => {
-                        self.update_manage_hosts_modal_input(HostsModalInputEvent::Backspace, cx);
-                        cx.stop_propagation();
-                        return;
-                    },
                     _ => {},
                 }
 
-                if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
-                    return;
-                }
-
-                if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                if let Some(action) = text_edit_action_for_event(event, cx) {
                     self.update_manage_hosts_modal_input(HostsModalInputEvent::ClearError, cx);
-                    self.update_manage_hosts_modal_input(
-                        HostsModalInputEvent::Append(key_char.to_owned()),
-                        cx,
-                    );
+                    self.update_manage_hosts_modal_input(HostsModalInputEvent::Edit(action), cx);
                     cx.stop_propagation();
                 }
             } else if event.keystroke.key.as_str() == "escape" {
@@ -6771,55 +6770,22 @@ impl ArborWindow {
                     cx.stop_propagation();
                     return;
                 },
-                "left" => {
-                    self.update_manage_presets_modal_input(
-                        PresetsModalInputEvent::CycleActivePreset(true),
-                        cx,
-                    );
-                    cx.stop_propagation();
-                    return;
-                },
-                "right" => {
-                    self.update_manage_presets_modal_input(
-                        PresetsModalInputEvent::CycleActivePreset(false),
-                        cx,
-                    );
-                    cx.stop_propagation();
-                    return;
-                },
                 "enter" | "return" => {
                     self.submit_manage_presets_modal(cx);
                     cx.stop_propagation();
                     return;
                 },
-                "backspace" => {
-                    self.update_manage_presets_modal_input(PresetsModalInputEvent::Backspace, cx);
-                    cx.stop_propagation();
-                    return;
-                },
                 _ => {},
             }
-
-            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
-                return;
-            }
-
-            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+            if let Some(action) = text_edit_action_for_event(event, cx) {
                 self.update_manage_presets_modal_input(PresetsModalInputEvent::ClearError, cx);
-                self.update_manage_presets_modal_input(
-                    PresetsModalInputEvent::Append(key_char.to_owned()),
-                    cx,
-                );
+                self.update_manage_presets_modal_input(PresetsModalInputEvent::Edit(action), cx);
                 cx.stop_propagation();
             }
             return;
         }
 
         if self.manage_repo_presets_modal.is_some() {
-            if event.keystroke.modifiers.platform {
-                return;
-            }
-
             let active_tab = self
                 .manage_repo_presets_modal
                 .as_ref()
@@ -6851,35 +6817,20 @@ impl ArborWindow {
                     cx.stop_propagation();
                     return;
                 },
-                "backspace" => {
-                    if active_tab == RepoPresetModalTab::Edit {
-                        self.update_manage_repo_presets_modal_input(
-                            RepoPresetsModalInputEvent::Backspace,
-                            cx,
-                        );
-                    }
-                    cx.stop_propagation();
-                    return;
-                },
                 _ => {},
             }
-
-            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
-                return;
-            }
-
-            if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                if active_tab == RepoPresetModalTab::Edit {
-                    self.update_manage_repo_presets_modal_input(
-                        RepoPresetsModalInputEvent::ClearError,
-                        cx,
-                    );
-                    self.update_manage_repo_presets_modal_input(
-                        RepoPresetsModalInputEvent::Append(key_char.to_owned()),
-                        cx,
-                    );
-                    cx.stop_propagation();
-                }
+            if active_tab == RepoPresetModalTab::Edit
+                && let Some(action) = text_edit_action_for_event(event, cx)
+            {
+                self.update_manage_repo_presets_modal_input(
+                    RepoPresetsModalInputEvent::ClearError,
+                    cx,
+                );
+                self.update_manage_repo_presets_modal_input(
+                    RepoPresetsModalInputEvent::Edit(action),
+                    cx,
+                );
+                cx.stop_propagation();
             }
             return;
         }
@@ -6887,10 +6838,6 @@ impl ArborWindow {
         let Some(modal) = self.create_modal.as_ref() else {
             return;
         };
-
-        if event.keystroke.modifiers.platform {
-            return;
-        }
 
         let active_tab = modal.tab;
 
@@ -6928,21 +6875,6 @@ impl ArborWindow {
                 cx.stop_propagation();
                 return;
             },
-            "backspace" => {
-                match active_tab {
-                    CreateModalTab::LocalWorktree => {
-                        self.update_create_worktree_modal_input(ModalInputEvent::Backspace, cx);
-                    },
-                    CreateModalTab::RemoteOutpost => {
-                        self.update_create_outpost_modal_input(
-                            OutpostModalInputEvent::Backspace,
-                            cx,
-                        );
-                    },
-                }
-                cx.stop_propagation();
-                return;
-            },
             "left" | "right" => {
                 if active_tab == CreateModalTab::RemoteOutpost
                     && self
@@ -6962,24 +6894,16 @@ impl ArborWindow {
             },
             _ => {},
         }
-
-        if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
-            return;
-        }
-
-        if let Some(key_char) = event.keystroke.key_char.as_ref() {
+        if let Some(action) = text_edit_action_for_event(event, cx) {
             match active_tab {
                 CreateModalTab::LocalWorktree => {
                     self.update_create_worktree_modal_input(ModalInputEvent::ClearError, cx);
-                    self.update_create_worktree_modal_input(
-                        ModalInputEvent::Append(key_char.to_owned()),
-                        cx,
-                    );
+                    self.update_create_worktree_modal_input(ModalInputEvent::Edit(action), cx);
                 },
                 CreateModalTab::RemoteOutpost => {
                     self.update_create_outpost_modal_input(OutpostModalInputEvent::ClearError, cx);
                     self.update_create_outpost_modal_input(
-                        OutpostModalInputEvent::Append(key_char.to_owned()),
+                        OutpostModalInputEvent::Edit(action),
                         cx,
                     );
                 },
@@ -7242,6 +7166,7 @@ impl ArborWindow {
     ) {
         self.connect_to_host_modal = Some(ConnectToHostModal {
             address: String::new(),
+            address_cursor: 0,
             error: None,
         });
         cx.notify();
@@ -7254,6 +7179,7 @@ impl ArborWindow {
         let addr = modal.address.trim().to_owned();
         if addr.is_empty() {
             self.connect_to_host_modal = Some(ConnectToHostModal {
+                address_cursor: char_count(&modal.address),
                 error: Some("Address cannot be empty".to_owned()),
                 ..modal
             });
@@ -7264,8 +7190,10 @@ impl ArborWindow {
         let target = match parse_connect_host_target(&addr) {
             Ok(target) => target,
             Err(error) => {
+                let address = modal.address;
                 self.connect_to_host_modal = Some(ConnectToHostModal {
-                    address: modal.address,
+                    address_cursor: char_count(&address),
+                    address,
                     error: Some(error),
                 });
                 cx.notify();
@@ -7295,8 +7223,8 @@ impl ArborWindow {
             .unwrap_or_default();
         self.settings_modal = Some(SettingsModal {
             active_field: SettingsField::DaemonUrl,
+            daemon_url_cursor: char_count(&self.daemon_base_url),
             daemon_url: self.daemon_base_url.clone(),
-            preferred_editor: loaded.config.preferred_editor.unwrap_or_default(),
             notifications: self.notifications_enabled,
             daemon_auth_token,
             error: None,
@@ -7321,25 +7249,19 @@ impl ArborWindow {
         match input {
             SettingsModalInputEvent::SetActiveField(field) => {
                 modal.active_field = field;
+                if field == SettingsField::DaemonUrl {
+                    modal.daemon_url_cursor = char_count(&modal.daemon_url);
+                }
             },
             SettingsModalInputEvent::CycleField(reverse) => {
                 modal.active_field = modal.active_field.cycle(reverse);
             },
-            SettingsModalInputEvent::Backspace => match modal.active_field {
-                SettingsField::DaemonUrl => {
-                    let _ = modal.daemon_url.pop();
-                },
-                SettingsField::PreferredEditor => {
-                    let _ = modal.preferred_editor.pop();
-                },
-            },
-            SettingsModalInputEvent::Append(text) => match modal.active_field {
-                SettingsField::DaemonUrl => {
-                    modal.daemon_url.push_str(&text);
-                },
-                SettingsField::PreferredEditor => {
-                    modal.preferred_editor.push_str(&text);
-                },
+            SettingsModalInputEvent::Edit(action) => {
+                apply_text_edit_action(
+                    &mut modal.daemon_url,
+                    &mut modal.daemon_url_cursor,
+                    &action,
+                );
             },
             SettingsModalInputEvent::ToggleNotifications => {
                 modal.notifications = !modal.notifications;
@@ -7359,7 +7281,6 @@ impl ArborWindow {
         };
 
         let daemon_url = modal.daemon_url.trim();
-        let preferred_editor = modal.preferred_editor.trim();
         let notifications_str = if modal.notifications {
             "true"
         } else {
@@ -7374,14 +7295,6 @@ impl ArborWindow {
                     None
                 } else {
                     Some(daemon_url)
-                },
-            ),
-            (
-                "preferred_editor",
-                if preferred_editor.is_empty() {
-                    None
-                } else {
-                    Some(preferred_editor)
                 },
             ),
             ("notifications", Some(notifications_str)),
@@ -8214,12 +8127,16 @@ impl ArborWindow {
     ) {
         if self.right_pane_search_active
             || self.create_modal.is_some()
+            || self.settings_modal.is_some()
+            || self.github_auth_modal.is_some()
+            || self.delete_modal.is_some()
             || self.manage_hosts_modal.is_some()
             || self.manage_presets_modal.is_some()
             || self.manage_repo_presets_modal.is_some()
             || self.daemon_auth_modal.is_some()
             || self.start_daemon_modal
             || self.connect_to_host_modal.is_some()
+            || self.show_theme_picker
         {
             return;
         }
@@ -11209,6 +11126,7 @@ impl ArborWindow {
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             this.right_pane_search_active = true;
+                            this.right_pane_search_cursor = char_count(&this.right_pane_search);
                             cx.notify();
                         }),
                     )
@@ -11220,34 +11138,23 @@ impl ArborWindow {
                             .flex_1()
                             .child(if search_active {
                                 if search_text.is_empty() {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .child(input_caret(theme))
-                                        .child(
-                                            div()
-                                                .text_color(rgb(theme.text_disabled))
-                                                .child("Filter files…"),
-                                        )
-                                        .into_any_element()
+                                    active_input_display(
+                                        theme,
+                                        "",
+                                        "Filter files…",
+                                        theme.text_disabled,
+                                        self.right_pane_search_cursor,
+                                        28,
+                                    )
                                 } else {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .text_color(rgb(theme.text_primary))
-                                                .child(search_text),
-                                        )
-                                        .child(input_caret(theme))
-                                        .into_any_element()
+                                    active_input_display(
+                                        theme,
+                                        &search_text,
+                                        "Filter files…",
+                                        theme.text_primary,
+                                        self.right_pane_search_cursor,
+                                        28,
+                                    )
                                 }
                             } else if search_text.is_empty() {
                                 div()
@@ -11784,6 +11691,8 @@ impl ArborWindow {
                 div()
                     .w(px(620.))
                     .max_w(px(620.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -11987,6 +11896,7 @@ impl ArborWindow {
                                 "create-worktree-repo-input",
                                 "Repository",
                                 &modal.repository_path,
+                                modal.repository_path_cursor,
                                 "Path to git repository",
                                 repository_active,
                             )
@@ -12005,6 +11915,7 @@ impl ArborWindow {
                                 "create-worktree-name-input",
                                 "Worktree Name",
                                 &modal.worktree_name,
+                                modal.worktree_name_cursor,
                                 "e.g. remote-ssh",
                                 worktree_active,
                             )
@@ -12161,6 +12072,7 @@ impl ArborWindow {
                                 "outpost-clone-url-input",
                                 "Clone URL",
                                 &modal.clone_url,
+                                modal.clone_url_cursor,
                                 "git@github.com:user/repo.git",
                                 clone_url_active,
                             )
@@ -12179,6 +12091,7 @@ impl ArborWindow {
                                 "outpost-name-input",
                                 "Outpost Name",
                                 &modal.outpost_name,
+                                modal.outpost_name_cursor,
                                 "e.g. my-feature",
                                 outpost_name_active,
                             )
@@ -12249,6 +12162,8 @@ impl ArborWindow {
                     // Buttons
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .justify_end()
@@ -12340,6 +12255,8 @@ impl ArborWindow {
                 div()
                     .w(px(560.))
                     .max_w(px(560.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -12459,6 +12376,8 @@ impl ArborWindow {
                     )
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .justify_end()
@@ -12719,7 +12638,7 @@ impl ArborWindow {
                 cx.stop_propagation();
             });
 
-        // Header: branch name + directory label + relative time
+        // Header: branch name + relative time (top-right), then directory label
         card = card.child(
             div()
                 .flex()
@@ -12727,21 +12646,15 @@ impl ArborWindow {
                 .gap(px(1.))
                 .child(
                     div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.text_primary))
-                        .child(worktree.branch.clone()),
-                )
-                .child(
-                    div()
                         .flex()
                         .items_center()
-                        .gap_1()
+                        .justify_between()
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(theme.text_muted))
-                                .child(worktree.label.clone()),
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme.text_primary))
+                                .child(worktree.branch.clone()),
                         )
                         .when_some(worktree.last_activity_unix_ms, |el, ms| {
                             el.child(
@@ -12751,6 +12664,12 @@ impl ArborWindow {
                                     .child(format_relative_time(ms)),
                             )
                         }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child(worktree.label.clone()),
                 ),
         );
 
@@ -13179,6 +13098,8 @@ impl ArborWindow {
                 div()
                     .w(px(440.))
                     .max_w(px(440.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -13301,6 +13222,8 @@ impl ArborWindow {
                     // Buttons
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .justify_end()
                             .gap_2()
@@ -13385,6 +13308,8 @@ impl ArborWindow {
                     div()
                         .w(px(620.))
                         .max_w(px(620.))
+                        .flex_none()
+                        .overflow_hidden()
                         .rounded_md()
                         .border_1()
                         .border_color(rgb(theme.border))
@@ -13436,6 +13361,7 @@ impl ArborWindow {
                                 "hosts-name-input",
                                 "Name",
                                 &modal.name,
+                                modal.name_cursor,
                                 "e.g. build-server",
                                 name_active,
                             )
@@ -13453,6 +13379,7 @@ impl ArborWindow {
                                 "hosts-hostname-input",
                                 "Hostname",
                                 &modal.hostname,
+                                modal.hostname_cursor,
                                 "e.g. build.example.com",
                                 hostname_active,
                             )
@@ -13472,6 +13399,7 @@ impl ArborWindow {
                                 "hosts-user-input",
                                 "User",
                                 &modal.user,
+                                modal.user_cursor,
                                 "e.g. dev",
                                 user_active,
                             )
@@ -13497,6 +13425,8 @@ impl ArborWindow {
                         // Buttons
                         .child(
                             div()
+                                .w_full()
+                                .min_w_0()
                                 .flex()
                                 .items_center()
                                 .justify_end()
@@ -13562,6 +13492,8 @@ impl ArborWindow {
                 div()
                     .w(px(620.))
                     .max_w(px(620.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -13771,6 +13703,8 @@ impl ArborWindow {
                 div()
                     .w(px(620.))
                     .max_w(px(620.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -13786,31 +13720,13 @@ impl ArborWindow {
                         cx.stop_propagation();
                     })
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_primary))
-                                    .child("Edit Agent Preset"),
-                            )
-                            .child(
-                                action_button(
-                                    theme,
-                                    "close-manage-presets",
-                                    "Close",
-                                    ActionButtonStyle::Secondary,
-                                    true,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.close_manage_presets_modal(cx);
-                                    },
-                                )),
-                            ),
+                        div().flex().items_center().child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme.text_primary))
+                                .child("Edit Agent Preset"),
+                        ),
                     )
                     .child(
                         div()
@@ -13826,6 +13742,7 @@ impl ArborWindow {
                             "preset-command-input",
                             "Command",
                             &modal.command,
+                            modal.command_cursor,
                             modal.active_preset.default_command(),
                             true,
                         )
@@ -13849,6 +13766,8 @@ impl ArborWindow {
                     }))
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .justify_end()
@@ -13936,6 +13855,8 @@ impl ArborWindow {
             .child(
                 div()
                     .w(px(340.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -14042,6 +13963,8 @@ impl ArborWindow {
                 div()
                     .w(px(820.))
                     .max_h(px(600.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -14162,6 +14085,8 @@ impl ArborWindow {
             .child(
                 div()
                     .w(px(420.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -14218,39 +14143,30 @@ impl ArborWindow {
                                     .font_family(FONT_MONO)
                                     .text_color(rgb(theme.text_primary))
                                     .child(if token_value.is_empty() {
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.))
-                                            .child(input_caret(theme))
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(theme.text_disabled))
-                                                    .child("paste token here"),
-                                            )
-                                            .into_any_element()
+                                        active_input_display(
+                                            theme,
+                                            "",
+                                            "paste token here",
+                                            theme.text_disabled,
+                                            modal.token_cursor,
+                                            40,
+                                        )
                                     } else {
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .min_w_0()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .overflow_hidden()
-                                                    .whitespace_nowrap()
-                                                    .text_ellipsis()
-                                                    .text_color(rgb(theme.text_primary))
-                                                    .child("\u{2022}".repeat(token_value.len())),
-                                            )
-                                            .child(input_caret(theme))
-                                            .into_any_element()
+                                        active_input_display(
+                                            theme,
+                                            &"\u{2022}".repeat(token_value.len()),
+                                            "paste token here",
+                                            theme.text_primary,
+                                            modal.token_cursor,
+                                            40,
+                                        )
                                     }),
                             ),
                     )
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .justify_end()
                             .gap_2()
@@ -14307,6 +14223,8 @@ impl ArborWindow {
             .child(
                 div()
                     .w(px(420.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -14331,6 +14249,8 @@ impl ArborWindow {
                     ))
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .justify_end()
                             .gap_2()
@@ -14398,6 +14318,8 @@ impl ArborWindow {
             .child(
                 div()
                     .w(px(420.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -14678,40 +14600,31 @@ impl ArborWindow {
                                     .font_family(FONT_MONO)
                                     .text_color(rgb(theme.text_primary))
                                     .child(if address_empty {
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.))
-                                            .child(input_caret(theme))
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(theme.text_disabled))
-                                                    .child("ssh://dev@192.168.1.42/"),
-                                            )
-                                            .into_any_element()
+                                        active_input_display(
+                                            theme,
+                                            "",
+                                            "ssh://dev@192.168.1.42/",
+                                            theme.text_disabled,
+                                            modal.address_cursor,
+                                            42,
+                                        )
                                     } else {
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .min_w_0()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .overflow_hidden()
-                                                    .whitespace_nowrap()
-                                                    .text_ellipsis()
-                                                    .text_color(rgb(theme.text_primary))
-                                                    .child(address),
-                                            )
-                                            .child(input_caret(theme))
-                                            .into_any_element()
+                                        active_input_display(
+                                            theme,
+                                            &address,
+                                            "ssh://dev@192.168.1.42/",
+                                            theme.text_primary,
+                                            modal.address_cursor,
+                                            42,
+                                        )
                                     }),
                             ),
                     )
                     // Buttons
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .justify_end()
                             .gap_2()
@@ -14752,13 +14665,45 @@ impl ArborWindow {
         };
 
         let theme = self.theme();
+        let daemon_auth_token_empty = modal.daemon_auth_token.trim().is_empty();
+        let section_card = |this: Div| {
+            this.rounded_sm()
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.panel_bg))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_3()
+        };
+        let section_heading = |eyebrow: &str, title: &str, detail: &str| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.accent))
+                        .child(eyebrow.to_owned()),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.text_primary))
+                        .child(title.to_owned()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child(detail.to_owned()),
+                )
+        };
         let settings_text_field =
-            |field: SettingsField, label: &str, value: &str, active: bool, theme: ThemePalette| {
-                let border_color = if active {
-                    theme.accent
-                } else {
-                    theme.border
-                };
+            |field: SettingsField, label: &str, value: &str, cursor: usize, active: bool| {
                 div()
                     .flex()
                     .flex_col()
@@ -14771,70 +14716,20 @@ impl ArborWindow {
                             .child(label.to_owned()),
                     )
                     .child(
-                        div()
-                            .id(ElementId::Name(format!("settings-field-{label}").into()))
-                            .cursor_pointer()
-                            .h(px(30.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(border_color))
-                            .bg(rgb(theme.panel_bg))
-                            .text_sm()
-                            .text_color(rgb(theme.text_primary))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.update_settings_modal_input(
-                                    SettingsModalInputEvent::SetActiveField(field),
-                                    cx,
-                                );
-                            }))
-                            .child(if active {
-                                if value.is_empty() {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .min_w_0()
-                                        .gap(px(4.))
-                                        .child(input_caret(theme))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .text_color(rgb(theme.text_disabled))
-                                                .child("(not set)"),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .text_color(rgb(theme.text_primary))
-                                                .child(value.to_owned()),
-                                        )
-                                        .child(input_caret(theme))
-                                        .into_any_element()
-                                }
-                            } else if value.is_empty() {
-                                div()
-                                    .text_color(rgb(theme.text_disabled))
-                                    .child("(not set)")
-                                    .into_any_element()
-                            } else {
-                                div().child(value.to_owned()).into_any_element()
-                            }),
+                        single_line_input_field(
+                            theme,
+                            ElementId::Name(format!("settings-field-{label}").into()),
+                            value,
+                            cursor,
+                            "(not set)",
+                            active,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.update_settings_modal_input(
+                                SettingsModalInputEvent::SetActiveField(field),
+                                cx,
+                            );
+                        })),
                     )
             };
 
@@ -14861,7 +14756,9 @@ impl ArborWindow {
             .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.15))
             .child(
                 div()
-                    .w(px(500.))
+                    .w(px(560.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -14876,128 +14773,184 @@ impl ArborWindow {
                     .on_mouse_down(MouseButton::Right, |_, _, cx| {
                         cx.stop_propagation();
                     })
-                    // Header
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_primary))
-                                    .child("Settings"),
-                            )
-                            .child(
-                                action_button(
-                                    theme,
-                                    "close-settings",
-                                    "Close",
-                                    ActionButtonStyle::Secondary,
-                                    true,
-                                )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_settings_modal(cx);
-                                    })),
-                            ),
-                    )
-                    // Daemon URL
-                    .child(settings_text_field(
-                        SettingsField::DaemonUrl,
-                        "Daemon URL",
-                        &modal.daemon_url,
-                        modal.active_field == SettingsField::DaemonUrl,
-                        theme,
-                    ))
-                    // Preferred Editor
-                    .child(settings_text_field(
-                        SettingsField::PreferredEditor,
-                        "Preferred Editor",
-                        &modal.preferred_editor,
-                        modal.active_field == SettingsField::PreferredEditor,
-                        theme,
-                    ))
-                    // Notifications toggle
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Notifications"),
-                            )
-                            .child(
-                                div()
-                                    .id("settings-notifications-toggle")
-                                    .cursor_pointer()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(if modal.notifications {
-                                        theme.accent
-                                    } else {
-                                        theme.panel_bg
-                                    }))
-                                    .text_xs()
-                                    .text_color(rgb(if modal.notifications {
-                                        theme.app_bg
-                                    } else {
-                                        theme.text_muted
-                                    }))
-                                    .hover(|s| s.opacity(0.85))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.update_settings_modal_input(
-                                            SettingsModalInputEvent::ToggleNotifications,
-                                            cx,
-                                        );
-                                    }))
-                                    .child(if modal.notifications {
-                                        "Enabled"
-                                    } else {
-                                        "Disabled"
-                                    }),
-                            ),
-                    )
-                    // Daemon Auth Token (read-only)
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .pb_3()
+                            .border_b_1()
+                            .border_color(rgb(theme.border))
                             .child(
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Daemon Auth Token"),
+                                    .text_color(rgb(theme.accent))
+                                    .child("Settings"),
                             )
                             .child(
                                 div()
-                                    .h(px(30.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(theme.panel_bg))
-                                    .text_sm()
-                                    .text_color(rgb(theme.text_disabled))
-                                    .child(if modal.daemon_auth_token.is_empty() {
-                                        "(not configured)".to_owned()
-                                    } else {
-                                        modal.daemon_auth_token.clone()
-                                    }),
+                                    .text_size(px(16.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Arbor Preferences"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(
+                                        "Configure Arbor's daemon connection and how it reports background activity.",
+                                    ),
                             ),
                     )
-                    // Error
+                    .child(
+                        section_card(div())
+                            .child(
+                                section_heading(
+                                    "Daemon",
+                                    "Daemon settings",
+                                    "Set the daemon endpoint and reuse the current auth token when connecting other Arbor instances.",
+                                ),
+                            )
+                            .child(settings_text_field(
+                                SettingsField::DaemonUrl,
+                                "Daemon URL",
+                                &modal.daemon_url,
+                                modal.daemon_url_cursor,
+                                modal.active_field == SettingsField::DaemonUrl,
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(theme.text_muted))
+                                            .child("Auth Token"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .h(px(30.))
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(rgb(theme.border))
+                                                    .bg(rgb(theme.sidebar_bg))
+                                                    .text_sm()
+                                                    .font_family(FONT_MONO)
+                                                    .text_color(rgb(theme.text_disabled))
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .child(if modal.daemon_auth_token.is_empty() {
+                                                        "(not configured)".to_owned()
+                                                    } else {
+                                                        modal.daemon_auth_token.clone()
+                                                    }),
+                                            )
+                                            .child(
+                                                action_button(
+                                                    theme,
+                                                    "settings-copy-daemon-auth-token",
+                                                    "Copy",
+                                                    ActionButtonStyle::Secondary,
+                                                    !daemon_auth_token_empty,
+                                                )
+                                                .when(!daemon_auth_token_empty, |this| {
+                                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                                        this.copy_settings_daemon_auth_token_to_clipboard(cx);
+                                                    }))
+                                                }),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        section_card(div())
+                            .child(
+                                section_heading(
+                                    "Notifications",
+                                    "Desktop notices",
+                                    "Control whether Arbor surfaces daemon and background activity outside the app.",
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .child("Notifications"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .child(
+                                                        "Show desktop notices for background actions and daemon status changes.",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("settings-notifications-toggle")
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(rgb(theme.border))
+                                            .bg(rgb(if modal.notifications {
+                                                theme.accent
+                                            } else {
+                                                theme.sidebar_bg
+                                            }))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(if modal.notifications {
+                                                theme.app_bg
+                                            } else {
+                                                theme.text_muted
+                                            }))
+                                            .hover(|s| s.opacity(0.85))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_settings_modal_input(
+                                                    SettingsModalInputEvent::ToggleNotifications,
+                                                    cx,
+                                                );
+                                            }))
+                                            .child(if modal.notifications {
+                                                "Enabled"
+                                            } else {
+                                                "Disabled"
+                                            }),
+                                    ),
+                            ),
+                    )
                     .when_some(modal.error.clone(), |this, error| {
                         this.child(
                             div()
@@ -15010,10 +14963,10 @@ impl ArborWindow {
                                 .child(error),
                         )
                     })
-                    // Footer buttons
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .justify_end()
                             .gap_2()
                             .child(
@@ -15135,6 +15088,8 @@ impl ArborWindow {
                 div()
                     .w(px(620.))
                     .max_w(px(620.))
+                    .flex_none()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme.border))
@@ -15150,31 +15105,13 @@ impl ArborWindow {
                         cx.stop_propagation();
                     })
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_primary))
-                                    .child(title),
-                            )
-                            .child(
-                                action_button(
-                                    theme,
-                                    "close-manage-repo-presets",
-                                    "Close",
-                                    ActionButtonStyle::Secondary,
-                                    true,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.close_manage_repo_presets_modal(cx);
-                                    },
-                                )),
-                            ),
+                        div().flex().items_center().child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme.text_primary))
+                                .child(title),
+                        ),
                     )
                     .child(
                         div()
@@ -15192,6 +15129,7 @@ impl ArborWindow {
                                 "repo-preset-icon-input",
                                 "Icon (emoji)",
                                 &modal.icon,
+                                modal.icon_cursor,
                                 "\u{f013}",
                                 modal.active_field == RepoPresetModalField::Icon,
                             )
@@ -15210,6 +15148,7 @@ impl ArborWindow {
                                 "repo-preset-name-input",
                                 "Name",
                                 &modal.name,
+                                modal.name_cursor,
                                 "my preset",
                                 modal.active_field == RepoPresetModalField::Name,
                             )
@@ -15228,6 +15167,7 @@ impl ArborWindow {
                                 "repo-preset-command-input",
                                 "Command",
                                 &modal.command,
+                                modal.command_cursor,
                                 "just run",
                                 modal.active_field == RepoPresetModalField::Command,
                             )
@@ -15295,6 +15235,8 @@ impl ArborWindow {
                     }))
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .justify_end()
@@ -15333,7 +15275,7 @@ impl ArborWindow {
                                 action_button(
                                     theme,
                                     "repo-preset-cancel",
-                                    "Close",
+                                    "Cancel",
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
@@ -18801,6 +18743,7 @@ fn modal_input_field(
     id: impl Into<ElementId>,
     label: impl Into<String>,
     value: &str,
+    cursor: usize,
     placeholder: impl Into<String>,
     active: bool,
 ) -> Stateful<Div> {
@@ -18809,60 +18752,49 @@ fn modal_input_field(
 
     div()
         .id(id)
-        .cursor_pointer()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(if active {
-            theme.accent
-        } else {
-            theme.border
-        }))
-        .bg(rgb(theme.panel_bg))
-        .p_2()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
         .child(
             div()
                 .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(theme.text_muted))
                 .child(label),
         )
         .child(
             div()
+                .overflow_hidden()
+                .cursor_pointer()
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(if active {
+                    theme.accent
+                } else {
+                    theme.border
+                }))
+                .bg(rgb(theme.panel_bg))
+                .px_2()
+                .py_1()
                 .text_sm()
                 .font_family(FONT_MONO)
                 .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .child(if active {
                     if value.is_empty() {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .child(input_caret(theme))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_color(rgb(theme.text_disabled))
-                                    .child(placeholder.clone()),
-                            )
-                            .into_any_element()
+                        active_input_display(theme, "", &placeholder, theme.text_disabled, 0, 48)
                     } else {
-                        div()
-                            .flex()
-                            .items_center()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .whitespace_normal()
-                                    .text_color(rgb(theme.text_primary))
-                                    .child(value.to_owned()),
-                            )
-                            .child(input_caret(theme))
-                            .into_any_element()
+                        active_input_display(
+                            theme,
+                            value,
+                            &placeholder,
+                            theme.text_primary,
+                            cursor,
+                            56,
+                        )
                     }
                 } else if value.is_empty() {
                     div()
@@ -18886,6 +18818,7 @@ fn single_line_input_field(
     theme: ThemePalette,
     id: impl Into<ElementId>,
     value: &str,
+    cursor: usize,
     placeholder: impl Into<String>,
     active: bool,
 ) -> Stateful<Div> {
@@ -18893,6 +18826,9 @@ fn single_line_input_field(
 
     div()
         .id(id)
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .h(px(30.))
         .cursor_text()
         .rounded_sm()
@@ -18904,48 +18840,15 @@ fn single_line_input_field(
         }))
         .bg(rgb(theme.panel_bg))
         .px_2()
+        .text_sm()
+        .font_family(FONT_MONO)
         .flex()
         .items_center()
         .child(if active {
             if value.is_empty() {
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .child(input_caret(theme))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_sm()
-                            .font_family(FONT_MONO)
-                            .text_color(rgb(theme.text_disabled))
-                            .child(placeholder.clone()),
-                    )
+                active_input_display(theme, "", &placeholder, theme.text_disabled, 0, 48)
             } else {
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_sm()
-                            .font_family(FONT_MONO)
-                            .text_color(rgb(theme.text_primary))
-                            .child(value.to_owned()),
-                    )
-                    .child(input_caret(theme))
+                active_input_display(theme, value, &placeholder, theme.text_primary, cursor, 48)
             }
         } else {
             div()
@@ -18954,8 +18857,6 @@ fn single_line_input_field(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_sm()
-                .font_family(FONT_MONO)
                 .text_color(rgb(if value.is_empty() {
                     theme.text_disabled
                 } else {
@@ -18966,16 +18867,99 @@ fn single_line_input_field(
                 } else {
                     value.to_owned()
                 })
+                .into_any_element()
         })
 }
 
-fn input_caret(theme: ThemePalette) -> Div {
+fn active_input_display(
+    theme: ThemePalette,
+    value: &str,
+    placeholder: &str,
+    text_color: u32,
+    cursor: usize,
+    max_chars: usize,
+) -> AnyElement {
+    if value.is_empty() {
+        return div()
+            .relative()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .text_color(rgb(text_color))
+                    .child(placeholder.to_owned()),
+            )
+            .child(
+                input_caret(theme)
+                    .flex_none()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(2.)),
+            )
+            .into_any_element();
+    }
+
     div()
-        .w(px(1.))
-        .h(px(14.))
-        .bg(rgb(theme.accent))
-        .mt(px(1.))
-        .ml(px(1.))
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .flex()
+        .items_center()
+        .justify_start()
+        .gap(px(0.))
+        .child({
+            let (before_cursor, after_cursor) = visible_input_segments(value, cursor, max_chars);
+            div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(text_color))
+                        .child(before_cursor),
+                )
+                .child(input_caret(theme).flex_none())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(text_color))
+                        .child(after_cursor),
+                )
+        })
+        .into_any_element()
+}
+
+fn visible_input_segments(value: &str, cursor: usize, max_chars: usize) -> (String, String) {
+    let chars: Vec<char> = value.chars().collect();
+    let len = chars.len();
+    let cursor = cursor.min(len);
+    if len <= max_chars {
+        let before: String = chars[..cursor].iter().collect();
+        let after: String = chars[cursor..].iter().collect();
+        return (before, after);
+    }
+
+    let window = max_chars.max(1);
+    let preferred_left = window.saturating_sub(8);
+    let mut start = cursor.saturating_sub(preferred_left);
+    start = start.min(len.saturating_sub(window));
+    let end = (start + window).min(len);
+
+    let mut before: String = chars[start..cursor].iter().collect();
+    let mut after: String = chars[cursor..end].iter().collect();
+    if start > 0 {
+        before.insert(0, '\u{2026}');
+    }
+    if end < len {
+        after.push('\u{2026}');
+    }
+    (before, after)
+}
+
+fn input_caret(theme: ThemePalette) -> Div {
+    div().w(px(1.)).h(px(14.)).bg(rgb(theme.accent)).mt(px(1.))
 }
 
 fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
@@ -19028,6 +19012,100 @@ fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(byte, _)| byte)
         .unwrap_or(s.len())
+}
+
+fn char_count(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn apply_text_edit_action(text: &mut String, cursor: &mut usize, action: &TextEditAction) {
+    *cursor = (*cursor).min(char_count(text));
+    match action {
+        TextEditAction::Insert(insert_text) => {
+            let byte_offset = char_to_byte_offset(text, *cursor);
+            text.insert_str(byte_offset, insert_text);
+            *cursor += insert_text.chars().count();
+        },
+        TextEditAction::Backspace => {
+            if *cursor == 0 {
+                return;
+            }
+            let end = char_to_byte_offset(text, *cursor);
+            let start = char_to_byte_offset(text, *cursor - 1);
+            text.replace_range(start..end, "");
+            *cursor -= 1;
+        },
+        TextEditAction::Delete => {
+            let len = char_count(text);
+            if *cursor >= len {
+                return;
+            }
+            let start = char_to_byte_offset(text, *cursor);
+            let end = char_to_byte_offset(text, *cursor + 1);
+            text.replace_range(start..end, "");
+        },
+        TextEditAction::MoveLeft => {
+            *cursor = (*cursor).saturating_sub(1);
+        },
+        TextEditAction::MoveRight => {
+            *cursor = (*cursor + 1).min(char_count(text));
+        },
+        TextEditAction::MoveHome => {
+            *cursor = 0;
+        },
+        TextEditAction::MoveEnd => {
+            *cursor = char_count(text);
+        },
+    }
+}
+
+fn typed_text_for_keystroke(event: &KeyDownEvent) -> Option<String> {
+    event
+        .keystroke
+        .key_char
+        .as_deref()
+        .or_else(|| {
+            let key = event.keystroke.key.as_str();
+            if key.chars().count() == 1 {
+                Some(key)
+            } else {
+                None
+            }
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn text_edit_action_for_event(
+    event: &KeyDownEvent,
+    cx: &mut Context<ArborWindow>,
+) -> Option<TextEditAction> {
+    match event.keystroke.key.as_str() {
+        "backspace" => return Some(TextEditAction::Backspace),
+        "delete" => return Some(TextEditAction::Delete),
+        "left" => return Some(TextEditAction::MoveLeft),
+        "right" => return Some(TextEditAction::MoveRight),
+        "home" => return Some(TextEditAction::MoveHome),
+        "end" => return Some(TextEditAction::MoveEnd),
+        _ => {},
+    }
+
+    if event.keystroke.modifiers.platform {
+        if event.keystroke.key.as_str() == "v"
+            && let Some(clipboard) = cx.read_from_clipboard()
+        {
+            let text = clipboard.text().unwrap_or_default();
+            if !text.is_empty() {
+                return Some(TextEditAction::Insert(text));
+            }
+        }
+        return None;
+    }
+
+    if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+        return None;
+    }
+
+    typed_text_for_keystroke(event).map(TextEditAction::Insert)
 }
 
 fn highlight_lines_with_syntect(
