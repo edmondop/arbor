@@ -149,6 +149,12 @@ const PRESET_ICON_COPILOT_SVG: &[u8] =
 const BUNDLED_FONT_FILES: &[&str] = &[
     "CaskaydiaMonoNerdFontMono-Regular.ttf",
     "CaskaydiaMonoNerdFontMono-Bold.ttf",
+    "IBMPlexSans-Regular.ttf",
+    "IBMPlexSans-Bold.ttf",
+    "IBMPlexSans-Italic.ttf",
+    "IBMPlexSans-BoldItalic.ttf",
+    "Lilex-Regular.ttf",
+    "Lilex-Bold.ttf",
 ];
 
 /// Load bundled fonts from disk and register them with the text system.
