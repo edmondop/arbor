@@ -57,6 +57,9 @@ run port="": web-ui-build-if-needed
     cargo +{{nightly_toolchain}} run -p arbor-gui
     kill $HTTPD_PID 2>/dev/null || true
 
+web-ui-build:
+    cd {{web_ui_dir}} && npm install --no-audit --no-fund && npm run build
+
 web-ui-build-if-needed:
     @if [ -f {{web_ui_dir}}/dist/index.html ]; then \
       echo "web-ui assets already built"; \
