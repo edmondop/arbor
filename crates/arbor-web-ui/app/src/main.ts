@@ -11,7 +11,7 @@ import { createSidebar } from "./components/sidebar";
 import { createTerminalPanel } from "./components/terminal-panel";
 import { createChangesPanel } from "./components/changes-panel";
 import { createStatusBar } from "./components/status-bar";
-import { refresh } from "./state";
+import { refresh, startAgentActivityWs } from "./state";
 
 const REFRESH_INTERVAL_MS = 5000;
 
@@ -98,6 +98,9 @@ function bootstrap(): void {
   // Initial data fetch
   void refresh();
   setInterval(() => { void refresh(); }, REFRESH_INTERVAL_MS);
+
+  // Real-time agent activity
+  startAgentActivityWs();
 }
 
 function createResizeHandle(_target: HTMLElement | null, _side: string): HTMLDivElement {

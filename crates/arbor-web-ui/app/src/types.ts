@@ -68,6 +68,10 @@ export type AgentSession = {
   updated_at_unix_ms: number;
 };
 
+export type AgentActivityWsEvent =
+  | { type: "snapshot"; sessions: AgentSession[] }
+  | { type: "update"; session: AgentSession };
+
 export type WsClientEvent =
   | { type: "resize"; cols: number; rows: number }
   | { type: "signal"; signal: "interrupt" | "terminate" | "kill" }

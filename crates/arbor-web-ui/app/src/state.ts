@@ -1,4 +1,4 @@
-import type { Repository, Worktree, TerminalSession, ChangedFile, ProcessInfo } from "./types";
+import type { Repository, Worktree, TerminalSession, ChangedFile, ProcessInfo, AgentSession, AgentActivityWsEvent } from "./types";
 import { fetchRepositories, fetchWorktrees, fetchTerminals, fetchChangedFiles, fetchProcesses } from "./api";
 
 export type AppState = {
@@ -7,6 +7,7 @@ export type AppState = {
   sessions: TerminalSession[];
   changedFiles: ChangedFile[];
   processes: ProcessInfo[];
+  agentSessions: AgentSession[];
 
   selectedRepoRoot: string | null;
   selectedWorktreePath: string | null;
@@ -23,6 +24,7 @@ export function createInitialState(): AppState {
     sessions: [],
     changedFiles: [],
     processes: [],
+    agentSessions: [],
     selectedRepoRoot: null,
     selectedWorktreePath: null,
     activeSessionId: null,
@@ -193,4 +195,99 @@ export function filteredSessions(): TerminalSession[] {
   return state.sessions.filter(
     (s) => s.workspace_id === state.selectedWorktreePath || s.cwd === state.selectedWorktreePath,
   );
+}
+
+// ── Agent activity WebSocket ─────────────────────────────────────────
+
+const AGENT_RECONNECT_BASE_MS = 3000;
+const AGENT_RECONNECT_MAX_MS = 30000;
+
+function parseAgentSession(item: unknown): AgentSession | null {
+  if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+  const rec = item as Record<string, unknown>;
+  const cwd = typeof rec["cwd"] === "string" ? rec["cwd"] : null;
+  const s = typeof rec["state"] === "string" ? rec["state"] : null;
+  const ts = typeof rec["updated_at_unix_ms"] === "number" ? rec["updated_at_unix_ms"] : null;
+  if (cwd === null || (s !== "working" && s !== "waiting") || ts === null) return null;
+  return { cwd, state: s, updated_at_unix_ms: ts };
+}
+
+function parseAgentWsEvent(data: string): AgentActivityWsEvent | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(data); } catch { return null; }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const rec = parsed as Record<string, unknown>;
+  const eventType = typeof rec["type"] === "string" ? rec["type"] : null;
+
+  if (eventType === "snapshot" && Array.isArray(rec["sessions"])) {
+    const sessions: AgentSession[] = [];
+    for (const item of rec["sessions"]) {
+      const s = parseAgentSession(item);
+      if (s !== null) sessions.push(s);
+    }
+    return { type: "snapshot", sessions };
+  }
+  if (eventType === "update") {
+    const session = parseAgentSession(rec["session"]);
+    if (session !== null) return { type: "update", session };
+  }
+  return null;
+}
+
+function applyAgentEvent(event: AgentActivityWsEvent): void {
+  if (event.type === "snapshot") {
+    updateState({ agentSessions: event.sessions });
+  } else {
+    // Upsert by cwd
+    const existing = state.agentSessions.filter((s) => s.cwd !== event.session.cwd);
+    updateState({ agentSessions: [...existing, event.session] });
+  }
+}
+
+export function startAgentActivityWs(): void {
+  let delay = AGENT_RECONNECT_BASE_MS;
+
+  function connect(): void {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${protocol}//${window.location.host}/api/v1/agent/activity/ws`;
+    const ws = new WebSocket(url);
+
+    ws.addEventListener("open", () => {
+      delay = AGENT_RECONNECT_BASE_MS;
+    });
+
+    ws.addEventListener("message", (msg) => {
+      if (typeof msg.data !== "string") return;
+      const event = parseAgentWsEvent(msg.data);
+      if (event !== null) applyAgentEvent(event);
+    });
+
+    ws.addEventListener("close", () => {
+      setTimeout(connect, delay);
+      delay = Math.min(delay * 2, AGENT_RECONNECT_MAX_MS);
+    });
+
+    ws.addEventListener("error", () => {
+      ws.close();
+    });
+  }
+
+  connect();
+}
+
+/**
+ * Find the agent state for a worktree path using longest-prefix matching,
+ * mirroring the desktop GUI logic.
+ */
+export function agentStateForWorktree(worktreePath: string): "working" | "waiting" | null {
+  let bestState: "working" | "waiting" | null = null;
+  let bestLen = 0;
+
+  for (const session of state.agentSessions) {
+    if (session.cwd.startsWith(worktreePath) && worktreePath.length > bestLen) {
+      bestState = session.state;
+      bestLen = worktreePath.length;
+    }
+  }
+  return bestState;
 }

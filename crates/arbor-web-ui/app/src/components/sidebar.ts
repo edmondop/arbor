@@ -5,6 +5,7 @@ import {
   subscribe,
   notify,
   selectWorktree,
+  agentStateForWorktree,
 } from "../state";
 import { startAllProcesses, stopAllProcesses, startProcess, stopProcess, restartProcess } from "../api";
 
@@ -135,9 +136,16 @@ function renderWorktreeCard(wt: Worktree, repo: Repository): HTMLElement {
 
   card.addEventListener("click", () => selectWorktree(wt.path));
 
-  // Git branch SVG icon
-  const branchIcon = el("span", "wt-branch-icon");
-  branchIcon.innerHTML = GIT_BRANCH_SVG;
+  // Agent status dot or git branch icon
+  const agentState = agentStateForWorktree(wt.path);
+  let leadingIcon: HTMLElement;
+  if (agentState !== null) {
+    const dotClass = agentState === "working" ? "dot-working" : "dot-waiting";
+    leadingIcon = el("span", `wt-agent-dot ${dotClass}`);
+  } else {
+    leadingIcon = el("span", "wt-branch-icon");
+    leadingIcon.innerHTML = GIT_BRANCH_SVG;
+  }
 
   // Text column
   const info = el("div", "wt-info");
@@ -187,7 +195,7 @@ function renderWorktreeCard(wt: Worktree, repo: Repository): HTMLElement {
   line2.append(el("span", "wt-path", shortPath(wt.path)));
 
   info.append(line1, line2);
-  card.append(branchIcon, info);
+  card.append(leadingIcon, info);
 
   return card;
 }
