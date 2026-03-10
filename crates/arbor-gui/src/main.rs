@@ -4817,6 +4817,11 @@ impl ArborWindow {
         mouse_y: Pixels,
         cx: &mut Context<Self>,
     ) {
+        // Never show hover popover while a context menu is open.
+        if self.worktree_context_menu.is_some() {
+            return;
+        }
+
         self.cancel_worktree_hover_popover_dismiss();
 
         if self
@@ -8686,6 +8691,7 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         if self.right_pane_search_active
+            || self.quit_overlay_until.is_some()
             || self.create_modal.is_some()
             || self.settings_modal.is_some()
             || self.github_auth_modal.is_some()
@@ -9267,6 +9273,7 @@ impl ArborWindow {
                             .rounded_sm()
                             .border_1()
                             .border_color(rgb(theme.border))
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.action_toggle_left_pane(&ToggleLeftPane, window, cx);
                             }))
@@ -9283,6 +9290,7 @@ impl ArborWindow {
                             } else {
                                 theme.text_disabled
                             }))
+                            .hover(|this| this.text_color(rgb(theme.accent)))
                             .when(back_enabled, |this| {
                                 this.on_click(cx.listener(|this, _, window, cx| {
                                     this.action_navigate_worktree_back(
@@ -9305,6 +9313,7 @@ impl ArborWindow {
                             } else {
                                 theme.text_disabled
                             }))
+                            .hover(|this| this.text_color(rgb(theme.accent)))
                             .when(forward_enabled, |this| {
                                 this.on_click(cx.listener(|this, _, window, cx| {
                                     this.action_navigate_worktree_forward(
@@ -9479,6 +9488,7 @@ impl ArborWindow {
                             .rounded_sm()
                             .border_1()
                             .border_color(rgb(theme.border))
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)).text_color(rgb(theme.text_primary)))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.close_top_bar_worktree_quick_actions();
                                 cx.open_url("https://github.com/penso/arbor/issues/new");
@@ -10103,6 +10113,7 @@ impl ArborWindow {
                                         .items_center()
                                         .gap_1()
                                         .h(px(32.))
+                                        .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_repository(repository_index, cx);
                                         }))
@@ -10236,6 +10247,7 @@ impl ArborWindow {
                                                             div()
                                                                 .id(("repo-chevron", repository_index))
                                                                 .cursor_pointer()
+                                                                .hover(|this| this.text_color(rgb(theme.text_primary)))
                                                                 .text_size(px(16.))
                                                                 .text_color(rgb(theme.text_muted))
                                                                 .w(px(14.))
@@ -10309,6 +10321,7 @@ impl ArborWindow {
                                                 .text_sm()
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(theme.text_muted))
+                                                .hover(|this| this.text_color(rgb(theme.text_primary)))
                                                 .child("+")
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     if this.active_repository_index
@@ -10361,6 +10374,7 @@ impl ArborWindow {
                                                     .id(("worktree-row", index))
                                                     .font_family(FONT_MONO)
                                                     .cursor_pointer()
+                                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                                     .flex()
                                                     .items_center()
                                                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
@@ -10382,6 +10396,8 @@ impl ArborWindow {
                                                                 worktree_index: index,
                                                                 position: event.position,
                                                             });
+                                                            this.worktree_hover_popover = None;
+                                                            this._hover_show_task = None;
                                                             cx.notify();
                                                         }))
                                                     },
@@ -10576,6 +10592,7 @@ impl ArborWindow {
                                                                             .flex_none()
                                                                             .text_xs()
                                                                             .text_color(rgb(pr_badge_color))
+                                                                            .hover(|this| this.text_color(rgb(theme.text_primary)))
                                                                             .child(pr_text)
                                                                             .on_click(cx.listener(
                                                                                 move |this, _, _, cx| {
@@ -10635,6 +10652,7 @@ impl ArborWindow {
                                                         .id(("outpost-row", outpost_index))
                                                         .font_family(FONT_MONO)
                                                         .cursor_pointer()
+                                                        .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                                         .flex()
                                                         .items_center()
                                                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -10817,6 +10835,7 @@ impl ArborWindow {
                                             .id(("remote-wt-row", row_id))
                                             .font_family(FONT_MONO)
                                             .cursor_pointer()
+                                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                             .flex()
                                             .items_center()
                                             .on_click(cx.listener(
@@ -11062,6 +11081,7 @@ impl ArborWindow {
                                                                 .text_sm()
                                                                 .font_weight(FontWeight::SEMIBOLD)
                                                                 .text_color(rgb(theme.text_muted))
+                                                                .hover(|this| this.text_color(rgb(theme.text_primary)))
                                                                 .child("+")
                                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                                     this.open_remote_create_modal(
@@ -11135,6 +11155,7 @@ impl ArborWindow {
                                             div()
                                                 .id(("lan-daemon-row", daemon_index))
                                                 .cursor_pointer()
+                                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                                 .flex()
                                                 .items_center()
                                                 .on_click(cx.listener(
@@ -11531,6 +11552,9 @@ impl ArborWindow {
                                             } else {
                                                 theme.tab_bg
                                             }))
+                                            .when(!is_active, |this| {
+                                                this.hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                            })
                                             .child(
                                                 div()
                                                     .font_family(FONT_MONO)
@@ -11665,6 +11689,7 @@ impl ArborWindow {
                                             .justify_center()
                                             .text_sm()
                                             .text_color(rgb(theme.text_muted))
+                                            .hover(|this| this.text_color(rgb(theme.text_primary)))
                                             .child("+")
                                             .on_mouse_down(
                                                 MouseButton::Left,
@@ -11933,6 +11958,7 @@ impl ArborWindow {
                                     .cursor_pointer()
                                     .text_xs()
                                     .text_color(rgb(theme.text_muted))
+                                    .hover(|this| this.text_color(rgb(theme.text_primary)))
                                     .child("Copy All")
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -11957,6 +11983,7 @@ impl ArborWindow {
                                     } else {
                                         theme.text_muted
                                     }))
+                                    .hover(|this| this.text_color(rgb(theme.text_primary)))
                                     .child(if auto_scroll {
                                         "Auto-scroll: ON"
                                     } else {
@@ -12131,6 +12158,12 @@ impl ArborWindow {
                 .when(is_active, |this| {
                     this.border_b_2().border_color(rgb(theme.accent))
                 })
+                .when(!is_active, |this| {
+                    this.hover(|this| {
+                        this.bg(rgb(theme.panel_active_bg))
+                            .text_color(rgb(theme.text_primary))
+                    })
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -12283,6 +12316,9 @@ impl ArborWindow {
                         let file_path = change.path.clone();
 
                         div()
+                            .id(ElementId::Name(
+                                format!("changed-file-{}", display_path).into(),
+                            ))
                             .h(px(24.))
                             .pl(px(4.))
                             .pr_1()
@@ -12291,6 +12327,9 @@ impl ArborWindow {
                             .items_center()
                             .gap_1()
                             .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
+                            .when(!is_selected, |this| {
+                                this.hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            })
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -12419,6 +12458,9 @@ impl ArborWindow {
                         } else {
                             theme.sidebar_bg
                         }))
+                        .when(!is_selected, |this| {
+                            this.hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -12567,7 +12609,11 @@ impl ArborWindow {
         let remote_preview = self
             .remote_hosts
             .get(modal.host_index)
-            .map(|h| format!("{}/{}", h.remote_base_path, modal.outpost_name.trim()))
+            .map(|h| {
+                let dir_name =
+                    arbor_ssh::provisioner::sanitize_outpost_dir_name(&modal.outpost_name);
+                format!("{}/{dir_name}", h.remote_base_path)
+            })
             .unwrap_or_else(|| "-".to_owned());
         let host_active = modal.outpost_active_field == CreateOutpostField::HostSelector;
         let clone_url_active = modal.outpost_active_field == CreateOutpostField::CloneUrl;
@@ -12666,6 +12712,9 @@ impl ArborWindow {
                                         this.border_b_2()
                                             .border_color(rgb(theme.accent))
                                     })
+                                    .when(!is_worktree_tab, |this| {
+                                        this.hover(|this| this.text_color(rgb(theme.text_primary)))
+                                    })
                                     .child("Local Worktree")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Some(modal) = this.create_modal.as_mut()
@@ -12694,6 +12743,9 @@ impl ArborWindow {
                                         .when(is_outpost_tab, |this| {
                                             this.border_b_2()
                                                 .border_color(rgb(theme.accent))
+                                        })
+                                        .when(!is_outpost_tab, |this| {
+                                            this.hover(|this| this.text_color(rgb(theme.text_primary)))
                                         })
                                         .child("Remote Outpost")
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -12730,6 +12782,7 @@ impl ArborWindow {
                                     theme.border
                                 }))
                                 .bg(rgb(theme.panel_bg))
+                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                 .px_2()
                                 .py_2()
                                 .flex()
@@ -12898,6 +12951,7 @@ impl ArborWindow {
                                     theme.border
                                 }))
                                 .bg(rgb(theme.panel_bg))
+                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                 .p_2()
                                 .child(
                                     div()
@@ -12928,6 +12982,7 @@ impl ArborWindow {
                                                         .cursor_pointer()
                                                         .text_xs()
                                                         .text_color(rgb(theme.text_muted))
+                                                        .hover(|this| this.text_color(rgb(theme.text_primary)))
                                                         .child("\u{25c0}")
                                                         .on_click(cx.listener(
                                                             |this, _, _, cx| {
@@ -12946,6 +13001,7 @@ impl ArborWindow {
                                                         .cursor_pointer()
                                                         .text_xs()
                                                         .text_color(rgb(theme.text_muted))
+                                                        .hover(|this| this.text_color(rgb(theme.text_primary)))
                                                         .child("\u{25b6}")
                                                         .on_click(cx.listener(
                                                             |this, _, _, cx| {
@@ -13350,6 +13406,10 @@ impl ArborWindow {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                this.repository_context_menu = None;
+                cx.notify();
+            }))
             // Absolutely-positioned menu at cursor position
             .child(
                 div()
@@ -13362,6 +13422,9 @@ impl ArborWindow {
                     .border_1()
                     .border_color(rgb(theme.border))
                     .bg(rgb(theme.chrome_bg))
+                    .on_mouse_move(|_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -13443,6 +13506,10 @@ impl ArborWindow {
                     cx.notify();
                 }),
             )
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                this.worktree_context_menu = None;
+                cx.notify();
+            }))
             .child(
                 div()
                     .absolute()
@@ -13454,6 +13521,9 @@ impl ArborWindow {
                     .border_1()
                     .border_color(rgb(theme.border))
                     .bg(rgb(theme.chrome_bg))
+                    .on_mouse_move(|_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -13668,6 +13738,7 @@ impl ArborWindow {
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme.accent))
+                        .hover(|this| this.text_color(rgb(theme.text_primary)))
                         .child(format!("#{}", pr.number))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_external_url(&pr_url, cx);
@@ -13737,6 +13808,7 @@ impl ArborWindow {
                         div()
                             .id("popover-checks-toggle")
                             .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                             .flex()
                             .items_center()
                             .gap(px(2.))
@@ -13878,6 +13950,10 @@ impl ArborWindow {
                     cx.notify();
                 }),
             )
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                this.outpost_context_menu = None;
+                cx.notify();
+            }))
             .child(
                 div()
                     .absolute()
@@ -13889,6 +13965,9 @@ impl ArborWindow {
                     .border_1()
                     .border_color(rgb(theme.border))
                     .bg(rgb(theme.chrome_bg))
+                    .on_mouse_move(|_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -14079,6 +14158,7 @@ impl ArborWindow {
                             div()
                                 .id("delete-branch-checkbox")
                                 .cursor_pointer()
+                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                 .flex()
                                 .items_center()
                                 .gap_2()
@@ -17607,6 +17687,7 @@ fn process_agent_ws_message(
 ) {
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(text);
     let Ok(value) = parsed else {
+        tracing::warn!(raw = text, "agent WS: failed to parse message");
         return;
     };
 
@@ -17632,6 +17713,13 @@ fn process_agent_ws_message(
                     Some((cwd.to_owned(), state, updated_at))
                 })
                 .collect();
+            tracing::info!(
+                count = entries.len(),
+                "agent WS snapshot received"
+            );
+            for (cwd, state, _) in &entries {
+                tracing::info!(cwd = cwd.as_str(), ?state, "  snapshot entry");
+            }
             let _ = this.update(cx, |this, cx| {
                 apply_agent_ws_snapshot(this, &entries);
                 cx.notify();
@@ -17642,6 +17730,11 @@ fn process_agent_ws_message(
                 let cwd = session.get("cwd").and_then(|v| v.as_str());
                 let state_str = session.get("state").and_then(|v| v.as_str());
                 if let (Some(cwd), Some(state_str)) = (cwd, state_str) {
+                    tracing::info!(
+                        cwd,
+                        state = state_str,
+                        "agent WS update received"
+                    );
                     let state = match state_str {
                         "working" => AgentState::Working,
                         "waiting" => AgentState::Waiting,
@@ -17661,7 +17754,7 @@ fn process_agent_ws_message(
 }
 
 fn apply_agent_ws_snapshot(app: &mut ArborWindow, entries: &[(String, AgentState, Option<u64>)]) {
-    tracing::debug!(count = entries.len(), "agent WS snapshot received");
+    tracing::info!(count = entries.len(), "agent WS snapshot: resetting all worktree states");
     for worktree in &mut app.worktrees {
         worktree.agent_state = None;
     }
@@ -17682,17 +17775,23 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
         if let Some(matched_path) = best_match
             && let Some(worktree) = app.worktrees.iter_mut().find(|w| &w.path == matched_path)
         {
-            tracing::debug!(
+            tracing::info!(
                 cwd = %cwd,
                 worktree = %worktree.path.display(),
                 ?state,
-                "agent activity matched"
+                "agent activity matched to worktree"
             );
             worktree.agent_state = Some(*state);
             if let Some(ts) = updated_at {
                 worktree.last_activity_unix_ms =
                     Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
             }
+        } else {
+            tracing::warn!(
+                cwd = %cwd,
+                ?state,
+                "agent activity did not match any worktree"
+            );
         }
     }
 }
@@ -18790,6 +18889,7 @@ fn render_file_view_session(
                                     .px_2()
                                     .rounded_sm()
                                     .bg(rgb(theme.accent))
+                                    .hover(|this| this.opacity(0.85))
                                     .text_xs()
                                     .text_color(rgb(theme.terminal_bg))
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -19445,7 +19545,10 @@ fn action_button(
 
     div()
         .id(id)
-        .when(enabled, |this| this.cursor_pointer())
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+        })
         .rounded_sm()
         .border_1()
         .border_color(rgb(theme.border))
@@ -19678,7 +19781,10 @@ fn git_action_button(
         .flex()
         .items_center()
         .gap_1()
-        .when(enabled, |this| this.cursor_pointer())
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+        })
         .child(
             div()
                 .font_family(FONT_MONO)
@@ -19758,10 +19864,6 @@ fn modal_input_field(
                         .into_any_element()
                 } else {
                     div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
                         .text_color(rgb(theme.text_primary))
                         .child(value.to_owned())
                         .into_any_element()
