@@ -52,6 +52,7 @@ pub struct EmbeddedTerminal {
     generation: Arc<AtomicU64>,
     killer: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
     size: Arc<Mutex<(u16, u16, u16, u16)>>,
+    notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 }
 
 pub type EmbeddedSnapshot = TerminalSnapshot;
@@ -125,14 +126,16 @@ impl EmbeddedTerminal {
         let generation = Arc::new(AtomicU64::new(1));
         let killer = Arc::new(Mutex::new(Some(killer)));
         let size = Arc::new(Mutex::new((rows, cols, 0, 0)));
+        let notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>> = Arc::new(Mutex::new(None));
 
-        spawn_reader_thread(reader, emulator.clone(), generation.clone());
+        spawn_reader_thread(reader, emulator.clone(), generation.clone(), notify.clone());
         spawn_wait_thread(
             child,
             emulator.clone(),
             exit_code.clone(),
             killer.clone(),
             generation.clone(),
+            notify.clone(),
         );
 
         Ok(Self {
@@ -143,6 +146,7 @@ impl EmbeddedTerminal {
             generation,
             killer,
             size,
+            notify,
         })
     }
 
@@ -253,6 +257,12 @@ impl EmbeddedTerminal {
         Ok(())
     }
 
+    pub fn set_notify(&self, sender: std::sync::mpsc::Sender<()>) {
+        if let Ok(mut guard) = self.notify.lock() {
+            *guard = Some(sender);
+        }
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
@@ -286,10 +296,19 @@ impl Drop for EmbeddedTerminal {
     }
 }
 
+fn send_notify(notify: &Mutex<Option<std::sync::mpsc::Sender<()>>>) {
+    if let Ok(guard) = notify.lock()
+        && let Some(ref tx) = *guard
+    {
+        let _ = tx.send(());
+    }
+}
+
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     emulator: Arc<Mutex<TerminalEmulator>>,
     generation: Arc<AtomicU64>,
+    notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 ) {
     thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
@@ -297,13 +316,17 @@ fn spawn_reader_thread(
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(read) => process_terminal_bytes(&emulator, &generation, &buffer[..read]),
+                Ok(read) => {
+                    process_terminal_bytes(&emulator, &generation, &buffer[..read]);
+                    send_notify(&notify);
+                },
                 Err(error) => {
                     process_terminal_bytes(
                         &emulator,
                         &generation,
                         format!("\r\n[terminal reader error: {error}]\r\n").as_bytes(),
                     );
+                    send_notify(&notify);
                     break;
                 },
             }
@@ -317,6 +340,7 @@ fn spawn_wait_thread(
     exit_code: Arc<Mutex<Option<i32>>>,
     killer: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
     generation: Arc<AtomicU64>,
+    notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 ) {
     thread::spawn(move || {
         let mut child = child;
@@ -351,6 +375,7 @@ fn spawn_wait_thread(
         }
 
         process_terminal_bytes(&emulator, &generation, exit_message.as_bytes());
+        send_notify(&notify);
     });
 }
 

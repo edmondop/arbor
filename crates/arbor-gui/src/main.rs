@@ -575,22 +575,32 @@ struct DaemonTerminalWsState {
     closed: std::sync::atomic::AtomicBool,
     /// Channel to send keystroke bytes to the WS thread for low-latency binary transmission.
     ws_writer: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
+    /// Channel to wake the terminal poller when new data arrives.
+    poll_notify: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Default for DaemonTerminalWsState {
     fn default() -> Self {
-        Self {
-            event_generation: std::sync::atomic::AtomicU64::new(0),
-            closed: std::sync::atomic::AtomicBool::new(false),
-            ws_writer: Mutex::new(None),
-        }
+        Self::new(None)
     }
 }
 
 impl DaemonTerminalWsState {
+    fn new(poll_notify: Option<std::sync::mpsc::Sender<()>>) -> Self {
+        Self {
+            event_generation: std::sync::atomic::AtomicU64::new(0),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            ws_writer: Mutex::new(None),
+            poll_notify,
+        }
+    }
+
     fn note_event(&self) {
         self.event_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(ref tx) = self.poll_notify {
+            let _ = tx.send(());
+        }
     }
 
     fn event_generation(&self) -> u64 {
@@ -1658,6 +1668,8 @@ struct ArborWindow {
     changed_files: Vec<ChangedFile>,
     selected_changed_file: Option<PathBuf>,
     terminals: Vec<TerminalSession>,
+    terminal_poll_tx: std::sync::mpsc::Sender<()>,
+    terminal_poll_rx: Option<std::sync::mpsc::Receiver<()>>,
     diff_sessions: Vec<DiffSession>,
     active_diff_session_id: Option<u64>,
     file_view_sessions: Vec<FileViewSession>,
@@ -1883,6 +1895,7 @@ impl ArborWindow {
                 let agent_presets = normalize_agent_presets(&loaded_config.config.agent_presets);
                 let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
                 let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
+                let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
 
                 let app = Self {
                     app_config_store,
@@ -1910,6 +1923,8 @@ impl ArborWindow {
                     changed_files: Vec::new(),
                     selected_changed_file: None,
                     terminals: Vec::new(),
+                    terminal_poll_tx,
+                    terminal_poll_rx: Some(terminal_poll_rx),
                     diff_sessions: Vec::new(),
                     active_diff_session_id: None,
                     file_view_sessions: Vec::new(),
@@ -2194,6 +2209,7 @@ impl ArborWindow {
         };
         let configured_embedded_shell = loaded_config.config.embedded_shell.clone();
         let notifications_enabled = loaded_config.config.notifications.unwrap_or(true);
+        let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
 
         let mut app = Self {
             app_config_store,
@@ -2225,6 +2241,8 @@ impl ArborWindow {
             changed_files: Vec::new(),
             selected_changed_file: None,
             terminals: Vec::new(),
+            terminal_poll_tx,
+            terminal_poll_rx: Some(terminal_poll_rx),
             diff_sessions: Vec::new(),
             active_diff_session_id: None,
             file_view_sessions: Vec::new(),
@@ -2352,13 +2370,34 @@ impl ArborWindow {
     }
 
     fn start_terminal_poller(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_spawn(async move {
-                    std::thread::sleep(Duration::from_millis(45));
-                })
-                .await;
+        let Some(poll_rx) = self.terminal_poll_rx.take() else {
+            return;
+        };
 
+        cx.spawn(async move |this, cx| {
+            let (bridge_tx, bridge_rx) = smol::channel::bounded::<()>(1);
+
+            cx.background_spawn(async move {
+                loop {
+                    // Wait for a notification or fall back to 45ms timeout (for SSH/daemon
+                    // terminals that use pull-based polling without a reader thread).
+                    let _ = poll_rx.recv_timeout(Duration::from_millis(45));
+                    // Drain queued notifications to coalesce burst output.
+                    while poll_rx.try_recv().is_ok() {}
+                    // Small deadline window to batch rapid output (e.g. `cat large_file`).
+                    std::thread::sleep(Duration::from_millis(4));
+                    while poll_rx.try_recv().is_ok() {}
+                    if bridge_tx.send(()).await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+
+            loop {
+                if bridge_rx.recv().await.is_err() {
+                    break;
+                }
                 let updated = this.update(cx, |this, cx| this.sync_running_terminals(cx));
                 if updated.is_err() {
                     break;
@@ -2841,6 +2880,7 @@ impl ArborWindow {
                     session.runtime = Some(local_daemon_runtime(
                         daemon.clone(),
                         session.daemon_session_id.clone(),
+                        Some(self.terminal_poll_tx.clone()),
                     ));
                     changed = true;
                 }
@@ -2869,7 +2909,11 @@ impl ArborWindow {
                     runtime: attach_runtime
                         .then(|| {
                             self.terminal_daemon.as_ref().map(|daemon| {
-                                local_daemon_runtime(daemon.clone(), record.session_id.clone())
+                                local_daemon_runtime(
+                                    daemon.clone(),
+                                    record.session_id.clone(),
+                                    Some(self.terminal_poll_tx.clone()),
+                                )
                             })
                         })
                         .flatten(),
@@ -5097,6 +5141,7 @@ impl ArborWindow {
                     session.runtime = Some(local_daemon_runtime(
                         client,
                         daemon_session.session_id.clone(),
+                        Some(self.terminal_poll_tx.clone()),
                     ));
                 },
                 Err(error) => {
@@ -8112,6 +8157,7 @@ impl ArborWindow {
                     session.runtime = Some(local_daemon_runtime(
                         daemon.clone(),
                         daemon_session.session_id.clone(),
+                        Some(self.terminal_poll_tx.clone()),
                     ));
                     launched_with_daemon = true;
                 },
@@ -8133,6 +8179,7 @@ impl ArborWindow {
             let (initial_rows, initial_cols) = self.last_terminal_grid_size.unwrap_or((0, 0));
             match terminal_backend::launch_backend(backend_kind, &cwd, initial_rows, initial_cols) {
                 Ok(TerminalLaunch::Embedded(runtime)) => {
+                    runtime.set_notify(self.terminal_poll_tx.clone());
                     session.command = "embedded shell".to_owned();
                     session.generation = runtime.generation();
                     session.runtime = Some(local_embedded_runtime(runtime));
@@ -8314,6 +8361,7 @@ impl ArborWindow {
 
                     match mosh_result {
                         Ok(mosh) => {
+                            mosh.set_notify(self.terminal_poll_tx.clone());
                             session.command = "mosh".to_owned();
                             session.generation = mosh.generation();
                             session.runtime = Some(outpost_mosh_runtime(mosh));
@@ -16534,8 +16582,9 @@ fn local_embedded_runtime(runtime: EmbeddedTerminal) -> SharedTerminalRuntime {
 fn local_daemon_runtime(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
+    poll_notify: Option<std::sync::mpsc::Sender<()>>,
 ) -> SharedTerminalRuntime {
-    let ws_state = Arc::new(DaemonTerminalWsState::default());
+    let ws_state = Arc::new(DaemonTerminalWsState::new(poll_notify));
     spawn_daemon_terminal_ws_watcher(daemon.clone(), session_id.clone(), &ws_state);
 
     Arc::new(DaemonTerminalRuntime {
