@@ -77,6 +77,7 @@ pub(crate) const DIFF_ZONEMAP_MARKER_HEIGHT_PX: f32 = 2.;
 pub(crate) const DIFF_ZONEMAP_MIN_THUMB_HEIGHT_PX: f32 = 12.;
 pub(crate) const DIFF_FONT_SIZE_PX: f32 = 12.0;
 pub(crate) const DIFF_HUNK_CONTEXT_LINES: usize = 3;
+
 pub(crate) const TAB_ICON_DIFF: &str = "\u{f440}";
 pub(crate) const TAB_ICON_FILE: &str = "\u{f15c}";
 pub(crate) const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
