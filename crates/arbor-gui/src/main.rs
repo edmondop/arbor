@@ -15559,7 +15559,10 @@ fn main() {
         Registry::default().with(in_memory_layer).init();
     }
 
-    tracing::info!("Arbor starting");
+    tracing::info!(
+        terminal_engine = arbor_terminal_emulator::TERMINAL_ENGINE_NAME,
+        "Arbor starting",
+    );
 
     let assets_base = find_assets_root_dir()
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets"));

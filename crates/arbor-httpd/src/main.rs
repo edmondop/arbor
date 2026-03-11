@@ -190,7 +190,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     let local_addr = listener.local_addr()?;
-    tracing::info!("arbor-httpd listening on http://{local_addr}");
+    tracing::info!(
+        terminal_engine = arbor_terminal_emulator::TERMINAL_ENGINE_NAME,
+        "arbor-httpd listening on http://{local_addr}",
+    );
 
     // Announce on the local network via mDNS — hold handle to keep registration alive
     #[cfg(feature = "mdns")]

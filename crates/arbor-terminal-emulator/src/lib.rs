@@ -8,6 +8,10 @@ mod ghostty_vt_experimental;
 pub const TERMINAL_ROWS: u16 = 24;
 pub const TERMINAL_COLS: u16 = 80;
 pub const TERMINAL_SCROLLBACK: usize = 8_000;
+#[cfg(not(feature = "ghostty-vt-experimental"))]
+pub const TERMINAL_ENGINE_NAME: &str = "alacritty";
+#[cfg(feature = "ghostty-vt-experimental")]
+pub const TERMINAL_ENGINE_NAME: &str = "ghostty-vt-experimental";
 
 pub const TERMINAL_DEFAULT_FG: u32 = 0xabb2bf;
 pub const TERMINAL_DEFAULT_BG: u32 = 0x282c34;
