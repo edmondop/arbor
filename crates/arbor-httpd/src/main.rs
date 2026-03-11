@@ -253,6 +253,7 @@ mod tests {
     };
 
     #[tokio::test]
+    #[cfg_attr(windows, ignore = "requires Unix shell (stty/cat)")]
     async fn write_terminal_accepts_raw_request_bytes() {
         let temp = match tempfile::tempdir() {
             Ok(temp) => temp,
@@ -284,6 +285,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(windows, ignore = "requires Unix shell (stty/cat)")]
     async fn websocket_binary_frames_write_raw_terminal_bytes() {
         let temp = match tempfile::tempdir() {
             Ok(temp) => temp,
