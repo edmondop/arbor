@@ -10431,6 +10431,7 @@ impl ArborWindow {
                                         let (tab_icon, tab_label) = match tab {
                                             CenterTab::Terminal(session_id) => (
                                                 terminal_tab_icon_element(
+                                                    is_active,
                                                     if is_active {
                                                         theme.text_primary
                                                     } else {
@@ -10481,6 +10482,7 @@ impl ArborWindow {
                                             ),
                                             CenterTab::Logs => (
                                                 logs_tab_icon_element(
+                                                    is_active,
                                                     if is_active {
                                                         theme.text_primary
                                                     } else {
@@ -15461,12 +15463,30 @@ fn themed_ui_svg_icon(
         })
 }
 
-fn terminal_tab_icon_element(color: u32, size_px: f32) -> Div {
-    themed_ui_svg_icon("icons/ui/terminal-active.svg", color, size_px, "\u{f120}")
+fn terminal_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
+    themed_ui_svg_icon(
+        if is_active {
+            "icons/ui/terminal-active.svg"
+        } else {
+            "icons/ui/terminal-muted.svg"
+        },
+        color,
+        size_px,
+        "\u{f120}",
+    )
 }
 
-fn logs_tab_icon_element(color: u32, size_px: f32) -> Div {
-    themed_ui_svg_icon("icons/ui/logs-active.svg", color, size_px, "\u{f4ed}")
+fn logs_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
+    themed_ui_svg_icon(
+        if is_active {
+            "icons/ui/logs-active.svg"
+        } else {
+            "icons/ui/logs-muted.svg"
+        },
+        color,
+        size_px,
+        "\u{f4ed}",
+    )
 }
 
 fn run_daemon_mode(bind_addr: Option<String>) -> Result<(), String> {
