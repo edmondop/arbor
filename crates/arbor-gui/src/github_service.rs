@@ -41,12 +41,6 @@ pub struct PrDetails {
     pub checks: Vec<(String, CheckStatus)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GithubUserProfile {
-    pub login: String,
-    pub avatar_url: Option<String>,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPrResponse {
@@ -199,8 +193,6 @@ pub trait GitHubService: Send + Sync {
     ) -> Result<String, String>;
 
     fn pull_request_number(&self, repo_slug: &str, branch: &str, token: &str) -> Option<u64>;
-
-    fn current_user(&self, token: &str) -> Result<GithubUserProfile, String>;
 }
 
 pub struct OctocrabGitHubService;
@@ -271,31 +263,6 @@ impl GitHubService for OctocrabGitHubService {
                 .ok()?;
 
             page.items.first().map(|pr| pr.number)
-        })
-    }
-
-    fn current_user(&self, token: &str) -> Result<GithubUserProfile, String> {
-        let token = token.to_owned();
-
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|error| format!("failed to create runtime: {error}"))?;
-
-        runtime.block_on(async move {
-            let octocrab = octocrab::Octocrab::builder()
-                .personal_token(token)
-                .build()
-                .map_err(|error| format!("failed to create GitHub client: {error}"))?;
-
-            let user = octocrab
-                .current()
-                .user()
-                .await
-                .map_err(|error| format!("failed to fetch GitHub user profile: {error}"))?;
-
-            Ok(GithubUserProfile {
-                login: user.login,
-                avatar_url: Some(user.avatar_url.to_string()),
-            })
         })
     }
 }

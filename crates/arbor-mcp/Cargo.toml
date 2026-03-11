@@ -22,8 +22,8 @@ vendored-openssl = ["arbor-core/vendored-openssl"]
 anyhow = { workspace = true }
 arbor-daemon-client = { path = "../arbor-daemon-client" }
 arbor-core = { path = "../arbor-core" }
-rmcp = { version = "1", features = ["server", "transport-io", "schemars"] }
-schemars = "1.0"
+rmcp = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 

@@ -10,17 +10,21 @@ name = "Arbor"
 path = "src/main.rs"
 
 [features]
+default = ["ssh", "mosh", "mdns"]
+ssh = ["dep:arbor-ssh", "arbor-core/ssh"]
+mosh = ["dep:arbor-mosh", "ssh", "arbor-core/mosh"]
+mdns = ["dep:zeroconf"]
 vendored-openssl = ["arbor-core/vendored-openssl", "libssh-rs-sys/vendored-openssl", "libssh-rs-sys/vendored"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.26"
+cocoa = { workspace = true }
 
 [dependencies]
-libssh-rs-sys = { version = "0.2", optional = true }
+libssh-rs-sys = { workspace = true, optional = true }
 anyhow = { workspace = true }
 arbor-core = { path = "../arbor-core" }
-arbor-mosh = { path = "../arbor-mosh" }
-arbor-ssh = { path = "../arbor-ssh" }
+arbor-mosh = { path = "../arbor-mosh", optional = true }
+arbor-ssh = { path = "../arbor-ssh", optional = true }
 arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 config = { workspace = true }
 futures = { workspace = true }
@@ -31,7 +35,7 @@ gpui = { workspace = true }
 hostname = { workspace = true }
 gpui_http_client = { workspace = true }
 imara-diff = { workspace = true }
-zeroconf = { workspace = true }
+zeroconf = { workspace = true, optional = true }
 notify-rust = { workspace = true }
 octocrab = { workspace = true }
 portable-pty = { workspace = true }
@@ -44,7 +48,7 @@ tokio = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-tungstenite = "0.28"
+tungstenite = { workspace = true }
 ureq = { workspace = true }
 
 [lints]

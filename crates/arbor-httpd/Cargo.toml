@@ -10,6 +10,8 @@ name = "arbor-httpd"
 path = "src/main.rs"
 
 [features]
+default = ["mdns"]
+mdns = ["dep:zeroconf"]
 vendored-openssl = ["arbor-core/vendored-openssl"]
 
 [dependencies]
@@ -19,12 +21,12 @@ arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 arbor-web-ui = { path = "../arbor-web-ui" }
 axum         = { features = ["ws"], workspace = true }
 config       = { workspace = true }
-futures-util = "0.3"
+futures-util = { workspace = true }
 git2         = { workspace = true }
 gix          = { workspace = true }
 hmac         = { workspace = true }
 hostname     = { workspace = true }
-zeroconf     = { workspace = true }
+zeroconf     = { workspace = true, optional = true }
 octocrab     = { workspace = true }
 portable-pty = { workspace = true }
 rand         = { workspace = true }
@@ -34,15 +36,15 @@ serde_json   = { workspace = true }
 sha2         = { workspace = true }
 thiserror    = { workspace = true }
 tokio        = { workspace = true }
-toml         = "0.8"
+toml         = { workspace = true }
 toml_edit    = { workspace = true }
 tower-http   = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-tower    = "0.5"
+tempfile = { workspace = true }
+tower    = { workspace = true }
 
 [lints]
 workspace = true

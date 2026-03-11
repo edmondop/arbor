@@ -1,10 +1,13 @@
 use {
-    arbor_core::daemon::{
-        CreateOrAttachRequest, CreateOrAttachResponse, DaemonSessionRecord, DaemonSessionStore,
-        DaemonSessionStoreError, DaemonTerminalCursor, DaemonTerminalModes,
-        DaemonTerminalStyledCell, DaemonTerminalStyledLine, DaemonTerminalStyledRun, DetachRequest,
-        KillRequest, ResizeRequest, SignalRequest, SnapshotRequest, TerminalDaemon,
-        TerminalSessionState, TerminalSignal, TerminalSnapshot, WriteRequest,
+    arbor_core::{
+        SessionId, WorkspaceId,
+        daemon::{
+            CreateOrAttachRequest, CreateOrAttachResponse, DaemonSessionRecord, DaemonSessionStore,
+            DaemonSessionStoreError, DaemonTerminalCursor, DaemonTerminalModes,
+            DaemonTerminalStyledCell, DaemonTerminalStyledLine, DaemonTerminalStyledRun,
+            DetachRequest, KillRequest, ResizeRequest, SignalRequest, SnapshotRequest,
+            TerminalDaemon, TerminalSessionState, TerminalSignal, TerminalSnapshot, WriteRequest,
+        },
     },
     arbor_terminal_emulator::{TerminalEmulator, TerminalModes},
     portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system},
@@ -53,8 +56,8 @@ impl LocalTerminalDaemonError {
 }
 
 struct LiveSession {
-    session_id: String,
-    workspace_id: String,
+    session_id: SessionId,
+    workspace_id: WorkspaceId,
     cwd: PathBuf,
     shell: String,
     cols: Arc<Mutex<u16>>,
@@ -406,7 +409,7 @@ fn spawn_wait_thread(mut child: Box<dyn Child + Send + Sync>, session: Arc<LiveS
 }
 
 pub struct LocalTerminalDaemon {
-    sessions: HashMap<String, Arc<LiveSession>>,
+    sessions: HashMap<SessionId, Arc<LiveSession>>,
     session_store: Box<dyn DaemonSessionStore>,
     next_session_id: u64,
 }
@@ -427,11 +430,13 @@ impl LocalTerminalDaemon {
         &self,
         session_id: &str,
     ) -> Result<broadcast::Receiver<SessionEvent>, LocalTerminalDaemonError> {
-        let session = self.sessions.get(session_id).ok_or_else(|| {
-            LocalTerminalDaemonError::SessionNotFound {
-                session_id: session_id.to_owned(),
-            }
-        })?;
+        let key = SessionId::new(session_id);
+        let session =
+            self.sessions
+                .get(&key)
+                .ok_or_else(|| LocalTerminalDaemonError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?;
 
         Ok(session.subscribe())
     }
@@ -447,7 +452,7 @@ impl LocalTerminalDaemon {
         &self,
         live_records: Vec<DaemonSessionRecord>,
     ) -> Result<Vec<DaemonSessionRecord>, LocalTerminalDaemonError> {
-        let live_ids: HashSet<String> = live_records
+        let live_ids: HashSet<SessionId> = live_records
             .iter()
             .map(|record| record.session_id.clone())
             .collect();
@@ -455,7 +460,7 @@ impl LocalTerminalDaemon {
         let mut stored = self.session_store.load()?;
         stored.retain(|record| {
             !live_ids.contains(&record.session_id)
-                && !is_generated_daemon_session_id(&record.session_id)
+                && !is_generated_daemon_session_id(record.session_id.as_str())
         });
         stored.extend(live_records);
         Ok(stored)
@@ -469,19 +474,19 @@ impl LocalTerminalDaemon {
 
     fn session_by_id(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
     ) -> Result<Arc<LiveSession>, LocalTerminalDaemonError> {
         self.sessions.get(session_id).cloned().ok_or_else(|| {
             LocalTerminalDaemonError::SessionNotFound {
-                session_id: session_id.to_owned(),
+                session_id: session_id.to_string(),
             }
         })
     }
 
-    fn next_generated_session_id(&mut self) -> String {
+    fn next_generated_session_id(&mut self) -> SessionId {
         let next = self.next_session_id;
         self.next_session_id = self.next_session_id.saturating_add(1);
-        format!("{DAEMON_SESSION_PREFIX}{next}")
+        SessionId::new(format!("{DAEMON_SESSION_PREFIX}{next}"))
     }
 
     /// Render the emulator's current screen to ANSI escape sequences.
@@ -491,7 +496,8 @@ impl LocalTerminalDaemon {
         session_id: &str,
         max_lines: usize,
     ) -> Result<Option<String>, LocalTerminalDaemonError> {
-        let Some(session) = self.sessions.get(session_id) else {
+        let key = SessionId::new(session_id);
+        let Some(session) = self.sessions.get(&key) else {
             return Ok(None);
         };
         Ok(Some(session.render_ansi_snapshot(max_lines)))
@@ -505,7 +511,7 @@ impl TerminalDaemon for LocalTerminalDaemon {
         &mut self,
         mut request: CreateOrAttachRequest,
     ) -> Result<CreateOrAttachResponse, Self::Error> {
-        if request.session_id.trim().is_empty() {
+        if request.session_id.as_str().trim().is_empty() {
             request.session_id = self.next_generated_session_id();
         }
 
