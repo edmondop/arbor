@@ -67,6 +67,9 @@ web-ui-build-if-needed:
       cd {{web_ui_dir}} && npm install --no-audit --no-fund && npm run build; \
     fi
 
+build-release: web-ui-build-if-needed
+    cargo +{{nightly_toolchain}} build --release -p arbor-gui -p arbor-httpd
+
 run-httpd: web-ui-build-if-needed
     cargo +{{nightly_toolchain}} run -p arbor-httpd
 
