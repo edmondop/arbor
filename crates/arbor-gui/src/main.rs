@@ -30,17 +30,19 @@ use {
         Algorithm as DiffAlgorithm, Diff as BlobDiff, InternedInput as BlobInternedInput,
     },
     gpui::{
-        Animation, AnimationExt, AnyElement, App, Application, Bounds, ClipboardItem, Context, Div,
-        DragMoveEvent, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle,
-        FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent,
-        Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
-        TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
-        WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, ease_in_out,
-        fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
+        Animation, AnimationExt, AnyElement, App, Application, AssetSource, Bounds, ClipboardItem,
+        Context, Div, DragMoveEvent, ElementId, ElementInputHandler, EntityInputHandler,
+        FocusHandle, FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding,
+        KeyDownEvent, Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, SharedString,
+        Stateful, SystemMenuType, TextRun, TitlebarOptions, UTF16Selection,
+        UniformListScrollHandle, Window, WindowBounds, WindowControlArea, WindowDecorations,
+        WindowOptions, actions, canvas, div, ease_in_out, fill, font, img, point, prelude::*, px,
+        rgb, size, svg, uniform_list,
     },
     ropey::Rope,
     std::{
+        borrow::Cow,
         collections::{HashMap, HashSet},
         env, fs,
         net::TcpListener,
@@ -125,9 +127,7 @@ const DIFF_ZONEMAP_MARKER_HEIGHT_PX: f32 = 2.;
 const DIFF_ZONEMAP_MIN_THUMB_HEIGHT_PX: f32 = 12.;
 const DIFF_FONT_SIZE_PX: f32 = 12.0;
 const DIFF_HUNK_CONTEXT_LINES: usize = 3;
-const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
-const TAB_ICON_LOGS: &str = "\u{f4ed}";
 const TAB_ICON_FILE: &str = "\u{f15c}";
 const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
 const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
@@ -145,6 +145,22 @@ const PRESET_ICON_OPENCODE_SVG: &[u8] =
     include_bytes!("../../../assets/preset-icons/opencode-white.svg");
 const PRESET_ICON_COPILOT_SVG: &[u8] =
     include_bytes!("../../../assets/preset-icons/copilot-white.svg");
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TopBarIconKind {
+    RemoteControl,
+    GitHub,
+    WorktreeActions,
+    ReportIssue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TopBarIconTone {
+    Muted,
+    Disabled,
+    Connected,
+    Busy,
+}
 
 const BUNDLED_FONT_FILES: &[&str] = &[
     "CaskaydiaMonoNerdFontMono-Regular.ttf",
@@ -168,11 +184,11 @@ fn register_bundled_fonts(cx: &App) {
         return;
     };
 
-    let mut font_data: Vec<std::borrow::Cow<'static, [u8]>> = Vec::new();
+    let mut font_data: Vec<Cow<'static, [u8]>> = Vec::new();
     for name in BUNDLED_FONT_FILES {
         let path = fonts_dir.join(name);
         match fs::read(&path) {
-            Ok(bytes) => font_data.push(std::borrow::Cow::Owned(bytes)),
+            Ok(bytes) => font_data.push(Cow::Owned(bytes)),
             Err(error) => tracing::warn!("failed to read font {}: {error:#}", path.display()),
         }
     }
@@ -189,37 +205,84 @@ fn register_bundled_fonts(cx: &App) {
 /// Locate the `fonts/` directory, checking packaged bundle paths first, then
 /// the repo-root `assets/` tree for development builds.
 fn find_fonts_dir() -> Option<PathBuf> {
+    find_asset_dir("fonts")
+}
+
+fn find_assets_root_dir() -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         let exe_dir = exe.parent()?;
 
-        // macOS .app bundle: <exe>/../../Resources/fonts
-        let macos_bundle = exe_dir
-            .parent() // Contents/
-            .map(|p| p.join("Resources").join("fonts"));
+        let macos_bundle = exe_dir.parent().map(|p| p.join("Resources"));
         if let Some(dir) = macos_bundle
             && dir.is_dir()
         {
             return Some(dir);
         }
 
-        // Linux package: <exe>/../share/arbor/fonts
-        let linux_share = exe_dir
-            .parent() // bin/ -> package root
-            .map(|p| p.join("share").join("arbor").join("fonts"));
-        if let Some(dir) = linux_share
+        let share_dir = exe_dir.parent().map(|p| p.join("share").join("arbor"));
+        if let Some(dir) = share_dir
             && dir.is_dir()
         {
             return Some(dir);
         }
     }
 
-    // Development fallback: repo-root assets/fonts relative to the crate
-    let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
     if dev_dir.is_dir() {
         return Some(dev_dir);
     }
 
     None
+}
+
+/// Locate an asset subdirectory, checking packaged bundle paths first, then
+/// the repo-root `assets/` tree for development builds.
+fn find_asset_dir(relative_subdir: &str) -> Option<PathBuf> {
+    let dir = find_assets_root_dir()?.join(relative_subdir);
+    dir.is_dir().then_some(dir)
+}
+
+fn find_top_bar_icons_dir() -> Option<PathBuf> {
+    static TOP_BAR_ICONS_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    TOP_BAR_ICONS_DIR
+        .get_or_init(|| find_asset_dir("icons/top-bar"))
+        .clone()
+}
+
+fn find_ui_icons_dir() -> Option<PathBuf> {
+    static UI_ICONS_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    UI_ICONS_DIR
+        .get_or_init(|| find_asset_dir("icons/ui"))
+        .clone()
+}
+
+struct ArborAssets {
+    base: PathBuf,
+}
+
+impl AssetSource for ArborAssets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        fs::read(self.base.join(path))
+            .map(|data| Some(Cow::Owned(data)))
+            .map_err(Into::into)
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        fs::read_dir(self.base.join(path))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| {
+                        entry
+                            .ok()
+                            .and_then(|entry| entry.file_name().into_string().ok())
+                            .map(SharedString::from)
+                    })
+                    .collect()
+            })
+            .map_err(Into::into)
+    }
 }
 
 fn terminal_mono_font(cx: &App) -> gpui::Font {
@@ -1652,6 +1715,7 @@ struct ArborWindow {
     github_auth_store: Box<dyn github_auth_store::GithubAuthStore>,
     github_service: Arc<dyn github_service::GitHubService>,
     github_auth_state: github_auth_store::GithubAuthState,
+    github_user_profile: Option<github_service::GithubUserProfile>,
     github_auth_in_progress: bool,
     github_auth_copy_feedback_active: bool,
     github_auth_copy_feedback_generation: u64,
@@ -1836,6 +1900,7 @@ impl ArborWindow {
                         github_auth_store::GithubAuthState::default()
                     },
                 };
+                let github_user_profile = github_user_profile_from_auth_state(&github_auth_state);
 
                 let repositories = match repository_store.load_entries() {
                     Ok(entries) => repository_store::resolve_repositories_from_entries(entries),
@@ -1907,6 +1972,7 @@ impl ArborWindow {
                     github_auth_store,
                     github_service,
                     github_auth_state,
+                    github_user_profile,
                     github_auth_in_progress: false,
                     github_auth_copy_feedback_active: false,
                     github_auth_copy_feedback_generation: 0,
@@ -2051,6 +2117,7 @@ impl ArborWindow {
                 github_auth_store::GithubAuthState::default()
             },
         };
+        let github_user_profile = github_user_profile_from_auth_state(&github_auth_state);
 
         if let Err(error) = daemon_session_store.load() {
             tracing::warn!(%error, "failed to load daemon session metadata");
@@ -2221,6 +2288,7 @@ impl ArborWindow {
             github_auth_store,
             github_service,
             github_auth_state,
+            github_user_profile,
             github_auth_in_progress: false,
             github_auth_copy_feedback_active: false,
             github_auth_copy_feedback_generation: 0,
@@ -2359,6 +2427,7 @@ impl ArborWindow {
         app.start_log_poller(cx);
         app.start_worktree_auto_refresh(cx);
         app.start_github_pr_auto_refresh(cx);
+        app.refresh_github_user_profile(cx);
         app.start_config_auto_refresh(cx);
         app.start_agent_activity_ws(cx);
         app.start_daemon_log_ws(cx);
@@ -4616,8 +4685,55 @@ impl ArborWindow {
         resolve_github_access_token(self.github_auth_state.access_token.as_deref())
     }
 
+    fn github_profile_access_token(&self) -> Option<String> {
+        let env_token = github_access_token_from_env();
+        resolve_github_access_token_from_sources(
+            self.github_auth_state.access_token.as_deref(),
+            env_token.as_deref(),
+        )
+    }
+
     fn persist_github_auth_state(&self) -> Result<(), String> {
         self.github_auth_store.save(&self.github_auth_state)
+    }
+
+    fn refresh_github_user_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(token) = self.github_profile_access_token() else {
+            if self.github_user_profile.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+
+        let github_service = self.github_service.clone();
+        cx.spawn(async move |this, cx| {
+            let profile_result = cx
+                .background_spawn(async move { github_service.current_user(&token) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| match profile_result {
+                Ok(profile) => {
+                    let profile_changed = this.github_user_profile.as_ref() != Some(&profile);
+                    this.github_user_profile = Some(profile.clone());
+
+                    if this.has_persisted_github_token() {
+                        this.github_auth_state.user_login = Some(profile.login.clone());
+                        this.github_auth_state.user_avatar_url = profile.avatar_url.clone();
+                        if let Err(error) = this.persist_github_auth_state() {
+                            tracing::warn!(%error, "failed to persist GitHub user profile");
+                        }
+                    }
+
+                    if profile_changed {
+                        cx.notify();
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%error, "failed to refresh GitHub user profile");
+                },
+            });
+        })
+        .detach();
     }
 
     fn clear_saved_github_token(&mut self, cx: &mut Context<Self>) {
@@ -4634,6 +4750,7 @@ impl ArborWindow {
                 "disconnected, but failed to persist auth state: {error}"
             )),
         };
+        self.refresh_github_user_profile(cx);
         self.refresh_worktree_pull_requests(cx);
         cx.notify();
     }
@@ -4729,6 +4846,8 @@ impl ArborWindow {
                             access_token: Some(token.access_token),
                             token_type: token.token_type,
                             scope: token.scope,
+                            user_login: None,
+                            user_avatar_url: None,
                         };
 
                         this.notice = match this.persist_github_auth_state() {
@@ -4740,6 +4859,7 @@ impl ArborWindow {
                                 "GitHub connected, but failed to persist auth state: {error}"
                             )),
                         };
+                        this.refresh_github_user_profile(cx);
                         this.refresh_worktree_pull_requests(cx);
                     },
                     Err(error) => {
@@ -9450,6 +9570,10 @@ impl ArborWindow {
         } else {
             theme.text_muted
         };
+        let github_avatar_url = self
+            .github_user_profile
+            .as_ref()
+            .and_then(|profile| profile.avatar_url.clone());
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -9597,17 +9721,16 @@ impl ArborWindow {
                                     cx.notify();
                                 }
                             }))
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(14.))
-                                    .text_color(rgb(if daemon_connected {
-                                        0x68c38d
-                                    } else {
-                                        theme.text_disabled
-                                    }))
-                                    .child("\u{f0ac}"),
-                            )
+                            .child(top_bar_icon_element(
+                                TopBarIconKind::RemoteControl,
+                                if daemon_connected {
+                                    TopBarIconTone::Connected
+                                } else {
+                                    TopBarIconTone::Disabled
+                                },
+                                if daemon_connected { 0x68c38d } else { theme.text_disabled },
+                                "\u{f0ac}",
+                            ))
                             .child(div().text_size(px(11.)).child("Remote Control"))
                     })
                     .child(
@@ -9632,13 +9755,43 @@ impl ArborWindow {
                                         this.run_github_auth_button_action(cx);
                                     }))
                             })
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(14.))
-                                    .text_color(rgb(github_auth_icon_color))
-                                    .child("\u{f09b}"),
-                            )
+                            .child(match github_avatar_url {
+                                Some(url) => div()
+                                    .size(px(12.))
+                                    .rounded_full()
+                                    .overflow_hidden()
+                                    .child(img(url).size_full().rounded_full().with_fallback(
+                                        move || {
+                                            top_bar_icon_element(
+                                                TopBarIconKind::GitHub,
+                                                if github_auth_busy {
+                                                    TopBarIconTone::Busy
+                                                } else if github_saved_token || github_env_token {
+                                                    TopBarIconTone::Connected
+                                                } else {
+                                                    TopBarIconTone::Muted
+                                                },
+                                                github_auth_icon_color,
+                                                "\u{f09b}",
+                                            )
+                                            .into_any_element()
+                                        },
+                                    ))
+                                    .into_any_element(),
+                                None => top_bar_icon_element(
+                                    TopBarIconKind::GitHub,
+                                    if github_auth_busy {
+                                        TopBarIconTone::Busy
+                                    } else if github_saved_token || github_env_token {
+                                        TopBarIconTone::Connected
+                                    } else {
+                                        TopBarIconTone::Muted
+                                    },
+                                    github_auth_icon_color,
+                                    "\u{f09b}",
+                                )
+                                .into_any_element(),
+                            })
                             .child(div().text_size(px(11.)).child(github_auth_label)),
                     )
                     .child(
@@ -9667,12 +9820,20 @@ impl ArborWindow {
                                         this.toggle_top_bar_worktree_quick_actions_menu(cx);
                                     }))
                             })
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(12.))
-                                    .child("\u{f0e7}"),
-                            )
+                            .child(top_bar_icon_element(
+                                TopBarIconKind::WorktreeActions,
+                                if worktree_quick_actions_enabled {
+                                    TopBarIconTone::Muted
+                                } else {
+                                    TopBarIconTone::Disabled
+                                },
+                                if worktree_quick_actions_enabled {
+                                    theme.text_muted
+                                } else {
+                                    theme.text_disabled
+                                },
+                                "\u{f0e7}",
+                            ))
                             .child(
                                 div()
                                     .text_size(px(11.))
@@ -9707,12 +9868,12 @@ impl ArborWindow {
                                 this.close_top_bar_worktree_quick_actions();
                                 cx.open_url("https://github.com/penso/arbor/issues/new");
                             }))
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(15.))
-                                    .child("\u{f188}"),
-                            )
+                            .child(top_bar_icon_element(
+                                TopBarIconKind::ReportIssue,
+                                TopBarIconTone::Muted,
+                                theme.text_muted,
+                                "\u{f188}",
+                            ))
                             .child(
                                 div()
                                     .text_size(px(11.))
@@ -9867,13 +10028,7 @@ impl ArborWindow {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
-                                    .child(
-                                        div()
-                                            .font_family(FONT_MONO)
-                                            .text_size(px(12.))
-                                            .text_color(rgb(0x68c38d))
-                                            .child("\u{f120}"),
-                                    )
+                                    .child(terminal_quick_action_icon_element(0x68c38d, 12.0))
                                     .child(div().text_size(px(11.)).child("Terminal")),
                             )
                             .child(
@@ -11708,38 +11863,68 @@ impl ArborWindow {
                                         let tab_count = tabs.len();
                                         let relation =
                                             active_tab_index.map(|active_index| index.cmp(&active_index));
-                                        let (tab_icon, tab_label, terminal_icon) = match tab {
+                                        let (tab_icon, tab_label) = match tab {
                                             CenterTab::Terminal(session_id) => (
-                                                TAB_ICON_TERMINAL,
+                                                terminal_tab_icon_element(
+                                                    if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    },
+                                                    16.0,
+                                                )
+                                                .into_any_element(),
                                                 self.terminals
                                                     .iter()
                                                     .find(|session| session.id == session_id)
                                                     .map(terminal_tab_title)
                                                     .unwrap_or_else(|| "terminal".to_owned()),
-                                                true,
                                             ),
                                             CenterTab::Diff(diff_id) => (
-                                                TAB_ICON_DIFF,
+                                                div()
+                                                    .font_family(FONT_MONO)
+                                                    .text_xs()
+                                                    .text_color(rgb(if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    }))
+                                                    .child(TAB_ICON_DIFF)
+                                                    .into_any_element(),
                                                 self.diff_sessions
                                                     .iter()
                                                     .find(|session| session.id == diff_id)
                                                     .map(diff_tab_title)
                                                     .unwrap_or_else(|| "diff".to_owned()),
-                                                false,
                                             ),
                                             CenterTab::FileView(fv_id) => (
-                                                TAB_ICON_FILE,
+                                                div()
+                                                    .font_family(FONT_MONO)
+                                                    .text_xs()
+                                                    .text_color(rgb(if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    }))
+                                                    .child(TAB_ICON_FILE)
+                                                    .into_any_element(),
                                                 self.file_view_sessions
                                                     .iter()
                                                     .find(|session| session.id == fv_id)
                                                     .map(|s| s.title.clone())
                                                     .unwrap_or_else(|| "file".to_owned()),
-                                                false,
                                             ),
                                             CenterTab::Logs => (
-                                                TAB_ICON_LOGS,
+                                                logs_tab_icon_element(
+                                                    if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    },
+                                                    16.0,
+                                                )
+                                                .into_any_element(),
                                                 "Logs".to_owned(),
-                                                true,
                                             ),
                                         };
                                         let tab_id = match tab {
@@ -11769,18 +11954,7 @@ impl ArborWindow {
                                             .when(!is_active, |this| {
                                                 this.hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                             })
-                                            .child(
-                                                div()
-                                                    .font_family(FONT_MONO)
-                                                    .when(terminal_icon, |this| this.text_size(px(24.)))
-                                                    .when(!terminal_icon, |this| this.text_xs())
-                                                    .text_color(rgb(if is_active {
-                                                        theme.text_primary
-                                                    } else {
-                                                        theme.text_muted
-                                                    }))
-                                                    .child(tab_icon),
-                                            )
+                                            .child(tab_icon)
                                             .child(
                                                 div()
                                                     .text_sm()
@@ -19858,6 +20032,141 @@ fn preset_icon_image(kind: AgentPresetKind) -> Arc<Image> {
     .clone()
 }
 
+fn top_bar_icon_asset_path(kind: TopBarIconKind, tone: TopBarIconTone) -> Option<PathBuf> {
+    let file_name = match (kind, tone) {
+        (TopBarIconKind::RemoteControl, TopBarIconTone::Connected) => {
+            "remote-control-connected.svg"
+        },
+        (TopBarIconKind::RemoteControl, TopBarIconTone::Disabled) => "remote-control-disabled.svg",
+        (TopBarIconKind::GitHub, TopBarIconTone::Muted) => "github-muted.svg",
+        (TopBarIconKind::GitHub, TopBarIconTone::Connected) => "github-connected.svg",
+        (TopBarIconKind::GitHub, TopBarIconTone::Busy) => "github-busy.svg",
+        (TopBarIconKind::WorktreeActions, TopBarIconTone::Muted) => "worktree-actions-enabled.svg",
+        (TopBarIconKind::WorktreeActions, TopBarIconTone::Disabled) => {
+            "worktree-actions-disabled.svg"
+        },
+        (TopBarIconKind::ReportIssue, TopBarIconTone::Muted) => "report-issue.svg",
+        _ => return None,
+    };
+
+    find_top_bar_icons_dir().map(|dir| dir.join(file_name))
+}
+
+fn top_bar_icon_size_px(kind: TopBarIconKind) -> f32 {
+    match kind {
+        TopBarIconKind::GitHub => 10.5,
+        TopBarIconKind::RemoteControl
+        | TopBarIconKind::WorktreeActions
+        | TopBarIconKind::ReportIssue => 12.0,
+    }
+}
+
+fn top_bar_icon_element(
+    kind: TopBarIconKind,
+    tone: TopBarIconTone,
+    fallback_color: u32,
+    fallback_glyph: &'static str,
+) -> Div {
+    div()
+        .size(px(14.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(match top_bar_icon_asset_path(kind, tone) {
+            Some(path) => img(path)
+                .size(px(top_bar_icon_size_px(kind)))
+                .with_fallback(move || {
+                    div()
+                        .font_family(FONT_MONO)
+                        .text_size(px(12.))
+                        .line_height(px(12.))
+                        .text_color(rgb(fallback_color))
+                        .child(fallback_glyph)
+                        .into_any_element()
+                })
+                .into_any_element(),
+            None => div()
+                .font_family(FONT_MONO)
+                .text_size(px(12.))
+                .line_height(px(12.))
+                .text_color(rgb(fallback_color))
+                .child(fallback_glyph)
+                .into_any_element(),
+        })
+}
+
+fn terminal_quick_action_icon_element(fallback_color: u32, size_px: f32) -> Div {
+    div()
+        .size(px(size_px))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            match find_ui_icons_dir().map(|dir| dir.join("terminal-accent.svg")) {
+                Some(path) => img(path)
+                    .size(px(size_px))
+                    .with_fallback(move || {
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(size_px))
+                            .line_height(px(size_px))
+                            .text_color(rgb(fallback_color))
+                            .child("\u{f120}")
+                            .into_any_element()
+                    })
+                    .into_any_element(),
+                None => div()
+                    .font_family(FONT_MONO)
+                    .text_size(px(size_px))
+                    .line_height(px(size_px))
+                    .text_color(rgb(fallback_color))
+                    .child("\u{f120}")
+                    .into_any_element(),
+            },
+        )
+}
+
+fn themed_ui_svg_icon(
+    path: &'static str,
+    color: u32,
+    size_px: f32,
+    fallback_glyph: &'static str,
+) -> Div {
+    div()
+        .size(px(size_px))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            svg()
+                .path(path)
+                .size(px(size_px))
+                .text_color(rgb(color))
+                .into_any_element(),
+        )
+        .when(find_assets_root_dir().is_none(), |this| {
+            this.child(
+                div()
+                    .font_family(FONT_MONO)
+                    .text_size(px(size_px))
+                    .line_height(px(size_px))
+                    .text_color(rgb(color))
+                    .child(fallback_glyph),
+            )
+        })
+}
+
+fn terminal_tab_icon_element(color: u32, size_px: f32) -> Div {
+    themed_ui_svg_icon("icons/ui/terminal-active.svg", color, size_px, "\u{f120}")
+}
+
+fn logs_tab_icon_element(color: u32, size_px: f32) -> Div {
+    themed_ui_svg_icon("icons/ui/logs-active.svg", color, size_px, "\u{f4ed}")
+}
+
 fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
     match kind {
         AgentPresetKind::Codex => PRESET_ICON_CODEX_SVG,
@@ -21194,6 +21503,24 @@ fn resolve_github_access_token_from_sources(
         .and_then(non_empty_trimmed_str)
         .map(str::to_owned)
         .or_else(|| env_token.and_then(non_empty_trimmed_str).map(str::to_owned))
+}
+
+fn github_user_profile_from_auth_state(
+    state: &github_auth_store::GithubAuthState,
+) -> Option<github_service::GithubUserProfile> {
+    let login = state
+        .user_login
+        .as_deref()
+        .and_then(non_empty_trimmed_str)?;
+
+    Some(github_service::GithubUserProfile {
+        login: login.to_owned(),
+        avatar_url: state
+            .user_avatar_url
+            .as_deref()
+            .and_then(non_empty_trimmed_str)
+            .map(str::to_owned),
+    })
 }
 
 fn github_oauth_client_id() -> Option<String> {
@@ -22940,52 +23267,60 @@ fn main() {
 
     tracing::info!("Arbor starting");
 
-    Application::new().run(move |cx: &mut App| {
-        register_bundled_fonts(cx);
-        set_dock_icon();
-        cx.set_http_client(simple_http_client::create_http_client());
-        install_app_menu_and_keys(cx);
-        let startup_ui_state = ui_state_store::load_startup_state();
-        let default_bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
-        let bounds = startup_ui_state
-            .window
-            .and_then(bounds_from_window_geometry)
-            .unwrap_or(default_bounds);
-        let startup_ui_state_for_window = startup_ui_state.clone();
-        let log_buffer_for_window = log_buffer.clone();
-
-        if let Err(error) = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(1180.), px(760.))),
-                app_id: Some("so.pen.arbor".to_owned()),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Arbor".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(9.), px(9.))),
-                }),
-                window_decorations: Some(WindowDecorations::Client),
-                ..Default::default()
-            },
-            move |_, cx| {
-                let startup_ui_state = startup_ui_state_for_window.clone();
-                let log_buffer = log_buffer_for_window.clone();
-                cx.new(move |cx| {
-                    ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
-                        startup_ui_state,
-                        log_buffer,
-                        cx,
-                    )
-                })
-            },
-        ) {
-            eprintln!("failed to open Arbor window: {error:#}");
-            cx.quit();
-            return;
-        }
-
-        cx.activate(true);
+    let assets_base = find_assets_root_dir().unwrap_or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets")
+            .to_path_buf()
     });
+
+    Application::new()
+        .with_assets(ArborAssets { base: assets_base })
+        .run(move |cx: &mut App| {
+            register_bundled_fonts(cx);
+            set_dock_icon();
+            cx.set_http_client(simple_http_client::create_http_client());
+            install_app_menu_and_keys(cx);
+            let startup_ui_state = ui_state_store::load_startup_state();
+            let default_bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
+            let bounds = startup_ui_state
+                .window
+                .and_then(bounds_from_window_geometry)
+                .unwrap_or(default_bounds);
+            let startup_ui_state_for_window = startup_ui_state.clone();
+            let log_buffer_for_window = log_buffer.clone();
+
+            if let Err(error) = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(1180.), px(760.))),
+                    app_id: Some("so.pen.arbor".to_owned()),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Arbor".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(9.), px(9.))),
+                    }),
+                    window_decorations: Some(WindowDecorations::Client),
+                    ..Default::default()
+                },
+                move |_, cx| {
+                    let startup_ui_state = startup_ui_state_for_window.clone();
+                    let log_buffer = log_buffer_for_window.clone();
+                    cx.new(move |cx| {
+                        ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
+                            startup_ui_state,
+                            log_buffer,
+                            cx,
+                        )
+                    })
+                },
+            ) {
+                eprintln!("failed to open Arbor window: {error:#}");
+                cx.quit();
+                return;
+            }
+
+            cx.activate(true);
+        });
 }
 
 #[cfg(test)]

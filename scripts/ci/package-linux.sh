@@ -69,6 +69,15 @@ else
   echo "warning: fonts not found at ${FONTS_DIR}, skipping bundle"
 fi
 
+# Bundle icon assets used by the GUI.
+ICONS_DIR="${ROOT_DIR}/assets/icons"
+if [[ -d "${ICONS_DIR}" ]]; then
+  cp -R "${ICONS_DIR}" "${STAGING_DIR}/share/arbor/icons"
+  echo "bundled icon assets from ${ICONS_DIR}"
+else
+  echo "warning: icons not found at ${ICONS_DIR}, skipping bundle"
+fi
+
 tar -C "${OUTPUT_DIR}" -czf "${ARCHIVE_PATH}" "$(basename "${STAGING_DIR}")"
 
 echo "${ARCHIVE_PATH}"

@@ -38,6 +38,13 @@ if (Test-Path $WebUiDist) {
   Write-Output "bundled web-ui assets from $WebUiDist"
 }
 
+# Bundle icon assets used by the GUI
+$IconsDir = Join-Path $PSScriptRoot '..\..\assets\icons'
+if (Test-Path $IconsDir) {
+  Copy-Item -Path $IconsDir -Destination (Join-Path $ShareDir 'icons') -Recurse -Force
+  Write-Output "bundled icon assets from $IconsDir"
+}
+
 if (Test-Path $ArchivePath) {
   Remove-Item -Path $ArchivePath -Force
 }

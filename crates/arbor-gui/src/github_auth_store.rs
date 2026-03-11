@@ -14,6 +14,8 @@ pub struct GithubAuthState {
     pub access_token: Option<String>,
     pub token_type: Option<String>,
     pub scope: Option<String>,
+    pub user_login: Option<String>,
+    pub user_avatar_url: Option<String>,
 }
 
 pub trait GithubAuthStore: Send + Sync {

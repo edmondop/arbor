@@ -71,6 +71,15 @@ else
   echo "warning: fonts not found at ${FONTS_DIR}, skipping bundle"
 fi
 
+# Bundle icon assets used by the GUI.
+ICONS_DIR="${ROOT_DIR}/assets/icons"
+if [[ -d "${ICONS_DIR}" ]]; then
+  cp -R "${ICONS_DIR}" "${RESOURCES_DIR}/icons"
+  echo "bundled icon assets from ${ICONS_DIR}"
+else
+  echo "warning: icons not found at ${ICONS_DIR}, skipping bundle"
+fi
+
 cp "${ROOT_DIR}/packaging/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 printf 'APPL????' > "${CONTENTS_DIR}/PkgInfo"
 
