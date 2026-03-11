@@ -1482,10 +1482,11 @@ fn github_repo_slug_cached(
     cache: &mut HashMap<String, RepoCacheEntry>,
     repo_root: &Path,
 ) -> (Option<String>, Option<String>) {
+    // Evict expired entries to prevent unbounded growth.
+    cache.retain(|_, entry| entry.fetched_at.elapsed().as_secs() < REPO_CACHE_TTL_SECS);
+
     let key = repo_root.display().to_string();
-    if let Some(entry) = cache.get(&key)
-        && entry.fetched_at.elapsed().as_secs() < REPO_CACHE_TTL_SECS
-    {
+    if let Some(entry) = cache.get(&key) {
         return (entry.github_repo_slug.clone(), entry.avatar_url.clone());
     }
     let slug = github_repo_slug_for_path(repo_root);
@@ -1536,12 +1537,11 @@ async fn lookup_pr_cached(
 
     let cache_key = format!("{slug}:{branch}");
 
-    // Check cache
+    // Check cache and evict expired entries
     {
-        let cache_map = cache.lock().await;
-        if let Some(entry) = cache_map.get(&cache_key)
-            && entry.fetched_at.elapsed().as_secs() < PR_CACHE_TTL_SECS
-        {
+        let mut cache_map = cache.lock().await;
+        cache_map.retain(|_, entry| entry.fetched_at.elapsed().as_secs() < PR_CACHE_TTL_SECS);
+        if let Some(entry) = cache_map.get(&cache_key) {
             return (entry.pr_number, entry.pr_url.clone());
         }
     }

@@ -489,6 +489,29 @@ impl LocalTerminalDaemon {
         SessionId::new(format!("{DAEMON_SESSION_PREFIX}{next}"))
     }
 
+    /// Remove sessions that have exited (completed or failed) and have no
+    /// active broadcast receivers.  This prevents dead sessions from
+    /// accumulating memory indefinitely (each holds ~23 MB of scrollback).
+    pub fn reap_exited_sessions(&mut self) {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, session| {
+            let state = *lock_or_recover(&session.state);
+            !matches!(
+                state,
+                TerminalSessionState::Completed | TerminalSessionState::Failed
+            )
+        });
+        let reaped = before.saturating_sub(self.sessions.len());
+        if reaped > 0 {
+            tracing::info!(
+                reaped,
+                remaining = self.sessions.len(),
+                "reaped exited terminal sessions"
+            );
+            let _ = self.persist_current_sessions();
+        }
+    }
+
     /// Render the emulator's current screen to ANSI escape sequences.
     /// This reflects the emulator's current dimensions (including reflow).
     pub fn render_ansi_snapshot(
