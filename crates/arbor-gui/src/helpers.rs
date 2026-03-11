@@ -2085,6 +2085,145 @@ pub(crate) fn read_worktree_file_bytes(
     }
 }
 
+/// Read a file's bytes at an arbitrary git ref (e.g. a merge-base OID or branch name).
+pub(crate) fn read_git_ref_file_bytes(
+    worktree_path: &Path,
+    file_path: &Path,
+    git_ref: &str,
+) -> Result<Vec<u8>, String> {
+    let relative = git_relative_path(file_path)?;
+    let object_spec = format!("{git_ref}:{relative}");
+
+    let repo = gix::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
+
+    let object_id = match repo.rev_parse_single(object_spec.as_str()) {
+        Ok(id) => id,
+        Err(_) => return Ok(Vec::new()), // file does not exist at this ref
+    };
+
+    let object = object_id.object().map_err(|error| {
+        format!(
+            "failed to read `{relative}` at {git_ref} in `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
+
+    Ok(object.data.to_vec())
+}
+
+/// Fetch the list of files changed in a PR using `gh pr diff --name-only`.
+pub(crate) fn fetch_pr_changed_files(
+    repo_slug: &str,
+    pr_number: u64,
+) -> Result<Vec<PrChangedFile>, String> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "diff",
+            "--repo",
+            repo_slug,
+            "--name-only",
+            &pr_number.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run `gh pr diff`: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh pr diff failed: {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| PrChangedFile {
+            path: PathBuf::from(line.trim()),
+        })
+        .collect();
+
+    Ok(files)
+}
+
+/// Compute the merge-base between `origin/{base_ref}` and `HEAD`.
+pub(crate) fn compute_merge_base(
+    worktree_path: &Path,
+    base_ref_name: &str,
+) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["merge-base", &format!("origin/{base_ref_name}"), "HEAD"])
+        .current_dir(worktree_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run `git merge-base`: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git merge-base failed: {stderr}"));
+    }
+
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if oid.is_empty() {
+        return Err("git merge-base returned empty output".to_owned());
+    }
+
+    Ok(oid)
+}
+
+/// Build a diff document for PR changes (merge_base..HEAD).
+pub(crate) fn build_pr_diff_document(
+    worktree_path: &Path,
+    pr_files: &[PrChangedFile],
+    merge_base: &str,
+) -> Result<(Vec<DiffLine>, HashMap<PathBuf, usize>), String> {
+    let mut lines = Vec::new();
+    let mut file_row_indices = HashMap::new();
+
+    for file in pr_files {
+        file_row_indices.insert(file.path.clone(), lines.len());
+        lines.push(DiffLine {
+            left_line_number: None,
+            right_line_number: None,
+            left_text: format!("  {}", file.path.display()),
+            right_text: String::new(),
+            kind: DiffLineKind::FileHeader,
+            comment_meta: None,
+        });
+
+        let before_bytes = read_git_ref_file_bytes(worktree_path, &file.path, merge_base)?;
+        let after_bytes = read_git_ref_file_bytes(worktree_path, &file.path, "HEAD")?;
+
+        let before_text = String::from_utf8_lossy(&before_bytes).into_owned();
+        let after_text = String::from_utf8_lossy(&after_bytes).into_owned();
+
+        let file_lines = build_side_by_side_diff_lines(&before_text, &after_text);
+        if file_lines.is_empty() {
+            lines.push(DiffLine {
+                left_line_number: None,
+                right_line_number: None,
+                left_text: "  no textual changes".to_owned(),
+                right_text: String::new(),
+                kind: DiffLineKind::Context,
+                comment_meta: None,
+            });
+        } else {
+            lines.extend(file_lines);
+        }
+    }
+
+    Ok((lines, file_row_indices))
+}
+
 pub(crate) fn git_relative_path(file_path: &Path) -> Result<String, String> {
     let path_text = file_path.to_string_lossy();
     if path_text.trim().is_empty() {

@@ -178,6 +178,10 @@ struct ArborWindow {
     worktree_selection_epoch: usize,
     changed_files: Vec<ChangedFile>,
     selected_changed_file: Option<PathBuf>,
+    changes_view_mode: ChangesViewMode,
+    pr_changed_files: Vec<PrChangedFile>,
+    pr_merge_base: Option<String>,
+    pr_changed_files_loading: bool,
     terminals: Vec<TerminalSession>,
     terminal_poll_tx: std::sync::mpsc::Sender<()>,
     terminal_poll_rx: Option<std::sync::mpsc::Receiver<()>>,
@@ -419,6 +423,10 @@ impl ArborWindow {
                     worktree_selection_epoch: 0,
                     changed_files: Vec::new(),
                     selected_changed_file: None,
+                    changes_view_mode: ChangesViewMode::Local,
+                    pr_changed_files: Vec::new(),
+                    pr_merge_base: None,
+                    pr_changed_files_loading: false,
                     terminals: Vec::new(),
                     terminal_poll_tx,
                     terminal_poll_rx: Some(terminal_poll_rx),
@@ -741,6 +749,10 @@ impl ArborWindow {
             worktree_selection_epoch: 0,
             changed_files: Vec::new(),
             selected_changed_file: None,
+            changes_view_mode: ChangesViewMode::Local,
+            pr_changed_files: Vec::new(),
+            pr_merge_base: None,
+            pr_changed_files_loading: false,
             terminals: Vec::new(),
             terminal_poll_tx,
             terminal_poll_rx: Some(terminal_poll_rx),
@@ -2260,6 +2272,215 @@ impl ArborWindow {
         }
     }
 
+    fn refresh_pr_changed_files(&mut self, cx: &mut Context<Self>) {
+        if self.pr_changed_files_loading {
+            return;
+        }
+
+        let worktree = match self.active_worktree() {
+            Some(w) => w,
+            None => return,
+        };
+
+        let pr_details = match &worktree.pr_details {
+            Some(d) => d,
+            None => return,
+        };
+
+        let repo_slug = match self.github_repo_slug.clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let pr_number = pr_details.number;
+        let base_ref_name = pr_details.base_ref_name.clone();
+        let worktree_path = worktree.path.clone();
+
+        self.pr_changed_files_loading = true;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let files = fetch_pr_changed_files(&repo_slug, pr_number)?;
+                    let merge_base = compute_merge_base(&worktree_path, &base_ref_name)?;
+                    Ok::<_, String>((files, merge_base))
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.pr_changed_files_loading = false;
+
+                match result {
+                    Ok((files, merge_base)) => {
+                        this.pr_changed_files = files;
+                        this.pr_merge_base = Some(merge_base);
+                    },
+                    Err(error) => {
+                        tracing::warn!("failed to fetch PR changed files: {error}");
+                        this.pr_changed_files.clear();
+                        this.pr_merge_base = None;
+                    },
+                }
+
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_pr_diff_tab_for_selected_file(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a worktree before opening a PR diff".to_owned());
+            return;
+        };
+        let Some(merge_base) = self.pr_merge_base.clone() else {
+            self.notice = Some("PR merge-base not available yet".to_owned());
+            return;
+        };
+        let Some(selected_file_path) = self
+            .selected_changed_file
+            .clone()
+            .or_else(|| self.pr_changed_files.first().map(|f| f.path.clone()))
+        else {
+            self.notice = Some("select a PR changed file before opening a diff".to_owned());
+            return;
+        };
+
+        let pr_files = self.pr_changed_files.clone();
+        let (session_id, should_rebuild) = match self
+            .diff_sessions
+            .iter_mut()
+            .find(|session| session.worktree_path == worktree_path)
+        {
+            Some(existing) => {
+                self.active_diff_session_id = Some(existing.id);
+                (
+                    existing.id,
+                    !existing.is_loading
+                        && (existing.lines.is_empty()
+                            || !existing.file_row_indices.contains_key(&selected_file_path)),
+                )
+            },
+            None => {
+                let session_id = self.next_diff_session_id;
+                self.next_diff_session_id = self.next_diff_session_id.saturating_add(1);
+                self.diff_sessions.push(DiffSession {
+                    id: session_id,
+                    worktree_path: worktree_path.clone(),
+                    title: "PR Diff".to_owned(),
+                    raw_lines: Arc::<[DiffLine]>::from(Vec::<DiffLine>::new()),
+                    raw_file_row_indices: HashMap::new(),
+                    lines: Arc::<[DiffLine]>::from(Vec::<DiffLine>::new()),
+                    file_row_indices: HashMap::new(),
+                    wrapped_columns: 0,
+                    is_loading: true,
+                });
+                self.active_diff_session_id = Some(session_id);
+                (session_id, true)
+            },
+        };
+
+        self.pending_diff_scroll_to_file = Some(selected_file_path.clone());
+        if !should_rebuild {
+            let _ = self.scroll_diff_to_file(selected_file_path.as_path());
+            cx.notify();
+            return;
+        }
+
+        if let Some(session) = self
+            .diff_sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.is_loading = true;
+            session.title = "PR Diff".to_owned();
+            session.raw_lines = Arc::<[DiffLine]>::from(Vec::<DiffLine>::new());
+            session.raw_file_row_indices.clear();
+            session.lines = Arc::<[DiffLine]>::from(Vec::<DiffLine>::new());
+            session.file_row_indices.clear();
+            session.wrapped_columns = 0;
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let diff_document = cx
+                .background_spawn(async move {
+                    build_pr_diff_document(&worktree_path, &pr_files, &merge_base)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let cell_width = diff_cell_width_px(cx);
+                let wrap_columns = this
+                    .live_diff_list_width_px()
+                    .map(|list_width| {
+                        this.estimated_diff_wrap_columns_for_list_width(list_width, cell_width)
+                    })
+                    .unwrap_or_else(|| this.estimated_diff_wrap_columns(cell_width));
+                let Some(session) = this
+                    .diff_sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                else {
+                    return;
+                };
+
+                match diff_document {
+                    Ok((mut lines, mut file_row_indices)) => {
+                        let worktree_path_key = session.worktree_path.clone();
+                        if let Some(threads) = this.review_threads.get(&worktree_path_key) {
+                            inject_review_comments(&mut lines, &mut file_row_indices, threads);
+                        }
+
+                        let raw_lines = Arc::<[DiffLine]>::from(lines);
+                        let raw_file_row_indices = file_row_indices;
+                        let (wrapped_lines, wrapped_indices) = wrap_diff_document_lines(
+                            raw_lines.as_ref(),
+                            &raw_file_row_indices,
+                            wrap_columns,
+                        );
+                        session.raw_lines = raw_lines;
+                        session.raw_file_row_indices = raw_file_row_indices;
+                        session.lines = Arc::<[DiffLine]>::from(wrapped_lines);
+                        session.file_row_indices = wrapped_indices;
+                        session.wrapped_columns = wrap_columns;
+                        session.is_loading = false;
+
+                        if let Some(target_path) = this.pending_diff_scroll_to_file.clone()
+                            && this.scroll_diff_to_file(target_path.as_path())
+                        {
+                            this.pending_diff_scroll_to_file = None;
+                        }
+                    },
+                    Err(error) => {
+                        let fallback_lines = Arc::<[DiffLine]>::from(vec![DiffLine {
+                            left_line_number: None,
+                            right_line_number: None,
+                            left_text: format!("failed to build PR diff: {error}"),
+                            right_text: String::new(),
+                            kind: DiffLineKind::FileHeader,
+                            comment_meta: None,
+                        }]);
+                        let fallback_indices = HashMap::new();
+                        let (wrapped_lines, wrapped_indices) = wrap_diff_document_lines(
+                            fallback_lines.as_ref(),
+                            &fallback_indices,
+                            wrap_columns,
+                        );
+                        session.raw_lines = fallback_lines;
+                        session.raw_file_row_indices = fallback_indices;
+                        session.lines = Arc::<[DiffLine]>::from(wrapped_lines);
+                        session.file_row_indices = wrapped_indices;
+                        session.wrapped_columns = wrap_columns;
+                        session.is_loading = false;
+                    },
+                }
+
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn selected_worktree_path(&self) -> Option<&Path> {
         if let Some(ref arw) = self.active_remote_worktree {
             return Some(arw.worktree_path.as_path());
@@ -3497,6 +3718,9 @@ impl ArborWindow {
         self.active_worktree_index = Some(index);
         self.active_outpost_index = None;
         self.active_diff_session_id = None;
+        self.changes_view_mode = ChangesViewMode::Local;
+        self.pr_changed_files.clear();
+        self.pr_merge_base = None;
         self.sync_active_repository_from_selected_worktree();
         let _ = self.reload_changed_files();
         self.expanded_dirs.clear();
@@ -11277,12 +11501,191 @@ impl ArborWindow {
     fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let selected_path = self.selected_changed_file.clone();
+        let has_pr = self
+            .active_worktree()
+            .is_some_and(|w| w.pr_details.is_some());
+        let view_mode = self.changes_view_mode;
+        let is_pr_mode = view_mode == ChangesViewMode::PrChanges;
+
         let can_run_actions = self.can_run_local_git_actions();
         let is_busy = self.git_action_in_flight.is_some();
         let commit_enabled = can_run_actions && !is_busy && !self.changed_files.is_empty();
         let push_enabled = can_run_actions && !is_busy;
         let pr_enabled = can_run_actions && !is_busy;
         let search_lower = self.right_pane_search.to_lowercase();
+
+        // Build the mode toggle (only visible when a PR exists)
+        let mode_toggle = div()
+            .flex()
+            .items_center()
+            .gap_0()
+            .child(self.render_changes_mode_button(
+                "Local",
+                ChangesViewMode::Local,
+                view_mode,
+                theme,
+                cx,
+            ))
+            .child(self.render_changes_mode_button(
+                "PR",
+                ChangesViewMode::PrChanges,
+                view_mode,
+                theme,
+                cx,
+            ));
+
+        let header = div()
+            .h(px(32.))
+            .px_1()
+            .gap_1()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .when(!is_pr_mode, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            git_action_button(
+                                theme,
+                                "changes-action-commit",
+                                GIT_ACTION_ICON_COMMIT,
+                                "Commit",
+                                commit_enabled,
+                                self.git_action_in_flight == Some(GitActionKind::Commit),
+                            )
+                            .when(commit_enabled, |this| {
+                                this.on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_commit_action(cx);
+                                }))
+                            }),
+                        )
+                        .child(
+                            git_action_button(
+                                theme,
+                                "changes-action-push",
+                                GIT_ACTION_ICON_PUSH,
+                                "Push",
+                                push_enabled,
+                                self.git_action_in_flight == Some(GitActionKind::Push),
+                            )
+                            .when(push_enabled, |this| {
+                                this.on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_push_action(cx);
+                                }))
+                            }),
+                        )
+                        .child(
+                            git_action_button(
+                                theme,
+                                "changes-action-pr",
+                                GIT_ACTION_ICON_PR,
+                                "Create PR",
+                                pr_enabled,
+                                self.git_action_in_flight == Some(GitActionKind::CreatePullRequest),
+                            )
+                            .when(pr_enabled, |this| {
+                                this.on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_create_pr_action(cx);
+                                }))
+                            }),
+                        ),
+                )
+            })
+            .when(is_pr_mode, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child(if self.pr_changed_files_loading {
+                            "Loading PR files...".to_owned()
+                        } else {
+                            format!("{} files", self.pr_changed_files.len())
+                        }),
+                )
+            })
+            .when(has_pr, |this| this.child(mode_toggle));
+
+        let file_list = if is_pr_mode {
+            self.render_pr_changed_files_list(&selected_path, &search_lower, theme, cx)
+        } else {
+            self.render_local_changed_files_list(&selected_path, &search_lower, theme, cx)
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(file_list)
+    }
+
+    fn render_changes_mode_button(
+        &self,
+        label: &'static str,
+        mode: ChangesViewMode,
+        current: ChangesViewMode,
+        theme: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let is_active = mode == current;
+        div()
+            .id(ElementId::Name(format!("mode-{label}").into()))
+            .cursor_pointer()
+            .px(px(6.))
+            .py(px(2.))
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .rounded_sm()
+            .when(is_active, |this| {
+                this.bg(rgb(theme.panel_active_bg))
+                    .text_color(rgb(theme.text_primary))
+            })
+            .when(!is_active, |this| {
+                this.text_color(rgb(theme.text_muted))
+                    .hover(|this| this.bg(rgb(theme.panel_bg)))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    if this.changes_view_mode != mode {
+                        // Invalidate any open diff session for the active worktree
+                        // so switching modes forces a rebuild with the right diff source.
+                        if let Some(worktree_path) =
+                            this.selected_worktree_path().map(Path::to_path_buf)
+                        {
+                            this.diff_sessions
+                                .retain(|s| s.worktree_path != worktree_path);
+                        }
+                        this.changes_view_mode = mode;
+                        this.selected_changed_file = None;
+                        if mode == ChangesViewMode::PrChanges
+                            && this.pr_changed_files.is_empty()
+                            && !this.pr_changed_files_loading
+                        {
+                            this.refresh_pr_changed_files(cx);
+                        }
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(label)
+    }
+
+    fn render_local_changed_files_list(
+        &self,
+        selected_path: &Option<PathBuf>,
+        search_lower: &str,
+        theme: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let filtered_changes: Vec<_> = self
             .changed_files
             .iter()
@@ -11292,186 +11695,187 @@ impl ArborWindow {
                         .path
                         .to_string_lossy()
                         .to_lowercase()
-                        .contains(&search_lower)
+                        .contains(search_lower)
             })
             .cloned()
             .collect();
 
         div()
+            .id("changes-scroll")
             .flex_1()
             .min_h_0()
+            .overflow_y_scroll()
+            .scrollbar_width(px(10.))
             .flex()
             .flex_col()
-            .child(
+            .font_family(FONT_MONO)
+            .p_1()
+            .children(filtered_changes.iter().map(|change| {
+                let is_selected = selected_path
+                    .as_ref()
+                    .is_some_and(|selected| selected.as_path() == change.path.as_path());
+                let status_color = match change.kind {
+                    ChangeKind::Added => 0xa6e3a1,
+                    ChangeKind::Modified => 0xf9e2af,
+                    ChangeKind::Removed => 0xf38ba8,
+                    ChangeKind::Renamed => 0x89dceb,
+                    ChangeKind::Copied => 0x74c7ec,
+                    ChangeKind::TypeChange => 0xcba6f7,
+                    ChangeKind::Conflict => 0xf38ba8,
+                    ChangeKind::IntentToAdd => 0x94e2d5,
+                };
+                let path_color = match change.kind {
+                    ChangeKind::Added => 0x8fd7ad,
+                    ChangeKind::Removed => 0xf2a4b7,
+                    ChangeKind::Modified => 0xd9d7cf,
+                    ChangeKind::Renamed => 0x8ecae6,
+                    ChangeKind::Copied => 0x91d7e3,
+                    ChangeKind::TypeChange => 0xc4b1ee,
+                    ChangeKind::Conflict => 0xf38ba8,
+                    ChangeKind::IntentToAdd => 0x94e2d5,
+                };
+                let display_path =
+                    truncate_middle_path_for_width(change.path.as_path(), self.right_pane_width);
+                let file_path = change.path.clone();
+
                 div()
-                    .h(px(32.))
-                    .px_1()
-                    .gap_1()
+                    .id(ElementId::Name(
+                        format!("changed-file-{}", display_path).into(),
+                    ))
+                    .h(px(24.))
+                    .pl(px(4.))
+                    .pr_1()
+                    .cursor_pointer()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(theme.border))
+                    .gap_1()
+                    .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
+                    .when(!is_selected, |this| {
+                        this.hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            this.select_changed_file(file_path.clone(), cx);
+                            this.open_diff_tab_for_selected_file(cx);
+                        }),
+                    )
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                git_action_button(
-                                    theme,
-                                    "changes-action-commit",
-                                    GIT_ACTION_ICON_COMMIT,
-                                    "Commit",
-                                    commit_enabled,
-                                    self.git_action_in_flight == Some(GitActionKind::Commit),
-                                )
-                                .when(commit_enabled, |this| {
-                                    this.on_click(cx.listener(|this, _, _, cx| {
-                                        this.run_commit_action(cx);
-                                    }))
-                                }),
-                            )
-                            .child(
-                                git_action_button(
-                                    theme,
-                                    "changes-action-push",
-                                    GIT_ACTION_ICON_PUSH,
-                                    "Push",
-                                    push_enabled,
-                                    self.git_action_in_flight == Some(GitActionKind::Push),
-                                )
-                                .when(push_enabled, |this| {
-                                    this.on_click(cx.listener(|this, _, _, cx| {
-                                        this.run_push_action(cx);
-                                    }))
-                                }),
-                            )
-                            .child(
-                                git_action_button(
-                                    theme,
-                                    "changes-action-pr",
-                                    GIT_ACTION_ICON_PR,
-                                    "Create PR",
-                                    pr_enabled,
-                                    self.git_action_in_flight
-                                        == Some(GitActionKind::CreatePullRequest),
-                                )
-                                .when(pr_enabled, |this| {
-                                    this.on_click(cx.listener(|this, _, _, cx| {
-                                        this.run_create_pr_action(cx);
-                                    }))
-                                }),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("changes-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .scrollbar_width(px(10.))
-                    .flex()
-                    .flex_col()
-                    .font_family(FONT_MONO)
-                    .p_1()
-                    .children(filtered_changes.iter().map(|change| {
-                        let is_selected = selected_path
-                            .as_ref()
-                            .is_some_and(|selected| selected.as_path() == change.path.as_path());
-                        let status_color = match change.kind {
-                            ChangeKind::Added => 0xa6e3a1,
-                            ChangeKind::Modified => 0xf9e2af,
-                            ChangeKind::Removed => 0xf38ba8,
-                            ChangeKind::Renamed => 0x89dceb,
-                            ChangeKind::Copied => 0x74c7ec,
-                            ChangeKind::TypeChange => 0xcba6f7,
-                            ChangeKind::Conflict => 0xf38ba8,
-                            ChangeKind::IntentToAdd => 0x94e2d5,
-                        };
-                        let path_color = match change.kind {
-                            ChangeKind::Added => 0x8fd7ad,
-                            ChangeKind::Removed => 0xf2a4b7,
-                            ChangeKind::Modified => 0xd9d7cf,
-                            ChangeKind::Renamed => 0x8ecae6,
-                            ChangeKind::Copied => 0x91d7e3,
-                            ChangeKind::TypeChange => 0xc4b1ee,
-                            ChangeKind::Conflict => 0xf38ba8,
-                            ChangeKind::IntentToAdd => 0x94e2d5,
-                        };
-                        let display_path = truncate_middle_path_for_width(
-                            change.path.as_path(),
-                            self.right_pane_width,
-                        );
-                        let file_path = change.path.clone();
-
+                            .flex_none()
+                            .text_size(px(10.))
+                            .text_color(rgb(status_color))
+                            .child(change_code(change.kind)),
+                    )
+                    .child(
                         div()
-                            .id(ElementId::Name(
-                                format!("changed-file-{}", display_path).into(),
-                            ))
-                            .h(px(24.))
-                            .pl(px(4.))
-                            .pr_1()
-                            .cursor_pointer()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(rgb(path_color))
+                            .child(display_path),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
                             .flex()
                             .items_center()
+                            .justify_end()
                             .gap_1()
-                            .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
-                            .when(!is_selected, |this| {
-                                this.hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .when(change.additions > 0, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x72d69c))
+                                        .child(format!("+{}", change.additions)),
+                                )
                             })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                    this.select_changed_file(file_path.clone(), cx);
-                                    this.open_diff_tab_for_selected_file(cx);
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(status_color))
-                                    .child(change_code(change.kind)),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .text_color(rgb(path_color))
-                                    .child(display_path),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap_1()
-                                    .when(change.additions > 0, |this| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x72d69c))
-                                                .child(format!("+{}", change.additions)),
-                                        )
-                                    })
-                                    .when(change.deletions > 0, |this| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xeb6f92))
-                                                .child(format!("-{}", change.deletions)),
-                                        )
-                                    }),
-                            )
-                    })),
-            )
+                            .when(change.deletions > 0, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0xeb6f92))
+                                        .child(format!("-{}", change.deletions)),
+                                )
+                            }),
+                    )
+            }))
+    }
+
+    fn render_pr_changed_files_list(
+        &self,
+        selected_path: &Option<PathBuf>,
+        search_lower: &str,
+        theme: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let filtered_files: Vec<_> = self
+            .pr_changed_files
+            .iter()
+            .filter(|file| {
+                search_lower.is_empty()
+                    || file
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(search_lower)
+            })
+            .cloned()
+            .collect();
+
+        div()
+            .id("changes-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .scrollbar_width(px(10.))
+            .flex()
+            .flex_col()
+            .font_family(FONT_MONO)
+            .p_1()
+            .children(filtered_files.iter().map(|file| {
+                let is_selected = selected_path
+                    .as_ref()
+                    .is_some_and(|selected| selected.as_path() == file.path.as_path());
+                let display_path =
+                    truncate_middle_path_for_width(file.path.as_path(), self.right_pane_width);
+                let file_path = file.path.clone();
+
+                div()
+                    .id(ElementId::Name(format!("pr-file-{}", display_path).into()))
+                    .h(px(24.))
+                    .pl(px(4.))
+                    .pr_1()
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
+                    .when(!is_selected, |this| {
+                        this.hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            this.selected_changed_file = Some(file_path.clone());
+                            this.open_pr_diff_tab_for_selected_file(cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(display_path),
+                    )
+            }))
     }
 
     fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
@@ -15996,6 +16400,7 @@ mod tests {
             title: "Improve hover stability".to_owned(),
             url: "https://example.com/pr/42".to_owned(),
             state: crate::github_service::PrState::Open,
+            base_ref_name: "main".to_owned(),
             additions: 12,
             deletions: 4,
             review_decision: crate::github_service::ReviewDecision::Pending,

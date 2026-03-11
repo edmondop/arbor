@@ -367,6 +367,17 @@ pub(crate) struct FileTreeEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangesViewMode {
+    Local,
+    PrChanges,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PrChangedFile {
+    pub(crate) path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiffLineKind {
     FileHeader,
     Context,
