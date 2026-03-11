@@ -149,7 +149,7 @@ pub fn resolve_repositories_from_entries(
         let Some(normalized_root) = normalize_checkout_root(entry.root, entry.kind) else {
             continue;
         };
-        let group_key = normalize_group_key(entry.group_key, &normalized_root);
+        let group_key = normalize_group_key(entry.group_key, &normalized_root, entry.kind);
         let next_root = RepositoryCheckoutRoot {
             path: normalized_root.clone(),
             kind: entry.kind,
@@ -234,11 +234,18 @@ fn normalize_checkout_root(root: PathBuf, kind: CheckoutKind) -> Option<PathBuf>
     }
 }
 
-fn normalize_group_key(group_key: Option<String>, checkout_root: &Path) -> String {
-    group_key
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default_group_key_for_root(checkout_root))
+fn normalize_group_key(
+    group_key: Option<String>,
+    checkout_root: &Path,
+    kind: CheckoutKind,
+) -> String {
+    match kind {
+        CheckoutKind::LinkedWorktree => default_group_key_for_root(checkout_root),
+        CheckoutKind::DiscreteClone => group_key
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default_group_key_for_root(checkout_root)),
+    }
 }
 
 fn should_prefer_checkout_root(
@@ -359,6 +366,52 @@ mod tests {
         assert_eq!(repositories.len(), 1);
         assert_eq!(repositories[0].checkout_roots.len(), 2);
         assert_eq!(repositories[0].root, expected_root);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_stale_group_key_for_linked_worktree_entries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repo_root = temp_store_path("repo-root-linked");
+        std::fs::create_dir_all(&repo_root)?;
+        let repo = git2::Repository::init(&repo_root)?;
+        std::fs::write(repo_root.join("README.md"), "hello\n")?;
+
+        let mut index = repo.index()?;
+        index.add_path(std::path::Path::new("README.md"))?;
+        index.write()?;
+        let tree_id = index.write_tree()?;
+        let tree = repo.find_tree(tree_id)?;
+        let signature = git2::Signature::now("Arbor Test", "arbor@example.com")?;
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])?;
+        drop(tree);
+
+        let worktree_root = temp_store_path("repo-worktree-linked");
+        arbor_core::worktree::add(
+            &repo_root,
+            &worktree_root,
+            arbor_core::worktree::AddWorktreeOptions {
+                branch: Some("feature/store-group-key"),
+                ..Default::default()
+            },
+        )?;
+
+        let repositories = resolve_repositories_from_entries(vec![StoredRepositoryEntry {
+            root: worktree_root.clone(),
+            group_key: Some(worktree_root.display().to_string()),
+            kind: CheckoutKind::LinkedWorktree,
+        }]);
+        let expected_root = arbor_core::worktree::canonicalize_if_possible(repo_root.clone());
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].root, expected_root);
+        assert_eq!(
+            repositories[0].group_key,
+            default_group_key_for_root(&repo_root)
+        );
+
+        let _ = std::fs::remove_dir_all(&worktree_root);
+        let _ = std::fs::remove_dir_all(&repo_root);
         Ok(())
     }
 }

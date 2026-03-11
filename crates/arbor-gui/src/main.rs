@@ -9693,192 +9693,182 @@ impl ArborWindow {
                     .child({
                         let daemon_connected = self.terminal_daemon.is_some();
                         let web_ui_url = self.daemon_base_url.clone();
-                        div()
-                            .id("web-ui-link")
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .text_color(rgb(if daemon_connected {
+                        top_bar_button(
+                            theme,
+                            "web-ui-link",
+                            true,
+                            if daemon_connected {
                                 theme.text_muted
                             } else {
                                 theme.text_disabled
-                            }))
-                            .cursor_pointer()
-                            .hover(|this| {
-                                this.bg(rgb(theme.panel_bg))
-                                    .text_color(rgb(theme.text_primary))
-                            })
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                if this.terminal_daemon.is_some() {
-                                    this.open_external_url(&web_ui_url, cx);
-                                } else {
-                                    this.start_daemon_modal = true;
-                                    cx.notify();
-                                }
-                            }))
-                            .child(top_bar_icon_element(
-                                TopBarIconKind::RemoteControl,
-                                if daemon_connected {
-                                    TopBarIconTone::Connected
-                                } else {
-                                    TopBarIconTone::Disabled
-                                },
-                                if daemon_connected { 0x68c38d } else { theme.text_disabled },
-                                "\u{f0ac}",
-                            ))
-                            .child(div().text_size(px(11.)).child("Remote Control"))
-                    })
-                    .child(
-                        div()
-                            .id("github-auth")
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .text_color(rgb(github_auth_text_color))
-                            .when(!github_auth_busy, |this| {
-                                this.cursor_pointer()
-                                    .hover(|this| {
-                                        this.bg(rgb(theme.panel_bg))
-                                            .text_color(rgb(theme.text_primary))
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.run_github_auth_button_action(cx);
-                                    }))
-                            })
-                            .child(match github_avatar_url {
-                                Some(url) => div()
-                                    .size(px(12.))
-                                    .rounded_full()
-                                    .overflow_hidden()
-                                    .child(img(url).size_full().rounded_full().with_fallback(
-                                        move || {
-                                            top_bar_icon_element(
-                                                TopBarIconKind::GitHub,
-                                                if github_auth_busy {
-                                                    TopBarIconTone::Busy
-                                                } else if github_saved_token || github_env_token {
-                                                    TopBarIconTone::Connected
-                                                } else {
-                                                    TopBarIconTone::Muted
-                                                },
-                                                github_auth_icon_color,
-                                                "\u{f09b}",
-                                            )
-                                            .into_any_element()
-                                        },
-                                    ))
-                                    .into_any_element(),
-                                None => top_bar_icon_element(
-                                    TopBarIconKind::GitHub,
-                                    if github_auth_busy {
-                                        TopBarIconTone::Busy
-                                    } else if github_saved_token || github_env_token {
+                            },
+                            theme.text_primary,
+                            {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(11.))
+                                .child(top_bar_icon_element(
+                                    TopBarIconKind::RemoteControl,
+                                    if daemon_connected {
                                         TopBarIconTone::Connected
                                     } else {
-                                        TopBarIconTone::Muted
+                                        TopBarIconTone::Disabled
                                     },
-                                    github_auth_icon_color,
-                                    "\u{f09b}",
-                                )
-                                .into_any_element(),
-                            })
-                            .child(div().text_size(px(11.)).child(github_auth_label)),
+                                    if daemon_connected {
+                                        0x68c38d
+                                    } else {
+                                        theme.text_disabled
+                                    },
+                                    "\u{f0ac}",
+                                ))
+                                .child("Remote Control")
+                        },
+                        )
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            if this.terminal_daemon.is_some() {
+                                this.open_external_url(&web_ui_url, cx);
+                            } else {
+                                this.start_daemon_modal = true;
+                                cx.notify();
+                            }
+                        }))
+                    })
+                    .child(
+                        top_bar_button(
+                            theme,
+                            "github-auth",
+                            !github_auth_busy,
+                            github_auth_text_color,
+                            theme.text_primary,
+                            {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(11.))
+                                .child(match github_avatar_url {
+                                    Some(url) => div()
+                                        .size(px(12.))
+                                        .rounded_full()
+                                        .overflow_hidden()
+                                        .child(img(url).size_full().rounded_full().with_fallback(
+                                            move || {
+                                                top_bar_icon_element(
+                                                    TopBarIconKind::GitHub,
+                                                    if github_auth_busy {
+                                                        TopBarIconTone::Busy
+                                                    } else if github_saved_token || github_env_token {
+                                                        TopBarIconTone::Connected
+                                                    } else {
+                                                        TopBarIconTone::Muted
+                                                    },
+                                                    github_auth_icon_color,
+                                                    "\u{f09b}",
+                                                )
+                                                .into_any_element()
+                                            },
+                                        ))
+                                        .into_any_element(),
+                                    None => top_bar_icon_element(
+                                        TopBarIconKind::GitHub,
+                                        if github_auth_busy {
+                                            TopBarIconTone::Busy
+                                        } else if github_saved_token || github_env_token {
+                                            TopBarIconTone::Connected
+                                        } else {
+                                            TopBarIconTone::Muted
+                                        },
+                                        github_auth_icon_color,
+                                        "\u{f09b}",
+                                    )
+                                    .into_any_element(),
+                                })
+                                .child(github_auth_label)
+                        },
+                        )
+                        .when(!github_auth_busy, |this| {
+                            this.on_click(cx.listener(|this, _, _, cx| {
+                                this.run_github_auth_button_action(cx);
+                            }))
+                        }),
                     )
                     .child(
-                        div()
-                            .id("worktree-quick-actions")
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .text_color(rgb(if worktree_quick_actions_enabled {
+                        top_bar_button(
+                            theme,
+                            "worktree-quick-actions",
+                            worktree_quick_actions_enabled,
+                            if worktree_quick_actions_enabled {
                                 theme.text_muted
                             } else {
                                 theme.text_disabled
-                            }))
-                            .when(worktree_quick_actions_enabled, |this| {
-                                this.cursor_pointer()
-                                    .hover(|this| {
-                                        this.bg(rgb(theme.panel_bg))
-                                            .text_color(rgb(theme.text_primary))
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_top_bar_worktree_quick_actions_menu(cx);
-                                    }))
-                            })
-                            .child(top_bar_icon_element(
-                                TopBarIconKind::WorktreeActions,
-                                if worktree_quick_actions_enabled {
-                                    TopBarIconTone::Muted
-                                } else {
-                                    TopBarIconTone::Disabled
-                                },
-                                if worktree_quick_actions_enabled {
-                                    theme.text_muted
-                                } else {
-                                    theme.text_disabled
-                                },
-                                "\u{f0e7}",
-                            ))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .child("Action"),
-                            )
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(9.))
-                                    .child(if worktree_quick_actions_open {
-                                        "\u{f077}"
+                            },
+                            theme.text_primary,
+                            {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(top_bar_icon_element(
+                                    TopBarIconKind::WorktreeActions,
+                                    if worktree_quick_actions_enabled {
+                                        TopBarIconTone::Muted
                                     } else {
-                                        "\u{f078}"
-                                    }),
-                            ),
+                                        TopBarIconTone::Disabled
+                                    },
+                                    if worktree_quick_actions_enabled {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    },
+                                    "\u{f0e7}",
+                                ))
+                                .child(div().text_size(px(11.)).child("Action"))
+                                .child(
+                                    div()
+                                        .font_family(FONT_MONO)
+                                        .text_size(px(9.))
+                                        .child(if worktree_quick_actions_open {
+                                            "\u{f077}"
+                                        } else {
+                                            "\u{f078}"
+                                        }),
+                                )
+                        },
+                        )
+                        .when(worktree_quick_actions_enabled, |this| {
+                            this.on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_top_bar_worktree_quick_actions_menu(cx);
+                            }))
+                        }),
                     )
                     .child(
-                        div()
-                            .id("report-issue")
-                            .cursor_pointer()
-                            .text_color(rgb(theme.text_muted))
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .hover(|this| this.bg(rgb(theme.panel_active_bg)).text_color(rgb(theme.text_primary)))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.close_top_bar_worktree_quick_actions();
-                                cx.open_url("https://github.com/penso/arbor/issues/new");
-                            }))
-                            .child(top_bar_icon_element(
-                                TopBarIconKind::ReportIssue,
-                                TopBarIconTone::Muted,
-                                theme.text_muted,
-                                "\u{f188}",
-                            ))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .child("Report issue"),
-                            ),
+                        top_bar_button(
+                            theme,
+                            "report-issue",
+                            true,
+                            theme.text_muted,
+                            theme.text_primary,
+                            {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(11.))
+                                .child(top_bar_icon_element(
+                                    TopBarIconKind::ReportIssue,
+                                    TopBarIconTone::Muted,
+                                    theme.text_muted,
+                                    "\u{f188}",
+                                ))
+                                .child("Report issue")
+                        },
+                        )
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.close_top_bar_worktree_quick_actions();
+                            cx.open_url("https://github.com/penso/arbor/issues/new");
+                        })),
                     ),
             )
     }
@@ -19994,6 +19984,41 @@ fn action_button(
         .text_xs()
         .text_color(rgb(text_color))
         .child(label.into())
+}
+
+fn top_bar_button(
+    theme: ThemePalette,
+    id: impl Into<ElementId>,
+    enabled: bool,
+    base_text_color: u32,
+    hover_text_color: u32,
+    content: impl IntoElement,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(22.))
+        .px(px(6.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.chrome_bg))
+        .text_color(rgb(base_text_color))
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|this| {
+                    this.bg(rgb(theme.panel_bg))
+                        .text_color(rgb(hover_text_color))
+                        .border_color(rgb(theme.panel_active_bg))
+                })
+                .active(|this| {
+                    this.bg(rgb(theme.panel_active_bg))
+                        .text_color(rgb(hover_text_color))
+                })
+        })
+        .child(content)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

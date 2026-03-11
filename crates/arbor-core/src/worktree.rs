@@ -40,19 +40,8 @@ pub enum WorktreeError {
 /// Uses `gix::discover` to find and open the repository, then reads the
 /// worktree list to find the primary worktree.
 pub fn repo_root(path: &Path) -> Result<PathBuf, WorktreeError> {
-    let worktrees = list(path)?;
-    if let Some(main) = worktrees.first() {
-        return Ok(main.path.clone());
-    }
-
-    // Fallback: use gix to discover the repo root.
-    let repo = open_gix_repo(path)?;
-    match repo.workdir() {
-        Some(work_dir) => Ok(work_dir.to_path_buf()),
-        None => Err(WorktreeError::InvalidWorktreeData(
-            "repository has no working directory".to_owned(),
-        )),
-    }
+    let repo = open_git2_repo(path)?;
+    main_worktree_path(&repo)
 }
 
 /// List all worktrees in the repository.
@@ -350,9 +339,7 @@ fn open_git2_repo(path: &Path) -> Result<git2::Repository, WorktreeError> {
 
 /// Build the main worktree entry from a git2 repository.
 fn build_main_worktree(repo: &git2::Repository) -> Result<Worktree, WorktreeError> {
-    let work_dir = repo.workdir().ok_or_else(|| {
-        WorktreeError::InvalidWorktreeData("repository has no working directory".to_owned())
-    })?;
+    let work_dir = main_worktree_path(repo)?;
 
     let head = repo
         .head()
@@ -370,7 +357,7 @@ fn build_main_worktree(repo: &git2::Repository) -> Result<Worktree, WorktreeErro
     let is_detached = repo.head_detached().unwrap_or(false);
 
     Ok(Worktree {
-        path: work_dir.to_path_buf(),
+        path: work_dir,
         head,
         branch,
         is_bare,
@@ -378,6 +365,27 @@ fn build_main_worktree(repo: &git2::Repository) -> Result<Worktree, WorktreeErro
         lock_reason: None,
         prune_reason: None,
     })
+}
+
+fn main_worktree_path(repo: &git2::Repository) -> Result<PathBuf, WorktreeError> {
+    if let Some(parent) = repo.commondir().parent() {
+        let candidate = parent.to_path_buf();
+        if candidate.join(".git").exists() {
+            return Ok(canonicalize_if_possible(candidate));
+        }
+    }
+
+    if let Some(work_dir) = repo.workdir() {
+        return Ok(canonicalize_if_possible(work_dir.to_path_buf()));
+    }
+
+    let repo = open_gix_repo(repo.path())?;
+    match repo.workdir() {
+        Some(work_dir) => Ok(canonicalize_if_possible(work_dir.to_path_buf())),
+        None => Err(WorktreeError::InvalidWorktreeData(
+            "repository has no working directory".to_owned(),
+        )),
+    }
 }
 
 /// Build a linked worktree entry by name.
@@ -498,10 +506,77 @@ fn open_git2_from_gix(repo: &gix::Repository) -> Result<git2::Repository, Worktr
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use {
+        super::{AddWorktreeOptions, list, repo_root},
+        std::{
+            fs,
+            path::{Path, PathBuf},
+            time::{SystemTime, UNIX_EPOCH},
+        },
+    };
+
+    fn temp_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "arbor-worktree-tests-{}-{unique}-{name}",
+            std::process::id()
+        ))
+    }
+
+    fn init_repo_with_commit(path: &Path) -> Result<git2::Repository, Box<dyn std::error::Error>> {
+        fs::create_dir_all(path)?;
+        let repo = git2::Repository::init(path)?;
+        fs::write(path.join("README.md"), "hello\n")?;
+
+        let mut index = repo.index()?;
+        index.add_path(Path::new("README.md"))?;
+        index.write()?;
+        let tree_id = index.write_tree()?;
+        let tree = repo.find_tree(tree_id)?;
+        let signature = git2::Signature::now("Arbor Test", "arbor@example.com")?;
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])?;
+        drop(tree);
+
+        Ok(repo)
+    }
+
     #[test]
     fn short_branch_strips_prefix() {
         assert_eq!(super::short_branch("refs/heads/main"), "main");
         assert_eq!(super::short_branch("main"), "main");
         assert_eq!(super::short_branch("refs/heads/feature/foo"), "feature/foo");
+    }
+
+    #[test]
+    fn repo_root_resolves_main_checkout_for_linked_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repo_path = temp_path("repo");
+        let worktree_path = temp_path("feature-worktree");
+        let _repo = init_repo_with_commit(&repo_path)?;
+
+        super::add(&repo_path, &worktree_path, AddWorktreeOptions {
+            branch: Some("feature/worktree-root"),
+            ..AddWorktreeOptions::default()
+        })?;
+
+        let resolved_root = repo_root(&worktree_path)?;
+        assert_eq!(
+            resolved_root,
+            super::canonicalize_if_possible(repo_path.clone())
+        );
+
+        let worktrees = list(&worktree_path)?;
+        assert!(
+            worktrees
+                .first()
+                .is_some_and(|worktree| super::paths_equivalent(&worktree.path, &repo_path))
+        );
+
+        let _ = fs::remove_dir_all(&worktree_path);
+        let _ = fs::remove_dir_all(&repo_path);
+        Ok(())
     }
 }
