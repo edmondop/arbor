@@ -34,10 +34,33 @@ If any check fails, fix the issue, then commit the fix.
 
 ## Rust Rules
 
-- Do not use `unwrap()` or `expect()` in non-test code.
+- Do not use `unwrap()` or `expect()` in non-test code. In test modules, use `#[allow(clippy::unwrap_used, clippy::expect_used)]` on the module.
 - Use clear error handling with typed errors (`thiserror`/`anyhow` where appropriate).
+- Use `arbor_core::ResultExt` and `arbor_core::OptionExt` for `.context()` on `Result<T, E>` and `Option<T>` — prefer these over ad-hoc `.map_err()` with format strings.
+- Use `SessionId` and `WorkspaceId` newtypes from `arbor_core::id` instead of raw `String` for session/workspace identifiers. These are `#[serde(transparent)]` for wire compatibility.
 - Keep modules focused and delete dead code instead of leaving it around.
 - Collapse nested `if` / `if let` statements when possible (clippy `collapsible_if`).
+
+## Module Organization
+
+- Split large files by domain: types, constants, helpers, actions. Keep files under ~800 lines where practical.
+- Use `pub(crate)` visibility for items shared within a crate but not exported. Apply to struct fields, methods, and free functions in submodules.
+- Use `pub(crate) use module::*` glob re-exports in parent modules to keep call sites clean after extraction.
+- When splitting `impl` blocks across files, the struct definition stays in `types.rs` and method impls go in the relevant domain file.
+
+## Feature Flags
+
+Optional functionality is gated behind Cargo features:
+
+- **arbor-gui**: `ssh`, `mosh`, `mdns` (all on by default). Use `#[cfg(feature = "...")]` on modules, functions, and imports that depend on optional crates.
+- **arbor-httpd**: `mdns` (on by default).
+- **arbor-core**: `ssh`, `mosh` (propagated from downstream crates).
+- When adding a new optional dependency, use `dep:crate_name` syntax in the feature definition and mark the dependency as `optional = true`.
+- Feature flags should be hierarchical: `mosh` implies `ssh`.
+
+## Workspace Dependencies
+
+All third-party dependency versions are centralized in the root `Cargo.toml` under `[workspace.dependencies]`. Crate-level `Cargo.toml` files must use `{ workspace = true }` (with optional extra keys like `features` or `optional`). Never hardcode a version in a subcrate — add it to the workspace root first.
 
 ## Git Rules
 
@@ -55,7 +78,31 @@ If any check fails, fix the issue, then commit the fix.
 
 | Crate | Description |
 |-------|-------------|
-| `arbor-core` | Worktree primitives, change detection, agent hooks |
-| `arbor-gui` | GPUI desktop app (`arbor` binary) |
+| `arbor-core` | Worktree primitives, change detection, agent hooks, shared types (`SessionId`, `WorkspaceId`, `ResultExt`) |
+| `arbor-daemon-client` | HTTP client for talking to arbor-httpd |
+| `arbor-gui` | GPUI desktop app (`Arbor` binary) |
 | `arbor-httpd` | Remote HTTP daemon (`arbor-httpd` binary) |
+| `arbor-mcp` | MCP server for AI agent integration |
+| `arbor-mosh` | Mosh shell backend (optional) |
+| `arbor-ssh` | SSH shell backend (optional) |
+| `arbor-terminal-emulator` | Terminal emulation layer |
 | `arbor-web-ui` | TypeScript dashboard assets + helper crate |
+
+### Key files in arbor-gui
+
+| File | Contents |
+|------|----------|
+| `main.rs` | App entry point, `ArborWindow` struct and its `impl` blocks, GPUI rendering |
+| `actions.rs` | `actions!()` macro definitions |
+| `constants.rs` | All `const` values, font registration |
+| `types.rs` | Struct/enum definitions (DTOs, UI state types) |
+| `helpers.rs` | Free functions, `impl` blocks for helper methods |
+| `terminal_runtime.rs` | Terminal backend traits and impls (SSH, Mosh, local) |
+
+### Key files in arbor-httpd
+
+| File | Contents |
+|------|----------|
+| `main.rs` | Server startup, router setup |
+| `types.rs` | AppState, config types, API error types |
+| `routes.rs` | All route handler functions |

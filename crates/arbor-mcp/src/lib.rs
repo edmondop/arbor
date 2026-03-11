@@ -1,27 +1,32 @@
+mod prompts;
+mod resources;
+mod tools;
+
+pub use tools::{
+    ActionStatus, AgentActivityOutput, ChangedFilesOutput, ChangesInput, CommitInput,
+    ProcessNameInput, ProcessesOutput, PushInput, RepositoriesOutput, TerminalReadInput,
+    TerminalResizeInput, TerminalSignalInput, TerminalTargetInput, TerminalWriteInput,
+    TerminalsOutput, WorktreeListInput, WorktreesOutput,
+};
 use {
     arbor_daemon_client::{
         AgentSessionDto, ChangedFileDto, CommitWorktreeRequest, CreateTerminalRequest,
         CreateTerminalResponse, CreateWorktreeRequest, DaemonClient, DaemonClientError,
         DeleteWorktreeRequest, GitActionResponse, HealthResponse, PushWorktreeRequest,
         RepositoryDto, TerminalResizeRequest, TerminalSignalRequest, WorktreeDto,
-        WorktreeMutationResponse, default_mcp_resource_templates, default_mcp_resources,
-        parse_terminal_snapshot_resource, parse_worktree_changes_resource, read_json_text_resource,
+        WorktreeMutationResponse,
     },
     rmcp::{
-        ErrorData, Json, RoleServer, ServerHandler, ServiceExt,
-        handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+        ErrorData, RoleServer, ServerHandler, ServiceExt,
+        handler::server::router::tool::ToolRouter,
         model::{
-            AnnotateAble, GetPromptRequestParams, GetPromptResult, Implementation,
-            ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-            PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, PromptMessageRole,
-            RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
-            ResourceContents, ServerCapabilities, ServerInfo,
+            GetPromptRequestParams, GetPromptResult, Implementation, ListPromptsResult,
+            ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+            ReadResourceRequestParams, ReadResourceResult, ServerCapabilities, ServerInfo,
         },
         service::RequestContext,
-        tool, tool_handler, tool_router,
+        tool_handler,
     },
-    schemars::JsonSchema,
-    serde::{Deserialize, Serialize},
     std::{future::Future, sync::Arc},
 };
 
@@ -255,524 +260,9 @@ impl ArborMcp {
     pub fn with_client(daemon: Arc<dyn DaemonApi>) -> Self {
         Self {
             daemon,
-            tool_router: Self::tool_router(),
+            tool_router: Self::create_tool_router(),
         }
     }
-
-    pub fn read_resource_contents(&self, uri: &str) -> Result<ReadResourceResult, ErrorData> {
-        let text = match uri {
-            "arbor://health" => {
-                read_json_text_resource(&self.daemon.health().map_err(map_daemon_error)?)
-                    .map_err(map_daemon_error)?
-            },
-            "arbor://repositories" => {
-                read_json_text_resource(&self.daemon.list_repositories().map_err(map_daemon_error)?)
-                    .map_err(map_daemon_error)?
-            },
-            "arbor://worktrees" => read_json_text_resource(
-                &self.daemon.list_worktrees(None).map_err(map_daemon_error)?,
-            )
-            .map_err(map_daemon_error)?,
-            "arbor://processes" => {
-                read_json_text_resource(&self.daemon.list_processes().map_err(map_daemon_error)?)
-                    .map_err(map_daemon_error)?
-            },
-            "arbor://terminals" => {
-                read_json_text_resource(&self.daemon.list_terminals().map_err(map_daemon_error)?)
-                    .map_err(map_daemon_error)?
-            },
-            "arbor://agent-activity" => read_json_text_resource(
-                &self
-                    .daemon
-                    .list_agent_activity()
-                    .map_err(map_daemon_error)?,
-            )
-            .map_err(map_daemon_error)?,
-            uri => {
-                if let Some(path) = parse_worktree_changes_resource(uri) {
-                    read_json_text_resource(
-                        &self
-                            .daemon
-                            .list_changed_files(&path.display().to_string())
-                            .map_err(map_daemon_error)?,
-                    )
-                    .map_err(map_daemon_error)?
-                } else if let Some(session_id) = parse_terminal_snapshot_resource(uri) {
-                    read_json_text_resource(
-                        &self
-                            .daemon
-                            .read_terminal_output(&session_id, None)
-                            .map_err(map_daemon_error)?,
-                    )
-                    .map_err(map_daemon_error)?
-                } else {
-                    return Err(ErrorData::resource_not_found(
-                        format!("resource `{uri}` was not found"),
-                        None,
-                    ));
-                }
-            },
-        };
-
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(text, uri).with_mime_type("application/json"),
-        ]))
-    }
-
-    pub fn prompt_definitions(&self) -> Vec<Prompt> {
-        vec![
-            Prompt::new(
-                "review-worktree",
-                Some("Review the changes and runtime state for a worktree."),
-                Some(vec![required_prompt_argument(
-                    "path",
-                    "Absolute worktree path to review.",
-                )]),
-            )
-            .with_title("Review Worktree"),
-            Prompt::new(
-                "stabilize-process",
-                Some("Investigate and stabilize an Arbor-managed process."),
-                Some(vec![required_prompt_argument(
-                    "name",
-                    "Managed process name from Arbor.",
-                )]),
-            )
-            .with_title("Stabilize Process"),
-            Prompt::new(
-                "recover-terminal",
-                Some("Recover a stuck or failed daemon terminal session."),
-                Some(vec![required_prompt_argument(
-                    "session_id",
-                    "Daemon terminal session id.",
-                )]),
-            )
-            .with_title("Recover Terminal"),
-        ]
-    }
-
-    pub fn prompt_response(
-        &self,
-        request: GetPromptRequestParams,
-    ) -> Result<GetPromptResult, ErrorData> {
-        match request.name.as_str() {
-            "review-worktree" => {
-                let path = required_argument(&request, "path")?;
-                Ok(GetPromptResult::new(vec![
-                    PromptMessage::new_text(
-                        PromptMessageRole::User,
-                        format!(
-                            "Review the Arbor worktree at `{path}`. Inspect changed files, the current terminal state, and any managed processes that relate to this worktree."
-                        ),
-                    ),
-                    PromptMessage::new_text(
-                        PromptMessageRole::Assistant,
-                        "Use `list_changed_files`, `list_terminals`, `read_terminal_output`, and `list_processes`. Prefer Arbor resources like `arbor://worktrees` and `arbor://processes` for context before changing anything.",
-                    ),
-                ])
-                .with_description("Review one worktree using Arbor's daemon-backed state."))
-            },
-            "stabilize-process" => {
-                let name = required_argument(&request, "name")?;
-                Ok(GetPromptResult::new(vec![
-                    PromptMessage::new_text(
-                        PromptMessageRole::User,
-                        format!(
-                            "Investigate the Arbor-managed process `{name}` and stabilize it if needed."
-                        ),
-                    ),
-                    PromptMessage::new_text(
-                        PromptMessageRole::Assistant,
-                        "Start with `list_processes` and `arbor://processes`, then inspect linked terminals. Use `restart_process`, `start_process`, or `stop_process` only after you understand the current state.",
-                    ),
-                ])
-                .with_description("Troubleshoot one managed Arbor process."))
-            },
-            "recover-terminal" => {
-                let session_id = required_argument(&request, "session_id")?;
-                Ok(GetPromptResult::new(vec![
-                    PromptMessage::new_text(
-                        PromptMessageRole::User,
-                        format!(
-                            "Recover the Arbor terminal session `{session_id}` without losing useful context."
-                        ),
-                    ),
-                    PromptMessage::new_text(
-                        PromptMessageRole::Assistant,
-                        "Read the terminal snapshot first. Prefer `write_terminal_input`, `signal_terminal`, and `detach_terminal`; use `kill_terminal` only if the session is unrecoverable.",
-                    ),
-                ])
-                .with_description("Recover or clean up a daemon-managed terminal session."))
-            },
-            other => Err(ErrorData::invalid_params(
-                format!("prompt `{other}` is not supported"),
-                None,
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ProcessNameInput {
-    pub name: String,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct WorktreeListInput {
-    pub repo_root: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TerminalReadInput {
-    pub session_id: String,
-    pub max_lines: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TerminalWriteInput {
-    pub session_id: String,
-    pub data: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ChangesInput {
-    pub path: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TerminalTargetInput {
-    pub session_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CommitInput {
-    pub path: String,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct PushInput {
-    pub path: String,
-}
-
-#[tool_router(router = tool_router)]
-impl ArborMcp {
-    #[tool(description = "Get Arbor daemon health and version information")]
-    pub async fn health(&self) -> Result<Json<HealthResponse>, String> {
-        self.daemon.health().map(Json).map_err(string_error)
-    }
-
-    #[tool(description = "List Arbor repositories known to the daemon")]
-    pub async fn list_repositories(&self) -> Result<Json<RepositoriesOutput>, String> {
-        self.daemon
-            .list_repositories()
-            .map(|repositories| Json(RepositoriesOutput { repositories }))
-            .map_err(string_error)
-    }
-
-    #[tool(description = "List Arbor worktrees, optionally filtered by repository root")]
-    pub async fn list_worktrees(
-        &self,
-        input: Parameters<WorktreeListInput>,
-    ) -> Result<Json<WorktreesOutput>, String> {
-        let repo_root = input
-            .0
-            .repo_root
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        self.daemon
-            .list_worktrees(repo_root)
-            .map(|worktrees| Json(WorktreesOutput { worktrees }))
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Create a git worktree through Arbor's daemon API")]
-    pub async fn create_worktree(
-        &self,
-        input: Parameters<CreateWorktreeRequest>,
-    ) -> Result<Json<WorktreeMutationResponse>, String> {
-        self.daemon
-            .create_worktree(&input.0)
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Delete a non-primary git worktree through Arbor's daemon API")]
-    pub async fn delete_worktree(
-        &self,
-        input: Parameters<DeleteWorktreeRequest>,
-    ) -> Result<Json<WorktreeMutationResponse>, String> {
-        self.daemon
-            .delete_worktree(&input.0)
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "List changed files in a worktree")]
-    pub async fn list_changed_files(
-        &self,
-        input: Parameters<ChangesInput>,
-    ) -> Result<Json<ChangedFilesOutput>, String> {
-        self.daemon
-            .list_changed_files(&input.0.path)
-            .map(|files| Json(ChangedFilesOutput { files }))
-            .map_err(string_error)
-    }
-
-    #[tool(
-        description = "Create a git commit in a worktree, auto-generating a message when omitted"
-    )]
-    pub async fn commit_worktree(
-        &self,
-        input: Parameters<CommitInput>,
-    ) -> Result<Json<GitActionResponse>, String> {
-        self.daemon
-            .commit_worktree(&CommitWorktreeRequest {
-                path: input.0.path.clone(),
-                message: input.0.message.clone(),
-            })
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Push the current branch for a worktree to origin")]
-    pub async fn push_worktree(
-        &self,
-        input: Parameters<PushInput>,
-    ) -> Result<Json<GitActionResponse>, String> {
-        self.daemon
-            .push_worktree(&PushWorktreeRequest {
-                path: input.0.path.clone(),
-            })
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "List daemon-managed terminal sessions")]
-    pub async fn list_terminals(&self) -> Result<Json<TerminalsOutput>, String> {
-        self.daemon
-            .list_terminals()
-            .map(|terminals| Json(TerminalsOutput { terminals }))
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Create or attach to a daemon-managed terminal session")]
-    pub async fn create_terminal(
-        &self,
-        input: Parameters<CreateTerminalRequest>,
-    ) -> Result<Json<CreateTerminalResponse>, String> {
-        self.daemon
-            .create_terminal(&input.0)
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Read terminal output for one daemon-managed session")]
-    pub async fn read_terminal_output(
-        &self,
-        input: Parameters<TerminalReadInput>,
-    ) -> Result<Json<arbor_core::daemon::TerminalSnapshot>, String> {
-        self.daemon
-            .read_terminal_output(&input.0.session_id, input.0.max_lines)
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Write UTF-8 input bytes to a daemon-managed terminal session")]
-    pub async fn write_terminal_input(
-        &self,
-        input: Parameters<TerminalWriteInput>,
-    ) -> Result<Json<ActionStatus>, String> {
-        self.daemon
-            .write_terminal_input(&input.0.session_id, input.0.data.as_bytes())
-            .map_err(string_error)?;
-        Ok(Json(ActionStatus::ok(format!(
-            "sent input to terminal `{}`",
-            input.0.session_id
-        ))))
-    }
-
-    #[tool(description = "Resize a daemon-managed terminal session")]
-    pub async fn resize_terminal(
-        &self,
-        input: Parameters<TerminalResizeInput>,
-    ) -> Result<Json<ActionStatus>, String> {
-        self.daemon
-            .resize_terminal(&input.0.session_id, &TerminalResizeRequest {
-                cols: input.0.cols,
-                rows: input.0.rows,
-            })
-            .map_err(string_error)?;
-        Ok(Json(ActionStatus::ok(format!(
-            "resized terminal `{}` to {}x{}",
-            input.0.session_id, input.0.cols, input.0.rows
-        ))))
-    }
-
-    #[tool(description = "Send a signal to a daemon-managed terminal session")]
-    pub async fn signal_terminal(
-        &self,
-        input: Parameters<TerminalSignalInput>,
-    ) -> Result<Json<ActionStatus>, String> {
-        self.daemon
-            .signal_terminal(&input.0.session_id, &TerminalSignalRequest {
-                signal: input.0.signal.clone(),
-            })
-            .map_err(string_error)?;
-        Ok(Json(ActionStatus::ok(format!(
-            "sent {} to terminal `{}`",
-            input.0.signal, input.0.session_id
-        ))))
-    }
-
-    #[tool(description = "Detach from a daemon-managed terminal session without killing it")]
-    pub async fn detach_terminal(
-        &self,
-        input: Parameters<TerminalTargetInput>,
-    ) -> Result<Json<ActionStatus>, String> {
-        self.daemon
-            .detach_terminal(&input.0.session_id)
-            .map_err(string_error)?;
-        Ok(Json(ActionStatus::ok(format!(
-            "detached terminal `{}`",
-            input.0.session_id
-        ))))
-    }
-
-    #[tool(description = "Kill and remove a daemon-managed terminal session")]
-    pub async fn kill_terminal(
-        &self,
-        input: Parameters<TerminalTargetInput>,
-    ) -> Result<Json<ActionStatus>, String> {
-        self.daemon
-            .kill_terminal(&input.0.session_id)
-            .map_err(string_error)?;
-        Ok(Json(ActionStatus::ok(format!(
-            "killed terminal `{}`",
-            input.0.session_id
-        ))))
-    }
-
-    #[tool(description = "List current agent activity known to Arbor")]
-    pub async fn list_agent_activity(&self) -> Result<Json<AgentActivityOutput>, String> {
-        self.daemon
-            .list_agent_activity()
-            .map(|sessions| Json(AgentActivityOutput { sessions }))
-            .map_err(string_error)
-    }
-
-    #[tool(description = "List Arbor managed processes")]
-    pub async fn list_processes(&self) -> Result<Json<ProcessesOutput>, String> {
-        self.daemon
-            .list_processes()
-            .map(|processes| Json(ProcessesOutput { processes }))
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Start all Arbor managed processes configured for this daemon")]
-    pub async fn start_all_processes(&self) -> Result<Json<ProcessesOutput>, String> {
-        self.daemon
-            .start_all_processes()
-            .map(|processes| Json(ProcessesOutput { processes }))
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Stop all Arbor managed processes currently running")]
-    pub async fn stop_all_processes(&self) -> Result<Json<ProcessesOutput>, String> {
-        self.daemon
-            .stop_all_processes()
-            .map(|processes| Json(ProcessesOutput { processes }))
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Start one Arbor managed process by name")]
-    pub async fn start_process(
-        &self,
-        input: Parameters<ProcessNameInput>,
-    ) -> Result<Json<arbor_core::process::ProcessInfo>, String> {
-        self.daemon
-            .start_process(&input.0.name)
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Stop one Arbor managed process by name")]
-    pub async fn stop_process(
-        &self,
-        input: Parameters<ProcessNameInput>,
-    ) -> Result<Json<arbor_core::process::ProcessInfo>, String> {
-        self.daemon
-            .stop_process(&input.0.name)
-            .map(Json)
-            .map_err(string_error)
-    }
-
-    #[tool(description = "Restart one Arbor managed process by name")]
-    pub async fn restart_process(
-        &self,
-        input: Parameters<ProcessNameInput>,
-    ) -> Result<Json<arbor_core::process::ProcessInfo>, String> {
-        self.daemon
-            .restart_process(&input.0.name)
-            .map(Json)
-            .map_err(string_error)
-    }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TerminalResizeInput {
-    pub session_id: String,
-    pub cols: u16,
-    pub rows: u16,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TerminalSignalInput {
-    pub session_id: String,
-    pub signal: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ActionStatus {
-    pub ok: bool,
-    pub message: String,
-}
-
-impl ActionStatus {
-    fn ok(message: String) -> Self {
-        Self { ok: true, message }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RepositoriesOutput {
-    pub repositories: Vec<RepositoryDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct WorktreesOutput {
-    pub worktrees: Vec<WorktreeDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ChangedFilesOutput {
-    pub files: Vec<ChangedFileDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct TerminalsOutput {
-    pub terminals: Vec<arbor_core::daemon::DaemonSessionRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AgentActivityOutput {
-    pub sessions: Vec<AgentSessionDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ProcessesOutput {
-    pub processes: Vec<arbor_core::process::ProcessInfo>,
 }
 
 #[tool_handler]
@@ -794,46 +284,18 @@ impl ServerHandler for ArborMcp {
 
     fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
-        std::future::ready({
-            let result = ListResourcesResult {
-                resources: default_mcp_resources()
-                    .into_iter()
-                    .map(|(uri, name, description)| {
-                        RawResource::new(uri, name)
-                            .with_description(description)
-                            .with_mime_type("application/json")
-                            .no_annotation()
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            Ok(result)
-        })
+        std::future::ready(self.list_resources_result(request))
     }
 
     fn list_resource_templates(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + Send + '_ {
-        std::future::ready({
-            let result = ListResourceTemplatesResult {
-                resource_templates: default_mcp_resource_templates()
-                    .into_iter()
-                    .map(|(uri_template, name, description)| {
-                        RawResourceTemplate::new(uri_template, name)
-                            .with_description(description)
-                            .with_mime_type("application/json")
-                            .no_annotation()
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            Ok(result)
-        })
+        std::future::ready(self.list_resource_templates_result(request))
     }
 
     fn read_resource(
@@ -865,26 +327,6 @@ impl ServerHandler for ArborMcp {
     ) -> impl Future<Output = Result<GetPromptResult, ErrorData>> + Send + '_ {
         std::future::ready(self.prompt_response(request))
     }
-}
-
-fn required_prompt_argument(name: &str, description: &str) -> PromptArgument {
-    PromptArgument::new(name)
-        .with_description(description)
-        .with_required(true)
-}
-
-fn required_argument(request: &GetPromptRequestParams, name: &str) -> Result<String, ErrorData> {
-    request
-        .arguments
-        .as_ref()
-        .and_then(|arguments| arguments.get(name))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            ErrorData::invalid_params(format!("prompt argument `{name}` is required"), None)
-        })
 }
 
 fn string_error(error: DaemonClientError) -> String {
@@ -1016,8 +458,8 @@ mod tests {
 
         fn list_terminals(&self) -> Result<Vec<DaemonSessionRecord>, DaemonClientError> {
             Ok(vec![DaemonSessionRecord {
-                session_id: "daemon-1".to_owned(),
-                workspace_id: "/tmp/repo".to_owned(),
+                session_id: "daemon-1".into(),
+                workspace_id: "/tmp/repo".into(),
                 cwd: "/tmp/repo".into(),
                 shell: "/bin/zsh".to_owned(),
                 cols: 120,
@@ -1041,11 +483,11 @@ mod tests {
                     session_id: request
                         .session_id
                         .clone()
-                        .unwrap_or_else(|| "daemon-1".to_owned()),
+                        .unwrap_or_else(|| "daemon-1".into()),
                     workspace_id: request
                         .workspace_id
                         .clone()
-                        .unwrap_or_else(|| request.cwd.clone()),
+                        .unwrap_or_else(|| request.cwd.clone().into()),
                     cwd: request.cwd.clone().into(),
                     shell: request
                         .shell
@@ -1069,7 +511,7 @@ mod tests {
             _max_lines: Option<usize>,
         ) -> Result<TerminalSnapshot, DaemonClientError> {
             Ok(TerminalSnapshot {
-                session_id: session_id.to_owned(),
+                session_id: session_id.into(),
                 output_tail: "ok".to_owned(),
                 styled_lines: vec![],
                 cursor: None,

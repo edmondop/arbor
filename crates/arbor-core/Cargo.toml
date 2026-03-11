@@ -6,21 +6,23 @@ rust-version.workspace = true
 version.workspace = true
 
 [features]
+ssh = []
+mosh = ["ssh"]
 vendored-openssl = ["openssl-sys/vendored"]
 
 [dependencies]
-openssl-sys = { version = "0.9", optional = true }
+openssl-sys = { workspace = true, optional = true }
 git2 = { workspace = true }
 gix = { workspace = true }
 gix-diff = { workspace = true, features = ["blob-experimental"] }
-schemars = "1.0"
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 git2 = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

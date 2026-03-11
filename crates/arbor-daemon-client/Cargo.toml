@@ -7,7 +7,7 @@ version.workspace = true
 
 [dependencies]
 arbor-core = { path = "../arbor-core" }
-schemars = "1.0"
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

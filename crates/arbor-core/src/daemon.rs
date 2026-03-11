@@ -1,4 +1,5 @@
 use {
+    crate::id::{SessionId, WorkspaceId},
     schemars::JsonSchema,
     serde::{Deserialize, Serialize},
     std::{
@@ -13,8 +14,8 @@ const DAEMON_SESSION_STORE_RELATIVE_PATH: &str = ".arbor/daemon/sessions.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOrAttachRequest {
-    pub session_id: String,
-    pub workspace_id: String,
+    pub session_id: SessionId,
+    pub workspace_id: WorkspaceId,
     pub cwd: PathBuf,
     pub shell: String,
     pub cols: u16,
@@ -32,36 +33,36 @@ pub struct CreateOrAttachResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteRequest {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResizeRequest {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub cols: u16,
     pub rows: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalRequest {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub signal: TerminalSignal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachRequest {
-    pub session_id: String,
+    pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KillRequest {
-    pub session_id: String,
+    pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRequest {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub max_lines: usize,
 }
 
@@ -116,7 +117,7 @@ pub struct DaemonTerminalStyledLine {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalSnapshot {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub output_tail: String,
     #[serde(default)]
     pub styled_lines: Vec<DaemonTerminalStyledLine>,
@@ -132,8 +133,8 @@ pub struct TerminalSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(default)]
 pub struct DaemonSessionRecord {
-    pub session_id: String,
-    pub workspace_id: String,
+    pub session_id: SessionId,
+    pub workspace_id: WorkspaceId,
     pub cwd: PathBuf,
     pub shell: String,
     pub cols: u16,
@@ -180,9 +181,9 @@ pub trait DaemonSessionStore: Send + Sync {
         self.save(&sessions)
     }
 
-    fn remove(&self, session_id: &str) -> Result<(), DaemonSessionStoreError> {
+    fn remove(&self, session_id: &SessionId) -> Result<(), DaemonSessionStoreError> {
         let mut sessions = self.load()?;
-        sessions.retain(|session| session.session_id != session_id);
+        sessions.retain(|session| session.session_id != *session_id);
         self.save(&sessions)
     }
 }
@@ -318,8 +319,8 @@ mod tests {
         let store = JsonDaemonSessionStore::new(path.clone());
 
         let sessions = vec![DaemonSessionRecord {
-            session_id: "session-1".to_owned(),
-            workspace_id: "workspace-1".to_owned(),
+            session_id: "session-1".into(),
+            workspace_id: "workspace-1".into(),
             cwd: PathBuf::from("/tmp/workspace-1"),
             shell: "/bin/zsh".to_owned(),
             cols: 120,
@@ -345,8 +346,8 @@ mod tests {
         let store = JsonDaemonSessionStore::new(path);
 
         let session = DaemonSessionRecord {
-            session_id: "session-1".to_owned(),
-            workspace_id: "workspace-1".to_owned(),
+            session_id: "session-1".into(),
+            workspace_id: "workspace-1".into(),
             cwd: PathBuf::from("/tmp/workspace-1"),
             shell: "/bin/zsh".to_owned(),
             cols: 100,
@@ -359,7 +360,7 @@ mod tests {
             updated_at_unix_ms: Some(1_700_000_000_000),
         };
         store.upsert(session.clone())?;
-        store.remove("session-1")?;
+        store.remove(&"session-1".into())?;
 
         let loaded = store.load()?;
         assert!(loaded.is_empty());
@@ -388,7 +389,7 @@ mod tests {
 
         let loaded = store.load()?;
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].session_id, "session-1");
+        assert_eq!(loaded[0].session_id.as_str(), "session-1");
         assert!(loaded[0].title.is_none());
         assert!(loaded[0].state.is_none());
         Ok(())

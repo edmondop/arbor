@@ -186,8 +186,9 @@ impl HttpTerminalDaemon {
         request: CreateOrAttachRequest,
     ) -> Result<CreateOrAttachResponse, HttpTerminalDaemonError> {
         let payload = CreateTerminalRequest {
-            session_id: (!request.session_id.trim().is_empty()).then_some(request.session_id),
-            workspace_id: request.workspace_id,
+            session_id: (!request.session_id.as_str().trim().is_empty())
+                .then(|| request.session_id.to_string()),
+            workspace_id: request.workspace_id.to_string(),
             cwd: request.cwd.display().to_string(),
             shell: (!request.shell.trim().is_empty()).then_some(request.shell),
             cols: request.cols,
@@ -207,7 +208,7 @@ impl HttpTerminalDaemon {
     pub fn write(&self, request: WriteRequest) -> Result<(), HttpTerminalDaemonError> {
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}/write",
-            encode_path_segment(&request.session_id)
+            encode_path_segment(request.session_id.as_str())
         );
         let response = self.send_bytes("POST", &path, &request.bytes)?;
         self.expect_status(response, &[204])
@@ -220,7 +221,7 @@ impl HttpTerminalDaemon {
         };
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}/resize",
-            encode_path_segment(&request.session_id)
+            encode_path_segment(request.session_id.as_str())
         );
         let response = self.send_json("POST", &path, &payload)?;
         self.expect_status(response, &[204])
@@ -235,7 +236,7 @@ impl HttpTerminalDaemon {
         let payload = TerminalSignalRequest { signal };
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}/signal",
-            encode_path_segment(&request.session_id)
+            encode_path_segment(request.session_id.as_str())
         );
         let response = self.send_json("POST", &path, &payload)?;
         self.expect_status(response, &[204])
@@ -244,7 +245,7 @@ impl HttpTerminalDaemon {
     pub fn detach(&self, request: DetachRequest) -> Result<(), HttpTerminalDaemonError> {
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}/detach",
-            encode_path_segment(&request.session_id)
+            encode_path_segment(request.session_id.as_str())
         );
         let response = self.send_empty("POST", &path)?;
         self.expect_status(response, &[204])
@@ -253,7 +254,7 @@ impl HttpTerminalDaemon {
     pub fn kill(&self, request: KillRequest) -> Result<(), HttpTerminalDaemonError> {
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}",
-            encode_path_segment(&request.session_id)
+            encode_path_segment(request.session_id.as_str())
         );
         let response = self.send_empty("DELETE", &path)?;
         self.expect_status(response, &[204])
@@ -265,7 +266,7 @@ impl HttpTerminalDaemon {
     ) -> Result<Option<TerminalSnapshot>, HttpTerminalDaemonError> {
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}/snapshot?max_lines={}",
-            encode_path_segment(&request.session_id),
+            encode_path_segment(request.session_id.as_str()),
             request.max_lines.clamp(1, 2_000)
         );
         let response = self.send_empty("GET", &path)?;
@@ -937,7 +938,7 @@ mod tests {
         let payload = vec![0xff, 0x00, 0x1b, b'[', b'2', b'J'];
 
         if let Err(error) = daemon.write(WriteRequest {
-            session_id: "daemon-raw".to_owned(),
+            session_id: "daemon-raw".into(),
             bytes: payload.clone(),
         }) {
             panic!("write request failed: {error}");

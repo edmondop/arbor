@@ -21,12 +21,43 @@ This file defines how coding agents should behave in this repository.
 - Lint: `just lint`
 - Test: `just test`
 - Run app: `just run`
+- Run HTTP daemon: `just run-httpd`
 
 ## Rust Rules
 
-- Do not use `unwrap()` or `expect()` in non-test code.
+- Do not use `unwrap()` or `expect()` in non-test code. In test modules, allow them with `#[allow(clippy::unwrap_used, clippy::expect_used)]`.
+- Use `arbor_core::ResultExt` / `arbor_core::OptionExt` for `.context()` instead of ad-hoc `.map_err()`.
+- Use `SessionId` and `WorkspaceId` newtypes (from `arbor_core::id`) instead of raw `String`.
 - Use clear error handling with typed errors (`thiserror`/`anyhow` where appropriate).
 - Keep modules focused and delete dead code instead of leaving it around.
+
+## Code Organization
+
+- Split large files by domain. Target ~800 lines per file max.
+- Use `pub(crate)` for items shared within a crate. Apply to fields, methods, and free functions.
+- Use `pub(crate) use module::*` re-exports to keep call sites clean after splitting.
+- When extracting code to a new file, ensure all struct fields are `pub(crate)` (not private) so the parent module can access them.
+
+## Feature Flags
+
+- `arbor-gui` features: `ssh`, `mosh`, `mdns` (default: all enabled).
+- `arbor-httpd` features: `mdns` (default: enabled).
+- `arbor-core` features: `ssh`, `mosh` (propagated from GUI).
+- Gate optional modules/functions with `#[cfg(feature = "...")]`.
+- Use `dep:crate_name` syntax for optional dependency features.
+- `mosh` implies `ssh` — features are hierarchical.
+
+## Workspace Dependencies
+
+All dependency versions live in the root `Cargo.toml` `[workspace.dependencies]`. Subcrate `Cargo.toml` files use `{ workspace = true }`. Never hardcode a version in a subcrate.
+
+## Common Mistakes to Avoid
+
+- **Missing `pub(crate)` on extracted items**: When moving structs, enums, or functions from `main.rs` to submodules, every field and method that was previously accessible needs `pub(crate)`.
+- **Unused imports after extraction**: After moving code out of a file, clean up `use` statements in the source file — the compiler will flag these.
+- **Duplicate definitions**: When splitting code, ensure a function/type exists in exactly one place. Check both the source and destination files.
+- **Test module lint attributes**: Test modules need both `#[allow(clippy::unwrap_used)]` and `#[allow(clippy::expect_used)]` since the workspace denies both.
+- **Forgetting `#[cfg(feature)]` on imports**: When gating a module with a feature flag, also gate its `use` import and any code that references its types.
 
 ## Git Rules
 
@@ -43,4 +74,18 @@ This file defines how coding agents should behave in this repository.
   - `just changelog`
   - `just changelog-unreleased`
   - `just changelog-release <version>`
+
+## Project Structure
+
+| Crate | Description |
+|-------|-------------|
+| `arbor-core` | Worktree primitives, change detection, shared types (`SessionId`, `WorkspaceId`, `ResultExt`) |
+| `arbor-daemon-client` | HTTP client for talking to arbor-httpd |
+| `arbor-gui` | GPUI desktop app (`Arbor` binary) |
+| `arbor-httpd` | Remote HTTP daemon (`arbor-httpd` binary) |
+| `arbor-mcp` | MCP server for AI agent integration |
+| `arbor-mosh` | Mosh shell backend (optional) |
+| `arbor-ssh` | SSH shell backend (optional) |
+| `arbor-terminal-emulator` | Terminal emulation layer |
+| `arbor-web-ui` | TypeScript dashboard assets + helper crate |
 
