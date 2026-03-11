@@ -914,8 +914,11 @@ pub(crate) fn try_auto_start_daemon(
     let binary = find_arbor_httpd_binary()?;
     tracing::info!(path = %binary.display(), "auto-starting arbor-httpd");
 
-    let home = env::var("HOME").ok().map(PathBuf::from)?;
-    let log_dir = home.join(".arbor/daemon");
+    let home = env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .ok()
+        .map(PathBuf::from)?;
+    let log_dir = home.join(".arbor").join("daemon");
     if let Err(error) = fs::create_dir_all(&log_dir) {
         tracing::warn!(%error, "failed to create daemon log directory");
     }
@@ -988,8 +991,14 @@ pub(crate) fn try_auto_start_daemon(
 /// Search for the `arbor-httpd` binary next to the current executable,
 /// then fall back to `PATH` lookup.
 pub(crate) fn find_arbor_httpd_binary() -> Option<PathBuf> {
+    let binary_name = if cfg!(windows) {
+        "arbor-httpd.exe"
+    } else {
+        "arbor-httpd"
+    };
+
     if let Ok(exe) = env::current_exe() {
-        let sibling = exe.with_file_name("arbor-httpd");
+        let sibling = exe.with_file_name(binary_name);
         if sibling.is_file() {
             return Some(sibling);
         }
@@ -997,7 +1006,7 @@ pub(crate) fn find_arbor_httpd_binary() -> Option<PathBuf> {
 
     env::var_os("PATH").and_then(|paths| {
         env::split_paths(&paths)
-            .map(|dir| dir.join("arbor-httpd"))
+            .map(|dir| dir.join(binary_name))
             .find(|candidate| candidate.is_file())
     })
 }

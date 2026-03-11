@@ -99,10 +99,45 @@ jobs:
             libavahi-client-dev
       - run: just test
 
+  clippy-windows:
+    name: Clippy (Windows)
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+          components: clippy
+      - name: Clippy (Windows)
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} clippy --workspace --features vendored-openssl --all-targets -- -D warnings
+
+  test-windows:
+    name: Test (Windows)
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Test (Windows)
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test --workspace --features vendored-openssl
+
   build-matrix:
     name: Build (${{ matrix.name }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, clippy-windows, test-windows]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
