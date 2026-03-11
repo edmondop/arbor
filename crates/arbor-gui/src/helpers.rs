@@ -3500,11 +3500,10 @@ pub(crate) fn render_diff_row(
             .gap_2()
             .when(is_header, |this| {
                 this.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(DIFF_FONT_SIZE_PX))
-                        .text_color(rgb(DIFF_COMMENT_AUTHOR_COLOR))
-                        .child(DIFF_COMMENT_ICON),
+                    svg()
+                        .path("icons/ui/comment-muted.svg")
+                        .size(px(14.))
+                        .flex_none(),
                 )
             })
             .child(
