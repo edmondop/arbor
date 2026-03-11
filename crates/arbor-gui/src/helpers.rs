@@ -1275,6 +1275,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_open_manage_repo_presets))
             .on_action(cx.listener(Self::action_refresh_worktrees))
             .on_action(cx.listener(Self::action_refresh_changes))
+            .on_action(cx.listener(Self::action_refresh_review_comments))
             .on_action(cx.listener(Self::action_open_add_repository))
             .on_action(cx.listener(Self::action_open_create_worktree))
             .on_action(cx.listener(Self::action_use_embedded_backend))
@@ -1997,6 +1998,7 @@ pub(crate) fn build_worktree_diff_document(
             ),
             right_text: String::new(),
             kind: DiffLineKind::FileHeader,
+            comment_meta: None,
         });
 
         let file_lines = build_file_diff_lines(
@@ -2011,6 +2013,7 @@ pub(crate) fn build_worktree_diff_document(
                 left_text: "  no textual changes".to_owned(),
                 right_text: String::new(),
                 kind: DiffLineKind::Context,
+                comment_meta: None,
             });
         } else {
             lines.extend(file_lines);
@@ -2246,6 +2249,7 @@ pub(crate) fn push_collapsed_gap_line(
         left_text: format!("… {hidden_before_count} unchanged lines hidden"),
         right_text: format!("… {hidden_after_count} unchanged lines hidden"),
         kind: DiffLineKind::Context,
+        comment_meta: None,
     });
 }
 
@@ -2314,7 +2318,283 @@ pub(crate) fn push_diff_line(
             .map(|index| rope_display_line(after_rope, index))
             .unwrap_or_default(),
         kind,
+        comment_meta: None,
     });
+}
+
+/// Inject review comment rows into a diff document after the matching diff lines.
+///
+/// For each `ReviewThread`, finds the diff line with a matching line number
+/// and inserts `DiffLineKind::Comment` rows immediately after it.
+pub(crate) fn inject_review_comments(
+    lines: &mut Vec<DiffLine>,
+    file_row_indices: &mut HashMap<PathBuf, usize>,
+    threads: &[github_service::ReviewThread],
+) {
+    if threads.is_empty() {
+        return;
+    }
+
+    // Group threads by file path, then sort by line number descending so that
+    // insertions don't shift indices for earlier insertions.
+    let mut threads_by_file: HashMap<&str, Vec<&github_service::ReviewThread>> = HashMap::new();
+    for thread in threads {
+        threads_by_file
+            .entry(thread.path.as_str())
+            .or_default()
+            .push(thread);
+    }
+
+    // Sort each file's threads by line descending (so we insert from bottom up)
+    for file_threads in threads_by_file.values_mut() {
+        file_threads.sort_by(|a, b| b.line.unwrap_or(0).cmp(&a.line.unwrap_or(0)));
+    }
+
+    for (file_path, file_threads) in &threads_by_file {
+        let file_path_buf = PathBuf::from(file_path);
+
+        // Find the range of diff lines belonging to this file
+        let file_start = file_row_indices.get(&file_path_buf).copied();
+        let file_start = match file_start {
+            Some(start) => start,
+            None => continue,
+        };
+
+        for thread in file_threads {
+            let target_line = match thread.line {
+                Some(l) => l,
+                None => continue, // outdated thread with no line mapping
+            };
+
+            // Find the diff line matching this target_line on the right side
+            let insert_after = lines[file_start..]
+                .iter()
+                .enumerate()
+                .find(|(_, diff_line)| {
+                    // Match on the right line number (RIGHT side) for most comments
+                    if thread.side == github_service::DiffSide::Right {
+                        diff_line.right_line_number == Some(target_line)
+                    } else {
+                        diff_line.left_line_number == Some(target_line)
+                    }
+                })
+                .map(|(offset, _)| file_start + offset);
+
+            let insert_pos = match insert_after {
+                Some(pos) => pos + 1,
+                None => continue, // line not visible in diff
+            };
+
+            // Build comment rows for this thread (reversed because we prepend)
+            let mut comment_rows = Vec::new();
+            for comment in &thread.comments {
+                // Header row: icon + author + timestamp
+                comment_rows.push(DiffLine {
+                    left_line_number: None,
+                    right_line_number: None,
+                    left_text: format!(
+                        "{} \u{b7} {}",
+                        comment.author,
+                        format_iso_relative_time(&comment.created_at)
+                    ),
+                    right_text: String::new(),
+                    kind: DiffLineKind::Comment,
+                    comment_meta: Some(CommentMeta {
+                        author: comment.author.clone(),
+                        is_resolved: thread.is_resolved,
+                        thread_id: thread.id.clone(),
+                        comment_id: comment.id,
+                        is_header: true,
+                    }),
+                });
+
+                // Body rows: each line of the comment body becomes a row
+                for body_line in comment.body.lines() {
+                    comment_rows.push(DiffLine {
+                        left_line_number: None,
+                        right_line_number: None,
+                        left_text: format!("    {body_line}"),
+                        right_text: String::new(),
+                        kind: DiffLineKind::Comment,
+                        comment_meta: Some(CommentMeta {
+                            author: comment.author.clone(),
+                            is_resolved: thread.is_resolved,
+                            thread_id: thread.id.clone(),
+                            comment_id: comment.id,
+                            is_header: false,
+                        }),
+                    });
+                }
+            }
+
+            let row_count = comment_rows.len();
+
+            // Splice comment rows into the lines vec
+            lines.splice(insert_pos..insert_pos, comment_rows);
+
+            // Shift file_row_indices for files whose start is after insert_pos
+            for index in file_row_indices.values_mut() {
+                if *index >= insert_pos {
+                    *index += row_count;
+                }
+            }
+        }
+    }
+}
+
+/// Format an ISO 8601 timestamp as a relative time string (e.g. "2h ago", "3d ago").
+fn format_iso_relative_time(iso_timestamp: &str) -> String {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let timestamp_secs = parse_iso8601_to_unix(iso_timestamp).unwrap_or(now_secs);
+    let delta = now_secs.saturating_sub(timestamp_secs);
+
+    if delta < 60 {
+        "just now".to_owned()
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
+}
+
+fn parse_iso8601_to_unix(s: &str) -> Option<u64> {
+    // Expects "YYYY-MM-DDTHH:MM:SSZ" or similar
+    let s = s.trim().trim_end_matches('Z');
+    let (date_part, time_part) = s.split_once('T')?;
+    let mut date_iter = date_part.split('-');
+    let year: i64 = date_iter.next()?.parse().ok()?;
+    let month: u64 = date_iter.next()?.parse().ok()?;
+    let day: u64 = date_iter.next()?.parse().ok()?;
+
+    let time_part = time_part.split('+').next().unwrap_or(time_part);
+    let mut time_iter = time_part.split(':');
+    let hour: u64 = time_iter.next()?.parse().ok()?;
+    let min: u64 = time_iter.next()?.parse().ok()?;
+    let sec: u64 = time_iter
+        .next()
+        .and_then(|s| s.split('.').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    // Days from year 1970 to this year (simplified, no leap second accuracy needed)
+    let mut days: i64 = 0;
+    for y in 1970..year {
+        days += if is_leap_year(y) {
+            366
+        } else {
+            365
+        };
+    }
+
+    let month_days = [
+        31,
+        28 + i64::from(is_leap_year(year)),
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    for m in 0..(month as usize).saturating_sub(1) {
+        days += month_days.get(m).copied().unwrap_or(30);
+    }
+    days += day as i64 - 1;
+
+    Some((days as u64) * 86400 + hour * 3600 + min * 60 + sec)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Write a `.arbor/pr-comments.md` file into the worktree for AI tools to consume.
+pub(crate) fn write_pr_comments_markdown(
+    worktree_path: &Path,
+    threads: &[github_service::ReviewThread],
+    pr_number: u64,
+    pr_url: &str,
+) {
+    let arbor_dir = worktree_path.join(".arbor");
+    if let Err(e) = fs::create_dir_all(&arbor_dir) {
+        tracing::warn!(
+            "failed to create .arbor directory at {}: {e}",
+            arbor_dir.display()
+        );
+        return;
+    }
+
+    // Ensure .arbor is gitignored
+    let gitignore_path = arbor_dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        let _ = fs::write(&gitignore_path, "*\n");
+    }
+
+    let mut md = String::new();
+    md.push_str(&format!("# PR #{pr_number} Review Comments\n\n"));
+    md.push_str(&format!("Source: {pr_url}\n\n"));
+
+    // Group threads by file path
+    let mut threads_by_file: std::collections::BTreeMap<&str, Vec<&github_service::ReviewThread>> =
+        std::collections::BTreeMap::new();
+    for thread in threads {
+        threads_by_file
+            .entry(thread.path.as_str())
+            .or_default()
+            .push(thread);
+    }
+
+    for (file_path, file_threads) in &threads_by_file {
+        md.push_str(&format!("## {file_path}\n\n"));
+
+        for thread in file_threads {
+            let line_label = thread
+                .line
+                .map(|l| format!("Line {l}"))
+                .unwrap_or_else(|| "outdated".to_owned());
+            let side_label = match thread.side {
+                github_service::DiffSide::Left => "LEFT",
+                github_service::DiffSide::Right => "RIGHT",
+            };
+            let resolved_label = if thread.is_resolved {
+                " [RESOLVED]"
+            } else {
+                ""
+            };
+
+            for (i, comment) in thread.comments.iter().enumerate() {
+                if i == 0 {
+                    md.push_str(&format!(
+                        "### {line_label} ({side_label}) - @{}{resolved_label}\n",
+                        comment.author
+                    ));
+                } else {
+                    md.push_str(&format!("#### Reply - @{}\n", comment.author));
+                }
+                for body_line in comment.body.lines() {
+                    md.push_str(&format!("> {body_line}\n"));
+                }
+                md.push('\n');
+            }
+
+            md.push_str("---\n\n");
+        }
+    }
+
+    let comments_path = arbor_dir.join("pr-comments.md");
+    if let Err(e) = fs::write(&comments_path, &md) {
+        tracing::warn!("failed to write {}: {e}", comments_path.display());
+    }
 }
 
 pub(crate) fn rope_display_line(rope: &Rope, line_index: usize) -> String {
@@ -2891,6 +3171,60 @@ pub(crate) fn render_diff_row(
             );
     }
 
+    if line.kind == DiffLineKind::Comment {
+        let is_resolved = line.comment_meta.as_ref().is_some_and(|m| m.is_resolved);
+        let is_header = line.comment_meta.as_ref().is_some_and(|m| m.is_header);
+        let bg = if is_resolved {
+            DIFF_COMMENT_RESOLVED_BG
+        } else {
+            DIFF_COMMENT_BG
+        };
+        let text_color = if is_resolved {
+            DIFF_COMMENT_RESOLVED_TEXT_COLOR
+        } else {
+            DIFF_COMMENT_TEXT_COLOR
+        };
+
+        return div()
+            .id(diff_row_element_id(
+                "diff-row-comment",
+                session_id,
+                row_index,
+            ))
+            .w_full()
+            .h(px(DIFF_ROW_HEIGHT_PX))
+            .min_h(px(DIFF_ROW_HEIGHT_PX))
+            .bg(rgb(bg))
+            .px_4()
+            .flex()
+            .items_center()
+            .gap_2()
+            .when(is_header, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(DIFF_FONT_SIZE_PX))
+                        .text_color(rgb(DIFF_COMMENT_AUTHOR_COLOR))
+                        .child(DIFF_COMMENT_ICON),
+                )
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .font(mono_font)
+                    .text_size(px(DIFF_FONT_SIZE_PX))
+                    .whitespace_nowrap()
+                    .text_color(rgb(if is_header {
+                        DIFF_COMMENT_AUTHOR_COLOR
+                    } else {
+                        text_color
+                    }))
+                    .when(is_resolved, |this| this.italic())
+                    .child(line.left_text),
+            );
+    }
+
     let (left_bg, right_bg) = diff_line_backgrounds(line.kind, theme);
     let (left_marker, right_marker) = diff_line_markers(line.kind);
     let (left_text_color, right_text_color) = diff_line_text_colors(line.kind, theme);
@@ -3185,13 +3519,14 @@ pub(crate) fn zonemap_marker_color(kind: DiffLineKind) -> Option<u32> {
         DiffLineKind::Added => Some(0x72d69c),
         DiffLineKind::Removed => Some(0xeb6f92),
         DiffLineKind::Modified => Some(0xf9e2af),
-        DiffLineKind::Context => None,
+        DiffLineKind::Context | DiffLineKind::Comment => None,
     }
 }
 
 pub(crate) fn diff_line_backgrounds(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) {
     match kind {
         DiffLineKind::FileHeader => (theme.tab_active_bg, theme.tab_active_bg),
+        DiffLineKind::Comment => (DIFF_COMMENT_BG, DIFF_COMMENT_BG),
         DiffLineKind::Context
         | DiffLineKind::Added
         | DiffLineKind::Removed
@@ -3206,12 +3541,13 @@ pub(crate) fn diff_line_text_colors(kind: DiffLineKind, theme: ThemePalette) -> 
         DiffLineKind::Added => (theme.text_disabled, 0x8fd7ad),
         DiffLineKind::Removed => (0xf2a4b7, theme.text_disabled),
         DiffLineKind::Modified => (0xf2a4b7, 0x8fd7ad),
+        DiffLineKind::Comment => (DIFF_COMMENT_TEXT_COLOR, DIFF_COMMENT_TEXT_COLOR),
     }
 }
 
 pub(crate) fn diff_line_markers(kind: DiffLineKind) -> (char, char) {
     match kind {
-        DiffLineKind::FileHeader => (' ', ' '),
+        DiffLineKind::FileHeader | DiffLineKind::Comment => (' ', ' '),
         DiffLineKind::Context => (' ', ' '),
         DiffLineKind::Added => (' ', '+'),
         DiffLineKind::Removed => ('-', ' '),
@@ -3254,15 +3590,21 @@ pub(crate) fn wrap_diff_document_lines(
 
 pub(crate) fn wrap_diff_line(line: DiffLine, wrap_columns: usize) -> Vec<DiffLine> {
     let wrap_columns = wrap_columns.max(1);
-    if line.kind == DiffLineKind::FileHeader {
+    if line.kind == DiffLineKind::FileHeader || line.kind == DiffLineKind::Comment {
         return split_diff_text_chunks(line.left_text, wrap_columns.saturating_mul(2))
             .into_iter()
-            .map(|chunk| DiffLine {
+            .enumerate()
+            .map(|(i, chunk)| DiffLine {
                 left_line_number: None,
                 right_line_number: None,
                 left_text: chunk,
                 right_text: String::new(),
-                kind: DiffLineKind::FileHeader,
+                kind: line.kind,
+                comment_meta: if i == 0 {
+                    line.comment_meta.clone()
+                } else {
+                    None
+                },
             })
             .collect();
     }
@@ -3279,6 +3621,7 @@ pub(crate) fn wrap_diff_line(line: DiffLine, wrap_columns: usize) -> Vec<DiffLin
             left_text: left_chunks.get(index).cloned().unwrap_or_default(),
             right_text: right_chunks.get(index).cloned().unwrap_or_default(),
             kind: line.kind,
+            comment_meta: None,
         });
     }
 

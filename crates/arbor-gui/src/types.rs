@@ -373,6 +373,19 @@ pub(crate) enum DiffLineKind {
     Added,
     Removed,
     Modified,
+    Comment,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommentMeta {
+    #[allow(dead_code)]
+    pub(crate) author: String,
+    pub(crate) is_resolved: bool,
+    #[allow(dead_code)]
+    pub(crate) thread_id: String,
+    #[allow(dead_code)]
+    pub(crate) comment_id: u64,
+    pub(crate) is_header: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -382,6 +395,7 @@ pub(crate) struct DiffLine {
     pub(crate) left_text: String,
     pub(crate) right_text: String,
     pub(crate) kind: DiffLineKind,
+    pub(crate) comment_meta: Option<CommentMeta>,
 }
 
 #[derive(Debug, Clone)]

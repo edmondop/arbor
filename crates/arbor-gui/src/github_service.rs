@@ -6,6 +6,85 @@ use {
     },
 };
 
+// ---------------------------------------------------------------------------
+// Review comment types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewComment {
+    pub id: u64,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    #[allow(dead_code)]
+    pub outdated: bool,
+    #[allow(dead_code)]
+    pub path: String,
+    #[allow(dead_code)]
+    pub line: Option<usize>,
+    #[allow(dead_code)]
+    pub start_line: Option<usize>,
+    #[allow(dead_code)]
+    pub side: DiffSide,
+    #[allow(dead_code)]
+    pub in_reply_to: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewThread {
+    pub id: String,
+    pub path: String,
+    pub line: Option<usize>,
+    #[allow(dead_code)]
+    pub start_line: Option<usize>,
+    pub side: DiffSide,
+    pub is_resolved: bool,
+    #[allow(dead_code)]
+    pub is_outdated: bool,
+    pub comments: Vec<ReviewComment>,
+}
+
+// ---------------------------------------------------------------------------
+// GitHubReviewService trait
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub trait GitHubReviewService: Send + Sync {
+    /// Fetch all review threads for a PR.
+    fn fetch_review_threads(
+        &self,
+        repo_slug: &str,
+        pr_number: u64,
+    ) -> Result<Vec<ReviewThread>, String>;
+
+    /// Post a new inline comment on a PR.
+    fn post_review_comment(
+        &self,
+        repo_slug: &str,
+        pr_number: u64,
+        path: &str,
+        line: usize,
+        side: DiffSide,
+        body: &str,
+        commit_sha: &str,
+    ) -> Result<ReviewComment, String>;
+
+    /// Reply to an existing comment thread.
+    fn reply_to_thread(
+        &self,
+        repo_slug: &str,
+        pr_number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<ReviewComment, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrState {
     Open,
@@ -269,6 +348,366 @@ impl GitHubService for OctocrabGitHubService {
 
 pub fn default_github_service() -> Arc<dyn GitHubService> {
     Arc::new(OctocrabGitHubService)
+}
+
+// ---------------------------------------------------------------------------
+// GhCliReviewService — uses `gh api graphql` / `gh api` REST
+// ---------------------------------------------------------------------------
+
+pub struct GhCliReviewService;
+
+impl GhCliReviewService {
+    fn split_slug(repo_slug: &str) -> Result<(&str, &str), String> {
+        repo_slug
+            .split_once('/')
+            .ok_or_else(|| format!("invalid repository slug: {repo_slug}"))
+    }
+}
+
+// Serde types for GraphQL response -----------------------------------------
+
+#[derive(Deserialize)]
+struct GqlResponse {
+    data: Option<GqlData>,
+    errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize)]
+struct GqlError {
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct GqlData {
+    repository: Option<GqlRepository>,
+}
+
+#[derive(Deserialize)]
+struct GqlRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<GqlPullRequest>,
+}
+
+#[derive(Deserialize)]
+struct GqlPullRequest {
+    #[serde(rename = "reviewThreads")]
+    review_threads: GqlReviewThreadConnection,
+}
+
+#[derive(Deserialize)]
+struct GqlReviewThreadConnection {
+    nodes: Vec<GqlReviewThread>,
+}
+
+#[derive(Deserialize)]
+struct GqlReviewThread {
+    id: String,
+    #[serde(rename = "isResolved")]
+    is_resolved: bool,
+    #[serde(rename = "isOutdated")]
+    is_outdated: bool,
+    path: String,
+    line: Option<usize>,
+    #[serde(rename = "startLine")]
+    start_line: Option<usize>,
+    #[serde(rename = "diffSide")]
+    diff_side: Option<String>,
+    comments: GqlCommentConnection,
+}
+
+#[derive(Deserialize)]
+struct GqlCommentConnection {
+    nodes: Vec<GqlComment>,
+}
+
+#[derive(Deserialize)]
+struct GqlComment {
+    #[serde(rename = "databaseId")]
+    database_id: Option<u64>,
+    body: String,
+    author: Option<GqlAuthor>,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    outdated: bool,
+    path: String,
+    line: Option<usize>,
+    #[serde(rename = "startLine")]
+    start_line: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct GqlAuthor {
+    login: String,
+}
+
+// REST response for posting a comment ---------------------------------------
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct RestCommentResponse {
+    id: u64,
+    body: String,
+    path: String,
+    line: Option<usize>,
+    #[serde(rename = "start_line")]
+    start_line: Option<usize>,
+    side: Option<String>,
+    user: Option<RestUser>,
+    created_at: String,
+    #[serde(rename = "in_reply_to_id")]
+    in_reply_to_id: Option<u64>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct RestUser {
+    login: String,
+}
+
+fn parse_diff_side(raw: Option<&str>) -> DiffSide {
+    match raw {
+        Some("LEFT") => DiffSide::Left,
+        _ => DiffSide::Right,
+    }
+}
+
+impl GitHubReviewService for GhCliReviewService {
+    fn fetch_review_threads(
+        &self,
+        repo_slug: &str,
+        pr_number: u64,
+    ) -> Result<Vec<ReviewThread>, String> {
+        let (owner, repo) = Self::split_slug(repo_slug)?;
+
+        let query = r#"
+query($owner: String!, $repo: String!, $pr: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          startLine
+          diffSide
+          comments(first: 50) {
+            nodes {
+              databaseId
+              body
+              author { login }
+              createdAt
+              outdated
+              path
+              line
+              startLine
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+        let variables = format!(
+            r#"{{"owner":"{}","repo":"{}","pr":{}}}"#,
+            owner, repo, pr_number
+        );
+
+        let output = Command::new("gh")
+            .args([
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={query}"),
+                "-f",
+                &format!("variables={variables}"),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to run `gh api graphql`: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("gh api graphql failed: {stderr}"));
+        }
+
+        let response: GqlResponse = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("failed to parse GraphQL response: {e}"))?;
+
+        if let Some(errors) = response.errors {
+            let msgs: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+            return Err(format!("GraphQL errors: {}", msgs.join(", ")));
+        }
+
+        let threads = response
+            .data
+            .and_then(|d| d.repository)
+            .and_then(|r| r.pull_request)
+            .map(|pr| pr.review_threads.nodes)
+            .unwrap_or_default();
+
+        Ok(threads
+            .into_iter()
+            .map(|thread| {
+                let side = parse_diff_side(thread.diff_side.as_deref());
+                let first_comment_id = thread
+                    .comments
+                    .nodes
+                    .first()
+                    .and_then(|first| first.database_id);
+                let comments = thread
+                    .comments
+                    .nodes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, c)| ReviewComment {
+                        id: c.database_id.unwrap_or(0),
+                        author: c
+                            .author
+                            .map(|a| a.login)
+                            .unwrap_or_else(|| "ghost".to_owned()),
+                        body: c.body,
+                        created_at: c.created_at,
+                        outdated: c.outdated,
+                        path: c.path,
+                        line: c.line,
+                        start_line: c.start_line,
+                        side,
+                        in_reply_to: if i > 0 {
+                            first_comment_id
+                        } else {
+                            None
+                        },
+                    })
+                    .collect::<Vec<_>>();
+
+                ReviewThread {
+                    id: thread.id,
+                    path: thread.path,
+                    line: thread.line,
+                    start_line: thread.start_line,
+                    side,
+                    is_resolved: thread.is_resolved,
+                    is_outdated: thread.is_outdated,
+                    comments,
+                }
+            })
+            .collect())
+    }
+
+    fn post_review_comment(
+        &self,
+        repo_slug: &str,
+        pr_number: u64,
+        path: &str,
+        line: usize,
+        side: DiffSide,
+        body: &str,
+        commit_sha: &str,
+    ) -> Result<ReviewComment, String> {
+        let side_str = match side {
+            DiffSide::Left => "LEFT",
+            DiffSide::Right => "RIGHT",
+        };
+
+        let endpoint = format!("repos/{repo_slug}/pulls/{pr_number}/comments");
+
+        let output = Command::new("gh")
+            .args([
+                "api",
+                &endpoint,
+                "-f",
+                &format!("body={body}"),
+                "-f",
+                &format!("commit_id={commit_sha}"),
+                "-f",
+                &format!("path={path}"),
+                "-F",
+                &format!("line={line}"),
+                "-f",
+                &format!("side={side_str}"),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to run `gh api`: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("gh api POST failed: {stderr}"));
+        }
+
+        let resp: RestCommentResponse = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("failed to parse comment response: {e}"))?;
+
+        Ok(ReviewComment {
+            id: resp.id,
+            author: resp
+                .user
+                .map(|u| u.login)
+                .unwrap_or_else(|| "ghost".to_owned()),
+            body: resp.body,
+            created_at: resp.created_at,
+            outdated: false,
+            path: resp.path,
+            line: resp.line,
+            start_line: resp.start_line,
+            side: parse_diff_side(resp.side.as_deref()),
+            in_reply_to: resp.in_reply_to_id,
+        })
+    }
+
+    fn reply_to_thread(
+        &self,
+        repo_slug: &str,
+        pr_number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<ReviewComment, String> {
+        let endpoint = format!("repos/{repo_slug}/pulls/{pr_number}/comments/{comment_id}/replies");
+
+        let output = Command::new("gh")
+            .args(["api", &endpoint, "-f", &format!("body={body}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to run `gh api`: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("gh api POST reply failed: {stderr}"));
+        }
+
+        let resp: RestCommentResponse = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("failed to parse reply response: {e}"))?;
+
+        Ok(ReviewComment {
+            id: resp.id,
+            author: resp
+                .user
+                .map(|u| u.login)
+                .unwrap_or_else(|| "ghost".to_owned()),
+            body: resp.body,
+            created_at: resp.created_at,
+            outdated: false,
+            path: resp.path,
+            line: resp.line,
+            start_line: resp.start_line,
+            side: parse_diff_side(resp.side.as_deref()),
+            in_reply_to: resp.in_reply_to_id,
+        })
+    }
+}
+
+pub fn default_review_service() -> Arc<dyn GitHubReviewService> {
+    Arc::new(GhCliReviewService)
 }
 
 pub fn github_access_token_from_gh_cli() -> Option<String> {

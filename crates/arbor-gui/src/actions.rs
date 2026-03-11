@@ -24,7 +24,8 @@ actions!(arbor, [
     OpenThemePicker,
     OpenSettings,
     OpenManageHosts,
-    ConnectToHost
+    ConnectToHost,
+    RefreshReviewComments
 ]);
 
 #[derive(Clone, PartialEq, Debug, gpui::Action)]

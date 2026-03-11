@@ -159,6 +159,9 @@ struct ArborWindow {
     ui_state_store: Box<dyn ui_state_store::UiStateStore>,
     github_auth_store: Box<dyn github_auth_store::GithubAuthStore>,
     github_service: Arc<dyn github_service::GitHubService>,
+    review_service: Arc<dyn github_service::GitHubReviewService>,
+    review_threads: HashMap<PathBuf, Vec<github_service::ReviewThread>>,
+    review_threads_loading: bool,
     github_auth_state: github_auth_store::GithubAuthState,
     github_auth_in_progress: bool,
     github_auth_copy_feedback_active: bool,
@@ -308,6 +311,7 @@ impl ArborWindow {
         let ui_state_store = ui_state_store::default_ui_state_store();
         let github_auth_store = github_auth_store::default_github_auth_store();
         let github_service = github_service::default_github_service();
+        let review_service = github_service::default_review_service();
         let notification_service = notifications::default_notification_service();
         let loaded_github_auth_state = github_auth_store.load();
         let config_path = app_config_store.config_path();
@@ -396,6 +400,9 @@ impl ArborWindow {
                     ui_state_store,
                     github_auth_store,
                     github_service,
+                    review_service: review_service.clone(),
+                    review_threads: HashMap::new(),
+                    review_threads_loading: false,
                     github_auth_state,
                     github_auth_in_progress: false,
                     github_auth_copy_feedback_active: false,
@@ -711,6 +718,9 @@ impl ArborWindow {
             ui_state_store,
             github_auth_store,
             github_service,
+            review_service,
+            review_threads: HashMap::new(),
+            review_threads_loading: false,
             github_auth_state,
             github_auth_in_progress: false,
             github_auth_copy_feedback_active: false,
@@ -2132,10 +2142,122 @@ impl ArborWindow {
 
                 if changed {
                     cx.notify();
+                    // Auto-fetch review comments for the active worktree after PR refresh
+                    this.refresh_review_threads_for_worktree(cx);
                 }
             });
         })
         .detach();
+    }
+
+    fn refresh_review_threads_for_worktree(&mut self, cx: &mut Context<Self>) {
+        if self.review_threads_loading {
+            return;
+        }
+
+        let worktree = match self.active_worktree() {
+            Some(w) => w,
+            None => return,
+        };
+
+        let pr_number = match worktree.pr_number {
+            Some(n) => n,
+            None => return,
+        };
+
+        let repo_slug = match self.github_repo_slug.clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let worktree_path = worktree.path.clone();
+        let pr_url = worktree
+            .pr_url
+            .clone()
+            .unwrap_or_else(|| format!("https://github.com/{repo_slug}/pull/{pr_number}"));
+        let review_service = self.review_service.clone();
+
+        self.review_threads_loading = true;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    review_service.fetch_review_threads(&repo_slug, pr_number)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.review_threads_loading = false;
+
+                match result {
+                    Ok(threads) => {
+                        // Write markdown export
+                        write_pr_comments_markdown(&worktree_path, &threads, pr_number, &pr_url);
+
+                        this.review_threads.insert(worktree_path.clone(), threads);
+
+                        // Re-inject comments into any open diff session for this worktree
+                        this.rebuild_diff_sessions_for_worktree(&worktree_path, cx);
+                    },
+                    Err(error) => {
+                        tracing::warn!(
+                            "failed to fetch review threads for PR #{pr_number}: {error}"
+                        );
+                    },
+                }
+
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn rebuild_diff_sessions_for_worktree(&mut self, worktree_path: &Path, cx: &mut Context<Self>) {
+        let sessions_to_rebuild: Vec<u64> = self
+            .diff_sessions
+            .iter()
+            .filter(|s| s.worktree_path == worktree_path && !s.is_loading)
+            .map(|s| s.id)
+            .collect();
+
+        for session_id in sessions_to_rebuild {
+            let Some(session) = self.diff_sessions.iter_mut().find(|s| s.id == session_id) else {
+                continue;
+            };
+
+            // Re-build from raw_lines with comment injection
+            let mut lines: Vec<DiffLine> = session.raw_lines.to_vec();
+            let mut file_row_indices = session.raw_file_row_indices.clone();
+
+            // Strip any existing comment rows from raw_lines (they shouldn't be there,
+            // but be defensive)
+            lines.retain(|l| l.kind != DiffLineKind::Comment);
+
+            if let Some(threads) = self.review_threads.get(worktree_path) {
+                inject_review_comments(&mut lines, &mut file_row_indices, threads);
+            }
+
+            let cell_width = diff_cell_width_px(cx);
+            let wrap_columns = self
+                .live_diff_list_width_px()
+                .map(|list_width| {
+                    self.estimated_diff_wrap_columns_for_list_width(list_width, cell_width)
+                })
+                .unwrap_or_else(|| self.estimated_diff_wrap_columns(cell_width));
+
+            let raw_lines = Arc::<[DiffLine]>::from(lines);
+            let (wrapped_lines, wrapped_indices) =
+                wrap_diff_document_lines(raw_lines.as_ref(), &file_row_indices, wrap_columns);
+
+            // Re-borrow the session mutably after self methods
+            let Some(session) = self.diff_sessions.iter_mut().find(|s| s.id == session_id) else {
+                continue;
+            };
+            session.raw_lines = raw_lines;
+            session.raw_file_row_indices = file_row_indices;
+            session.lines = Arc::<[DiffLine]>::from(wrapped_lines);
+            session.file_row_indices = wrapped_indices;
+            session.wrapped_columns = wrap_columns;
+        }
     }
 
     fn selected_worktree_path(&self) -> Option<&Path> {
@@ -6217,6 +6339,15 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn action_refresh_review_comments(
+        &mut self,
+        _: &RefreshReviewComments,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_review_threads_for_worktree(cx);
+    }
+
     fn action_use_embedded_backend(
         &mut self,
         _: &UseEmbeddedBackend,
@@ -7100,7 +7231,13 @@ impl ArborWindow {
                 };
 
                 match diff_document {
-                    Ok((lines, file_row_indices)) => {
+                    Ok((mut lines, mut file_row_indices)) => {
+                        // Inject review comments if available for this worktree
+                        let worktree_path_key = session.worktree_path.clone();
+                        if let Some(threads) = this.review_threads.get(&worktree_path_key) {
+                            inject_review_comments(&mut lines, &mut file_row_indices, threads);
+                        }
+
                         let raw_lines = Arc::<[DiffLine]>::from(lines);
                         let raw_file_row_indices = file_row_indices;
                         let (wrapped_lines, wrapped_indices) = wrap_diff_document_lines(
@@ -7128,6 +7265,7 @@ impl ArborWindow {
                             left_text: format!("failed to build diff: {error}"),
                             right_text: String::new(),
                             kind: DiffLineKind::FileHeader,
+                            comment_meta: None,
                         }]);
                         let fallback_indices = HashMap::new();
                         let (wrapped_lines, wrapped_indices) = wrap_diff_document_lines(
