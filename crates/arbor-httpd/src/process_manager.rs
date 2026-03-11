@@ -277,6 +277,13 @@ impl ProcessManager {
         D: TerminalDaemon,
         D::Error: ToString,
     {
+        // Load sessions once instead of per-process to avoid O(N) disk reads
+        // and repeated cloning of output_tail buffers.
+        let sessions = match daemon.list_sessions() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
         let mut restart_schedule: Vec<(String, Duration)> = Vec::new();
 
         let names: Vec<String> = self.processes.keys().cloned().collect();
@@ -292,12 +299,6 @@ impl ProcessManager {
 
             let Some(ref session_id) = process.session_id else {
                 continue;
-            };
-
-            // Check session state from daemon
-            let sessions = match daemon.list_sessions() {
-                Ok(s) => s,
-                Err(_) => continue,
             };
 
             let session = sessions

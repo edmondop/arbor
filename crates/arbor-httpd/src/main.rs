@@ -75,10 +75,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
         let env_filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let broadcast_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
         let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
         let broadcast_layer = BroadcastLogLayer {
             sender: log_broadcast.clone(),
-        };
+        }
+        .with_filter(broadcast_filter);
         tracing_subscriber::registry()
             .with(fmt_layer)
             .with(broadcast_layer)
@@ -151,11 +154,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+            let mut ticks_since_reap: u32 = 0;
             loop {
                 interval.tick().await;
                 let restart_schedule = {
                     let mut pm = state.process_manager.lock().await;
                     let mut daemon = state.daemon.lock().await;
+
+                    // Periodically reap exited terminal sessions to free memory
+                    // (~23 MB per dead session from scrollback buffers).
+                    ticks_since_reap += 1;
+                    if ticks_since_reap >= 30 {
+                        // Every ~60 seconds
+                        daemon.reap_exited_sessions();
+                        ticks_since_reap = 0;
+                    }
+
                     pm.check_and_update(&mut *daemon)
                 };
                 for (name, delay) in restart_schedule {
@@ -164,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tokio::time::sleep(delay).await;
                         let mut pm = state.process_manager.lock().await;
                         let mut daemon = state.daemon.lock().await;
-                        let _ = pm.start_process(&name, &mut *daemon);
+                        let _ = pm.restart_process(&name, &mut *daemon);
                     });
                 }
             }
