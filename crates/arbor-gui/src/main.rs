@@ -133,6 +133,9 @@ const TAB_ICON_FILE: &str = "\u{f15c}";
 const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
 const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
 const GIT_ACTION_ICON_PR: &str = "\u{f126}";
+const COMMAND_PALETTE_MAX_HEIGHT_PX: f32 = 360.;
+const COMMAND_PALETTE_ROW_ESTIMATE_PX: f32 = 52.;
+const COMMAND_PALETTE_SCROLLBAR_TRACK_HEIGHT_PX: f32 = 336.;
 const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 const THEME_TOAST_DURATION: Duration = Duration::from_millis(1600);
 const WORKTREE_HOVER_POPOVER_HIDE_DELAY: Duration = Duration::from_millis(300);
@@ -1763,6 +1766,7 @@ struct ArborWindow {
     manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
     show_about: bool,
     show_theme_picker: bool,
+    theme_picker_selected_index: usize,
     settings_modal: Option<SettingsModal>,
     daemon_auth_modal: Option<DaemonAuthModal>,
     /// When set, a successful auth submission should retry fetching for this remote daemon index.
@@ -1770,6 +1774,7 @@ struct ArborWindow {
     start_daemon_modal: bool,
     connect_to_host_modal: Option<ConnectToHostModal>,
     command_palette_modal: Option<CommandPaletteModal>,
+    command_palette_scroll_handle: ScrollHandle,
     connection_history: Vec<connection_history::ConnectionHistoryEntry>,
     daemon_auth_tokens: HashMap<String, String>,
     connected_daemon_label: Option<String>,
@@ -2026,12 +2031,14 @@ impl ArborWindow {
                     manage_repo_presets_modal: None,
                     show_about: false,
                     show_theme_picker: false,
+                    theme_picker_selected_index: theme_picker_index_for_kind(theme_kind),
                     settings_modal: None,
                     daemon_auth_modal: None,
                     pending_remote_daemon_auth: None,
                     start_daemon_modal: false,
                     connect_to_host_modal: None,
                     command_palette_modal: None,
+                    command_palette_scroll_handle: ScrollHandle::new(),
                     connection_history: connection_history::load_history(),
                     daemon_auth_tokens: connection_history::load_tokens(),
                     connected_daemon_label: None,
@@ -2344,12 +2351,14 @@ impl ArborWindow {
             manage_repo_presets_modal: None,
             show_about: false,
             show_theme_picker: false,
+            theme_picker_selected_index: theme_picker_index_for_kind(theme_kind),
             settings_modal: None,
             daemon_auth_modal: None,
             pending_remote_daemon_auth: None,
             start_daemon_modal: false,
             connect_to_host_modal: None,
             command_palette_modal: None,
+            command_palette_scroll_handle: ScrollHandle::new(),
             connection_history: connection_history::load_history(),
             daemon_auth_tokens: connection_history::load_tokens(),
             connected_daemon_label: None,
@@ -6118,6 +6127,7 @@ impl ArborWindow {
         }
 
         self.theme_kind = theme_kind;
+        self.theme_picker_selected_index = theme_picker_index_for_kind(theme_kind);
         if let Err(error) = self
             .app_config_store
             .save_scalar_settings(&[("theme", Some(theme_kind.slug()))])
@@ -6146,6 +6156,29 @@ impl ArborWindow {
             });
         })
         .detach();
+    }
+
+    fn open_theme_picker_modal(&mut self, cx: &mut Context<Self>) {
+        self.show_theme_picker = true;
+        self.theme_picker_selected_index = theme_picker_index_for_kind(self.theme_kind);
+        cx.notify();
+    }
+
+    fn move_theme_picker_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = ThemeKind::ALL.len();
+        if len == 0 {
+            return;
+        }
+        let current = self.theme_picker_selected_index.min(len - 1) as isize;
+        self.theme_picker_selected_index = (current + delta).rem_euclid(len as isize) as usize;
+        cx.notify();
+    }
+
+    fn apply_selected_theme_picker_theme(&mut self, cx: &mut Context<Self>) {
+        let Some(&kind) = ThemeKind::ALL.get(self.theme_picker_selected_index) else {
+            return;
+        };
+        self.switch_theme(kind, cx);
     }
 
     fn open_create_modal(
@@ -7417,11 +7450,71 @@ impl ArborWindow {
             return;
         }
 
-        if self.show_theme_picker {
-            if event.keystroke.key.as_str() == "escape" {
-                self.show_theme_picker = false;
-                cx.stop_propagation();
+        if self.command_palette_modal.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_command_palette(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.execute_command_palette_selection(window, cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "up" => {
+                    self.move_command_palette_selection(-1, cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "down" => {
+                    self.move_command_palette_selection(1, cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+
+            if let Some(action) = text_edit_action_for_event(event, cx) {
+                if let Some(modal) = self.command_palette_modal.as_mut() {
+                    apply_text_edit_action(&mut modal.query, &mut modal.query_cursor, &action);
+                    modal.selected_index = 0;
+                }
+                self.command_palette_scroll_handle.scroll_to_item(0);
                 cx.notify();
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        if self.show_theme_picker {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.show_theme_picker = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                },
+                "left" => {
+                    self.move_theme_picker_selection(-1, cx);
+                    cx.stop_propagation();
+                },
+                "right" => {
+                    self.move_theme_picker_selection(1, cx);
+                    cx.stop_propagation();
+                },
+                "up" => {
+                    self.move_theme_picker_selection(-(theme_picker_columns() as isize), cx);
+                    cx.stop_propagation();
+                },
+                "down" => {
+                    self.move_theme_picker_selection(theme_picker_columns() as isize, cx);
+                    cx.stop_propagation();
+                },
+                "enter" | "return" => {
+                    self.apply_selected_theme_picker_theme(cx);
+                    cx.stop_propagation();
+                },
+                _ => {},
             }
             return;
         }
@@ -7582,42 +7675,6 @@ impl ArborWindow {
                 if let Some(modal) = self.commit_modal.as_mut() {
                     apply_text_edit_action(&mut modal.message, &mut modal.message_cursor, &action);
                     modal.error = None;
-                }
-                cx.notify();
-                cx.stop_propagation();
-            }
-            return;
-        }
-
-        if self.command_palette_modal.is_some() {
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    self.close_command_palette(cx);
-                    cx.stop_propagation();
-                    return;
-                },
-                "enter" | "return" => {
-                    self.execute_command_palette_selection(window, cx);
-                    cx.stop_propagation();
-                    return;
-                },
-                "up" => {
-                    self.move_command_palette_selection(-1, cx);
-                    cx.stop_propagation();
-                    return;
-                },
-                "down" => {
-                    self.move_command_palette_selection(1, cx);
-                    cx.stop_propagation();
-                    return;
-                },
-                _ => {},
-            }
-
-            if let Some(action) = text_edit_action_for_event(event, cx) {
-                if let Some(modal) = self.command_palette_modal.as_mut() {
-                    apply_text_edit_action(&mut modal.query, &mut modal.query_cursor, &action);
-                    modal.selected_index = 0;
                 }
                 cx.notify();
                 cx.stop_propagation();
@@ -7904,6 +7961,7 @@ impl ArborWindow {
             query_cursor: 0,
             selected_index: 0,
         });
+        self.command_palette_scroll_handle.scroll_to_item(0);
         cx.notify();
     }
 
@@ -8056,6 +8114,7 @@ impl ArborWindow {
         let current = modal.selected_index.min(item_count - 1) as isize;
         let next = (current + delta).rem_euclid(item_count as isize) as usize;
         modal.selected_index = next;
+        self.command_palette_scroll_handle.scroll_to_item(next);
         cx.notify();
     }
 
@@ -8078,7 +8137,7 @@ impl ArborWindow {
             },
             CommandPaletteAction::RefreshWorktrees => self.refresh_worktrees(cx),
             CommandPaletteAction::OpenSettings => self.open_settings_modal(cx),
-            CommandPaletteAction::OpenThemePicker => self.show_theme_picker = true,
+            CommandPaletteAction::OpenThemePicker => self.open_theme_picker_modal(cx),
             CommandPaletteAction::LaunchAgentPreset(preset) => {
                 self.launch_agent_preset(preset, window, cx);
             },
@@ -8408,8 +8467,7 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_theme_picker = true;
-        cx.notify();
+        self.open_theme_picker_modal(cx);
     }
 
     fn action_open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
@@ -9480,6 +9538,17 @@ impl ArborWindow {
             // The quit overlay is modal — suppress terminal input entirely so
             // the key event propagates up to handle_global_key_down which
             // handles Enter/Escape for the overlay.
+            return;
+        }
+
+        if self.command_palette_modal.is_some() {
+            if event.keystroke.key.as_str() == "escape" {
+                self.close_command_palette(cx);
+                cx.stop_propagation();
+                return;
+            }
+            // Keep all other keys out of the terminal while the palette is open
+            // so they continue to route through the global modal handler.
             return;
         }
 
@@ -15799,11 +15868,85 @@ impl ArborWindow {
         };
         let theme = self.theme();
         let items = self.filtered_command_palette_items();
+        let item_count = items.len();
         let selected_index = if items.is_empty() {
             0
         } else {
             modal.selected_index.min(items.len() - 1)
         };
+        let mut list = div()
+            .id("command-palette-results")
+            .w_full()
+            .max_h(px(COMMAND_PALETTE_MAX_HEIGHT_PX))
+            .pr(px(18.))
+            .overflow_y_scroll()
+            .scrollbar_width(px(10.))
+            .track_scroll(&self.command_palette_scroll_handle)
+            .flex()
+            .flex_col();
+
+        if items.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_3()
+                    .text_sm()
+                    .text_color(rgb(theme.text_muted))
+                    .child("No results"),
+            );
+        }
+
+        list = list.children(items.into_iter().enumerate().map(|(index, item)| {
+            let is_selected = index == selected_index;
+            div()
+                .id(("command-palette-item", index))
+                .cursor_pointer()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .bg(rgb(if is_selected {
+                    theme.panel_active_bg
+                } else {
+                    theme.sidebar_bg
+                }))
+                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(modal) = this.command_palette_modal.as_mut() {
+                        modal.selected_index = index;
+                    }
+                    this.execute_command_palette_selection(window, cx);
+                }))
+                .child(command_palette_icon(&item.action, theme))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(theme.text_primary))
+                                .child(item.title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_muted))
+                                .child(item.subtitle),
+                        ),
+                )
+        }));
+
+        let mut results = div().relative().child(list);
+        if let Some(scrollbar) =
+            command_palette_scrollbar_indicator(theme, item_count, selected_index)
+        {
+            results = results.child(scrollbar);
+        }
 
         div()
             .absolute()
@@ -15840,6 +15983,10 @@ impl ArborWindow {
                             .py_2()
                             .border_b_1()
                             .border_color(rgb(theme.border))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
                             .child(div().font_family(FONT_UI).text_sm().child(
                                 active_input_display(
                                     theme,
@@ -15849,63 +15996,16 @@ impl ArborWindow {
                                     modal.query_cursor,
                                     72,
                                 ),
-                            )),
+                            ))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(format!("{item_count} results")),
+                            ),
                     )
-                    .child(
-                        div()
-                            .max_h(px(360.))
-                            .overflow_hidden()
-                            .flex()
-                            .flex_col()
-                            .when(items.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .px_3()
-                                        .py_3()
-                                        .text_sm()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("No results"),
-                                )
-                            })
-                            .children(items.into_iter().take(10).enumerate().map(
-                                |(index, item)| {
-                                    let is_selected = index == selected_index;
-                                    div()
-                                        .id(("command-palette-item", index))
-                                        .cursor_pointer()
-                                        .px_3()
-                                        .py_2()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.))
-                                        .bg(rgb(if is_selected {
-                                            theme.panel_active_bg
-                                        } else {
-                                            theme.sidebar_bg
-                                        }))
-                                        .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if let Some(modal) = this.command_palette_modal.as_mut()
-                                            {
-                                                modal.selected_index = index;
-                                            }
-                                            this.execute_command_palette_selection(window, cx);
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(theme.text_primary))
-                                                .child(item.title),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(theme.text_muted))
-                                                .child(item.subtitle),
-                                        )
-                                },
-                            )),
-                    ),
+                    .child(results),
             )
     }
 
@@ -16015,6 +16115,9 @@ impl ArborWindow {
 
         let theme = self.theme();
         let current_theme = self.theme_kind;
+        let selected_index = self
+            .theme_picker_selected_index
+            .min(ThemeKind::ALL.len().saturating_sub(1));
 
         div()
             .absolute()
@@ -16077,7 +16180,8 @@ impl ArborWindow {
                                 |(idx, &kind)| {
                                 let palette = kind.palette();
                                 let is_active = kind == current_theme;
-                                let border_color = if is_active {
+                                let is_selected = idx == selected_index;
+                                let border_color = if is_selected || is_active {
                                     theme.accent
                                 } else {
                                     theme.border
@@ -16088,12 +16192,17 @@ impl ArborWindow {
                                     .rounded_md()
                                     .border_1()
                                     .border_color(rgb(border_color))
-                                    .when(is_active, |d| d.border_2())
-                                    .bg(rgb(theme.panel_bg))
+                                    .when(is_active || is_selected, |d| d.border_2())
+                                    .bg(rgb(if is_selected {
+                                        theme.panel_active_bg
+                                    } else {
+                                        theme.panel_bg
+                                    }))
                                     .overflow_hidden()
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.85))
                                     .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.theme_picker_selected_index = idx;
                                         this.switch_theme(kind, cx);
                                     }))
                                     // Color swatch strip
@@ -16127,7 +16236,7 @@ impl ArborWindow {
                                             .py(px(6.))
                                             .text_xs()
                                             .text_color(rgb(theme.text_primary))
-                                            .when(is_active, |d| {
+                                            .when(is_active || is_selected, |d| {
                                                 d.font_weight(FontWeight::SEMIBOLD)
                                             })
                                             .child(kind.label()),
@@ -18523,6 +18632,7 @@ impl EntityInputHandler for ArborWindow {
         if let Some(ref mut modal) = self.command_palette_modal {
             modal.query.push_str(text);
             modal.selected_index = 0;
+            self.command_palette_scroll_handle.scroll_to_item(0);
             cx.notify();
             return;
         }
@@ -20861,6 +20971,143 @@ fn preset_icon_render_size_px(kind: AgentPresetKind) -> f32 {
         | AgentPresetKind::OpenCode
         | AgentPresetKind::Copilot => 14.,
     }
+}
+
+fn command_palette_icon(action: &CommandPaletteAction, theme: ThemePalette) -> AnyElement {
+    match action {
+        CommandPaletteAction::OpenCreateWorktree => {
+            command_palette_glyph_icon("\u{f055}", 0x98c379, theme)
+        },
+        CommandPaletteAction::RefreshWorktrees => {
+            command_palette_glyph_icon("\u{f021}", 0x61afef, theme)
+        },
+        CommandPaletteAction::OpenSettings => {
+            command_palette_glyph_icon("\u{f013}", 0xd19a66, theme)
+        },
+        CommandPaletteAction::OpenThemePicker => {
+            command_palette_glyph_icon("\u{f53f}", 0xc678dd, theme)
+        },
+        CommandPaletteAction::LaunchAgentPreset(kind) => command_palette_preset_icon(*kind, theme),
+        CommandPaletteAction::LaunchRepoPreset(_) => {
+            command_palette_glyph_icon("\u{f04b}", 0xa6e3a1, theme)
+        },
+        CommandPaletteAction::SelectRepository(_) => {
+            command_palette_glyph_icon("\u{f07b}", 0xe5c07b, theme)
+        },
+        CommandPaletteAction::SelectWorktree(_) => {
+            command_palette_glyph_icon("\u{e725}", 0x89b4fa, theme)
+        },
+        CommandPaletteAction::LaunchTaskTemplate(task) => task
+            .agent
+            .map(|kind| command_palette_preset_icon(kind, theme))
+            .unwrap_or_else(|| command_palette_glyph_icon("\u{f0ae}", 0x56b6c2, theme)),
+    }
+}
+
+fn command_palette_glyph_icon(glyph: &'static str, color: u32, _theme: ThemePalette) -> AnyElement {
+    div()
+        .w(px(34.))
+        .h(px(34.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .font_family(FONT_MONO)
+                .text_size(px(18.))
+                .line_height(px(18.))
+                .text_color(rgb(color))
+                .child(glyph),
+        )
+        .into_any_element()
+}
+
+fn command_palette_preset_icon(kind: AgentPresetKind, theme: ThemePalette) -> AnyElement {
+    log_preset_icon_render_once(kind);
+    let icon = preset_icon_image(kind);
+    let icon_size = match kind {
+        AgentPresetKind::Codex => 22.,
+        AgentPresetKind::Claude
+        | AgentPresetKind::Pi
+        | AgentPresetKind::OpenCode
+        | AgentPresetKind::Copilot => 17.,
+    };
+    let fallback_glyph = kind.fallback_icon();
+    let fallback_color = match kind {
+        AgentPresetKind::Claude => 0xD97757,
+        AgentPresetKind::Codex
+        | AgentPresetKind::Pi
+        | AgentPresetKind::OpenCode
+        | AgentPresetKind::Copilot => theme.text_primary,
+    };
+
+    div()
+        .w(px(34.))
+        .h(px(34.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(img(icon).size(px(icon_size)).with_fallback(move || {
+            log_preset_icon_fallback_once(kind, fallback_glyph);
+            div()
+                .font_family(FONT_MONO)
+                .text_size(px(14.))
+                .line_height(px(14.))
+                .text_color(rgb(fallback_color))
+                .child(fallback_glyph)
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
+fn command_palette_scrollbar_indicator(
+    theme: ThemePalette,
+    item_count: usize,
+    selected_index: usize,
+) -> Option<Div> {
+    let visible_rows = (COMMAND_PALETTE_MAX_HEIGHT_PX / COMMAND_PALETTE_ROW_ESTIMATE_PX)
+        .floor()
+        .max(1.0) as usize;
+    if item_count <= visible_rows {
+        return None;
+    }
+
+    let track_height = COMMAND_PALETTE_SCROLLBAR_TRACK_HEIGHT_PX;
+    let thumb_height = (track_height * (visible_rows as f32 / item_count as f32)).max(32.);
+    let max_offset = item_count.saturating_sub(visible_rows);
+    let offset = selected_index
+        .saturating_sub(visible_rows / 2)
+        .min(max_offset);
+    let thumb_top = if max_offset == 0 {
+        0.
+    } else {
+        (track_height - thumb_height) * (offset as f32 / max_offset as f32)
+    };
+
+    Some(
+        div()
+            .absolute()
+            .top(px(12.))
+            .right(px(5.))
+            .w(px(8.))
+            .h(px(track_height))
+            .rounded_full()
+            .bg(rgb(theme.panel_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(1.))
+                    .top(px(thumb_top))
+                    .w(px(4.))
+                    .h(px(thumb_height))
+                    .rounded_full()
+                    .bg(rgb(theme.accent)),
+            ),
+    )
 }
 
 fn agent_preset_button_content(kind: AgentPresetKind, text_color: u32) -> Div {
@@ -23342,6 +23589,17 @@ fn snap_pixels_ceil(value: Pixels, scale_factor: f32) -> Pixels {
 
     let scaled = value.to_f64() as f32 * scale_factor;
     px(scaled.ceil() / scale_factor)
+}
+
+fn theme_picker_columns() -> usize {
+    5
+}
+
+fn theme_picker_index_for_kind(theme_kind: ThemeKind) -> usize {
+    ThemeKind::ALL
+        .iter()
+        .position(|candidate| *candidate == theme_kind)
+        .unwrap_or(0)
 }
 
 fn lines_for_display(text: &str) -> Vec<String> {
