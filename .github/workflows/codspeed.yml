@@ -78,6 +78,8 @@ jobs:
       id-token: write
     env:
       RUSTFLAGS: -L native=${{ github.workspace }}/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,${{ github.workspace }}/target/ghostty-vt-bridge/lib
+      ARBOR_GHOSTTY_TARGET: x86_64-linux-gnu
+      ARBOR_GHOSTTY_CPU: baseline
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -113,4 +115,4 @@ jobs:
         uses: CodSpeedHQ/action@281164b0f014a4e7badd2c02cecad9b595b70537 # v4.11.1
         with:
           mode: simulation
-          run: cargo codspeed run -p arbor-benchmarks --bench embedded_terminal
+          run: cargo codspeed run -p arbor-benchmarks --features ghostty-vt-experimental --bench embedded_terminal

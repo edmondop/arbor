@@ -14,6 +14,9 @@ OUT_DIR="${ARBOR_GHOSTTY_BRIDGE_OUT_DIR:-${REPO_ROOT}/target/ghostty-vt-bridge}"
 LIB_DIR="${OUT_DIR}/lib"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/arbor-ghostty-vt-XXXXXX")"
 STAGED_GHOSTTY_DIR="${BUILD_DIR}/ghostty"
+OPTIMIZE="${ARBOR_GHOSTTY_OPTIMIZE:-ReleaseFast}"
+TARGET="${ARBOR_GHOSTTY_TARGET:-}"
+CPU="${ARBOR_GHOSTTY_CPU:-}"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 
 if [ ! -d "${GHOSTTY_SRC}" ]; then
@@ -42,7 +45,14 @@ cp "${REPO_ROOT}/scripts/ghostty-vt/arbor_bridge.zig" "${STAGED_GHOSTTY_DIR}/arb
 
 (
   cd "${STAGED_GHOSTTY_DIR}"
-  zig build --build-file arbor_build.zig -Doptimize=ReleaseFast
+  zig_build_args=(--build-file arbor_build.zig "-Doptimize=${OPTIMIZE}")
+  if [ -n "${TARGET}" ]; then
+    zig_build_args+=("-Dtarget=${TARGET}")
+  fi
+  if [ -n "${CPU}" ]; then
+    zig_build_args+=("-Dcpu=${CPU}")
+  fi
+  zig build "${zig_build_args[@]}"
 )
 
 cp "${STAGED_GHOSTTY_DIR}/zig-out/lib/"libarbor_ghostty_vt_bridge.* "${LIB_DIR}/"
