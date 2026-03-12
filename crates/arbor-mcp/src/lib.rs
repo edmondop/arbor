@@ -4,11 +4,12 @@ mod tools;
 
 pub use tools::{
     ActionStatus, AgentActivityOutput, ChangedFilesOutput, ChangesInput, CommitInput,
-    ProcessNameInput, ProcessesOutput, PushInput, RepositoriesOutput, TerminalReadInput,
-    TerminalResizeInput, TerminalSignalInput, TerminalTargetInput, TerminalWriteInput,
-    TerminalsOutput, WorktreeListInput, WorktreesOutput,
+    ProcessNameInput, ProcessesOutput, PushInput, RepositoriesOutput, TaskHistoryOutput,
+    TaskNameInput, TasksOutput, TerminalReadInput, TerminalResizeInput, TerminalSignalInput,
+    TerminalTargetInput, TerminalWriteInput, TerminalsOutput, WorktreeListInput, WorktreesOutput,
 };
 use {
+    arbor_core::task::{TaskExecution, TaskInfo},
     arbor_daemon_client::{
         AgentSessionDto, ChangedFileDto, CommitWorktreeRequest, CreateTerminalRequest,
         CreateTerminalResponse, CreateWorktreeRequest, DaemonClient, DaemonClientError,
@@ -99,6 +100,9 @@ pub trait DaemonApi: Send + Sync {
         &self,
         name: &str,
     ) -> Result<arbor_core::process::ProcessInfo, DaemonClientError>;
+    fn list_tasks(&self) -> Result<Vec<TaskInfo>, DaemonClientError>;
+    fn run_task(&self, name: &str) -> Result<TaskInfo, DaemonClientError>;
+    fn task_history(&self, name: &str) -> Result<Vec<TaskExecution>, DaemonClientError>;
 }
 
 impl DaemonApi for DaemonClient {
@@ -237,6 +241,18 @@ impl DaemonApi for DaemonClient {
         name: &str,
     ) -> Result<arbor_core::process::ProcessInfo, DaemonClientError> {
         self.restart_process(name)
+    }
+
+    fn list_tasks(&self) -> Result<Vec<TaskInfo>, DaemonClientError> {
+        self.list_tasks()
+    }
+
+    fn run_task(&self, name: &str) -> Result<TaskInfo, DaemonClientError> {
+        self.run_task(name)
+    }
+
+    fn task_history(&self, name: &str) -> Result<Vec<TaskExecution>, DaemonClientError> {
+        self.task_history(name)
     }
 }
 
@@ -604,6 +620,38 @@ mod tests {
 
         fn restart_process(&self, _name: &str) -> Result<ProcessInfo, DaemonClientError> {
             self.start_process(_name)
+        }
+
+        fn list_tasks(&self) -> Result<Vec<TaskInfo>, DaemonClientError> {
+            Ok(vec![TaskInfo {
+                name: "check-issues".to_owned(),
+                schedule: "*/15 * * * *".to_owned(),
+                command: "./check.sh".to_owned(),
+                status: arbor_core::task::TaskStatus::Idle,
+                has_trigger: true,
+                last_run_unix_ms: None,
+                last_exit_code: None,
+                next_run_unix_ms: None,
+                run_count: 0,
+            }])
+        }
+
+        fn run_task(&self, _name: &str) -> Result<TaskInfo, DaemonClientError> {
+            Ok(self.list_tasks()?.into_iter().next().unwrap_or(TaskInfo {
+                name: "check-issues".to_owned(),
+                schedule: "*/15 * * * *".to_owned(),
+                command: "./check.sh".to_owned(),
+                status: arbor_core::task::TaskStatus::Running,
+                has_trigger: true,
+                last_run_unix_ms: None,
+                last_exit_code: None,
+                next_run_unix_ms: None,
+                run_count: 0,
+            }))
+        }
+
+        fn task_history(&self, _name: &str) -> Result<Vec<TaskExecution>, DaemonClientError> {
+            Ok(vec![])
         }
     }
 

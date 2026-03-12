@@ -212,6 +212,7 @@ This is opt-in, disabled by default, and currently expects:
 - `zig` on `PATH`
 - a prebuilt `arbor_ghostty_vt_bridge` shared library in `target/ghostty-vt-bridge/lib`
 - optionally, `ARBOR_GHOSTTY_SRC=/path/to/ghostty` to override the pinned submodule
+- optionally, `ARBOR_GHOSTTY_TARGET` / `ARBOR_GHOSTTY_CPU` to force a safer Zig target in CI
 
 With a build that includes `--features ghostty-vt-experimental`, you can pick
 the embedded engine in `~/.config/arbor/config.toml`:

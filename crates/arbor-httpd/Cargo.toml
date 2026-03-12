@@ -21,7 +21,9 @@ arbor-core   = { path = "../arbor-core" }
 arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 arbor-web-ui = { path = "../arbor-web-ui" }
 axum         = { features = ["ws"], workspace = true }
+chrono       = { workspace = true }
 config       = { workspace = true }
+cron         = { workspace = true }
 futures-util = { workspace = true }
 git2         = { workspace = true }
 gix          = { workspace = true }

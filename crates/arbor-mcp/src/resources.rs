@@ -32,6 +32,10 @@ impl ArborMcp {
                 read_json_text_resource(&self.daemon.list_processes().map_err(map_daemon_error)?)
                     .map_err(map_daemon_error)?
             },
+            "arbor://tasks" => {
+                read_json_text_resource(&self.daemon.list_tasks().map_err(map_daemon_error)?)
+                    .map_err(map_daemon_error)?
+            },
             "arbor://terminals" => {
                 read_json_text_resource(&self.daemon.list_terminals().map_err(map_daemon_error)?)
                     .map_err(map_daemon_error)?

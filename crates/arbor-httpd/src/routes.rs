@@ -2,7 +2,7 @@ use {
     crate::{
         github_service::GitHubPrService,
         process_manager::ProcessEvent,
-        repository_store,
+        repository_store, task_scheduler,
         terminal_daemon::{LocalTerminalDaemonError, SessionEvent},
         types::*,
     },
@@ -15,7 +15,9 @@ use {
             WriteRequest,
         },
         process::ProcessInfo,
-        repo_config, worktree,
+        repo_config,
+        task::{TaskExecution, TaskInfo},
+        worktree,
         worktree_scripts::{WorktreeScriptContext, WorktreeScriptPhase, run_worktree_scripts},
     },
     arbor_daemon_client::{
@@ -1457,6 +1459,119 @@ pub(crate) fn ensure_web_ui_assets() -> Result<(), String> {
 }
 
 // ── Helper functions ─────────────────────────────────────────────────
+
+// ── Scheduled tasks ──────────────────────────────────────────────────
+
+pub(crate) async fn list_tasks(State(state): State<AppState>) -> ApiResult<Vec<TaskInfo>> {
+    let ts = state.task_scheduler.lock().await;
+    Ok(Json(ts.list_tasks()))
+}
+
+pub(crate) async fn run_task(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<TaskInfo> {
+    let task_request = {
+        let mut ts = state.task_scheduler.lock().await;
+        ts.mark_running(&name).map_err(internal_error)?
+    };
+
+    let scheduler = state.task_scheduler.clone();
+
+    tokio::spawn(async move {
+        let started_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let (exit_code, stdout) =
+            task_scheduler::execute_task(&task_request.command, &task_request.working_dir).await;
+
+        let mut agent_spawned = false;
+        if let Some(ref trigger) = task_request.trigger
+            && task_scheduler::should_trigger(trigger, exit_code, &stdout)
+            && let Some((program, args)) =
+                task_scheduler::build_agent_command(trigger, &stdout, &task_request.repo_root)
+            && task_scheduler::spawn_agent(&program, &args, &task_request.working_dir)
+                .await
+                .is_ok()
+        {
+            agent_spawned = true;
+        }
+
+        let stdout_tail = if stdout.is_empty() {
+            None
+        } else {
+            Some(stdout)
+        };
+
+        let mut ts = scheduler.lock().await;
+        ts.record_completion(
+            &task_request.name,
+            exit_code,
+            stdout_tail,
+            started_at_ms,
+            agent_spawned,
+        );
+    });
+
+    let ts = state.task_scheduler.lock().await;
+    let info = ts
+        .list_tasks()
+        .into_iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| internal_error(format!("task `{name}` not found")))?;
+    Ok(Json(info))
+}
+
+pub(crate) async fn task_history(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<Vec<TaskExecution>> {
+    let ts = state.task_scheduler.lock().await;
+    let history = ts.task_history(&name).map_err(not_found_error)?;
+    Ok(Json(history))
+}
+
+pub(crate) async fn task_status_ws(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_task_status_ws(state, socket))
+        .into_response()
+}
+
+async fn handle_task_status_ws(state: AppState, mut socket: WebSocket) {
+    let (snapshot, mut rx) = {
+        let ts = state.task_scheduler.lock().await;
+        (ts.snapshot_event(), ts.subscribe())
+    };
+
+    if send_ws_json(&mut socket, &snapshot).await.is_err() {
+        return;
+    }
+
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                if send_ws_json(&mut socket, &event).await.is_err() {
+                    break;
+                }
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                let (snapshot, next_rx) = {
+                    let ts = state.task_scheduler.lock().await;
+                    (ts.snapshot_event(), ts.subscribe())
+                };
+                if send_ws_json(&mut socket, &snapshot).await.is_err() {
+                    break;
+                }
+                rx = next_rx;
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
 
 pub(crate) fn internal_error(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     (

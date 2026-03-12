@@ -9,6 +9,7 @@ pub mod process;
 pub mod remote;
 pub mod repo_config;
 pub mod session;
+pub mod task;
 pub mod worktree;
 pub mod worktree_scripts;
 

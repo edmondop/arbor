@@ -5,12 +5,16 @@ mod mdns;
 mod process_manager;
 mod repository_store;
 mod routes;
+pub(crate) mod task_scheduler;
 mod terminal_daemon;
 mod types;
 
 pub(crate) use types::*;
 use {
-    crate::{process_manager::ProcessManager, routes::*, terminal_daemon::LocalTerminalDaemon},
+    crate::{
+        process_manager::ProcessManager, routes::*, task_scheduler::TaskScheduler,
+        terminal_daemon::LocalTerminalDaemon,
+    },
     arbor_core::{daemon::JsonDaemonSessionStore, process::ProcessStatus},
     axum::{
         Router,
@@ -52,6 +56,10 @@ fn router(state: AppState) -> Router {
         .route("/processes/{name}/stop", post(stop_process))
         .route("/processes/{name}/restart", post(restart_process))
         .route("/processes/ws", get(process_status_ws))
+        .route("/tasks", get(list_tasks))
+        .route("/tasks/{name}/run", post(run_task))
+        .route("/tasks/{name}/history", get(task_history))
+        .route("/tasks/ws", get(task_status_ws))
         .route("/shutdown", post(shutdown_daemon))
         .route("/config/bind", post(set_bind_mode).get(get_bind_mode))
         .route("/logs/ws", get(logs_ws));
@@ -151,10 +159,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pm
     };
 
+    // Initialize task scheduler — load [[tasks]] from arbor.toml
+    let task_scheduler = {
+        let roots = repository_store.load_roots().unwrap_or_default();
+        let resolved = repository_store::resolve_repository_roots(roots);
+        let repo_root = resolved
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut ts = TaskScheduler::new(repo_root.clone());
+        let configs = task_scheduler::load_task_configs(&repo_root);
+        if !configs.is_empty() {
+            println!(
+                "loaded {} task config(s) from {}/arbor.toml",
+                configs.len(),
+                repo_root.display()
+            );
+        }
+        ts.load_configs(configs);
+        ts
+    };
+
     let state = AppState {
         repository_store: repository_store.clone(),
         daemon: Arc::new(Mutex::new(LocalTerminalDaemon::new(daemon_store))),
         process_manager: Arc::new(Mutex::new(process_manager)),
+        task_scheduler: Arc::new(Mutex::new(task_scheduler)),
         github_service: github_service::default_github_pr_service(),
         agent_sessions: Arc::new(Mutex::new(HashMap::new())),
         agent_broadcast,
@@ -235,6 +265,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+    }
+
+    // Spawn background task to run scheduled tasks
+    {
+        let scheduler = state.task_scheduler.clone();
+        tokio::spawn(task_scheduler::run_task_loop(scheduler));
     }
 
     let shutdown_signal = state.shutdown_signal.clone();
@@ -392,7 +428,8 @@ mod tests {
         AppState {
             repository_store,
             daemon: Arc::new(Mutex::new(LocalTerminalDaemon::new(daemon_store))),
-            process_manager: Arc::new(Mutex::new(ProcessManager::new(repo_root))),
+            process_manager: Arc::new(Mutex::new(ProcessManager::new(repo_root.clone()))),
+            task_scheduler: Arc::new(Mutex::new(TaskScheduler::new(repo_root))),
             github_service: github_service::default_github_pr_service(),
             agent_sessions: Arc::new(Mutex::new(HashMap::new())),
             agent_broadcast,

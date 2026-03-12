@@ -1,5 +1,6 @@
 use {
     crate::{ArborMcp, string_error},
+    arbor_core::task::{TaskExecution, TaskInfo},
     arbor_daemon_client::{
         CommitWorktreeRequest, CreateTerminalRequest, CreateTerminalResponse,
         CreateWorktreeRequest, DeleteWorktreeRequest, GitActionResponse, HealthResponse,
@@ -112,6 +113,21 @@ pub struct AgentActivityOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProcessesOutput {
     pub processes: Vec<arbor_core::process::ProcessInfo>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskNameInput {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TasksOutput {
+    pub tasks: Vec<TaskInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskHistoryOutput {
+    pub executions: Vec<TaskExecution>,
 }
 
 impl ArborMcp {
@@ -380,6 +396,36 @@ impl ArborMcp {
         self.daemon
             .restart_process(&input.0.name)
             .map(Json)
+            .map_err(string_error)
+    }
+
+    #[tool(description = "List Arbor scheduled tasks configured in arbor.toml")]
+    pub async fn list_tasks(&self) -> Result<Json<TasksOutput>, String> {
+        self.daemon
+            .list_tasks()
+            .map(|tasks| Json(TasksOutput { tasks }))
+            .map_err(string_error)
+    }
+
+    #[tool(description = "Manually trigger a scheduled task by name, ignoring its cron schedule")]
+    pub async fn run_task(
+        &self,
+        input: Parameters<TaskNameInput>,
+    ) -> Result<Json<TaskInfo>, String> {
+        self.daemon
+            .run_task(&input.0.name)
+            .map(Json)
+            .map_err(string_error)
+    }
+
+    #[tool(description = "Get execution history for a scheduled task")]
+    pub async fn task_history(
+        &self,
+        input: Parameters<TaskNameInput>,
+    ) -> Result<Json<TaskHistoryOutput>, String> {
+        self.daemon
+            .task_history(&input.0.name)
+            .map(|executions| Json(TaskHistoryOutput { executions }))
             .map_err(string_error)
     }
 }
