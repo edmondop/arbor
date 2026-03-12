@@ -10,7 +10,7 @@ fn open_arbor_window(cx: &mut App) {
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(9.), px(9.))),
             }),
-            window_decorations: Some(WindowDecorations::Client),
+            window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
             ..Default::default()
         },
         |_, cx| {
@@ -492,7 +492,7 @@ fn main() {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(9.), px(9.))),
                 }),
-                window_decorations: Some(WindowDecorations::Client),
+                window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
                 ..Default::default()
             },
             move |_, cx| {

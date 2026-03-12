@@ -1,5 +1,5 @@
 use {
-    gpui::{App, FontFallbacks, FontFeatures, font},
+    gpui::{App, FontFallbacks, FontFeatures, WindowDecorations, font},
     std::{
         borrow::Cow,
         env, fs,
@@ -41,6 +41,11 @@ pub(crate) const TITLEBAR_HEIGHT: f32 = 34.;
 pub(crate) const TOP_BAR_LEFT_OFFSET: f32 = 76.;
 #[cfg(not(target_os = "macos"))]
 pub(crate) const TOP_BAR_LEFT_OFFSET: f32 = 8.;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DEFAULT_WINDOW_DECORATIONS: WindowDecorations = WindowDecorations::Server;
+#[cfg(not(target_os = "linux"))]
+pub(crate) const DEFAULT_WINDOW_DECORATIONS: WindowDecorations = WindowDecorations::Client;
 
 pub(crate) const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
