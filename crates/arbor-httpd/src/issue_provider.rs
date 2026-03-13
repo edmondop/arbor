@@ -291,6 +291,11 @@ struct GitLabIssuePayload {
     updated_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GitLabMetadataPayload {
+    version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteScheme {
     Http,
@@ -304,6 +309,12 @@ impl RemoteScheme {
             Self::Https => "https",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorityPortMode {
+    Preserve,
+    Strip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,29 +370,49 @@ fn parse_remote(remote_url: &str) -> Option<RemoteSpec> {
 
     if let Some(rest) = trimmed.strip_prefix("git@") {
         let (host, path) = rest.split_once(':')?;
-        return build_remote_spec(RemoteScheme::Https, host, path);
+        return build_remote_spec(RemoteScheme::Https, host, path, AuthorityPortMode::Strip);
     }
 
     if let Some(rest) = trimmed.strip_prefix("ssh://") {
         let (authority, path) = rest.split_once('/')?;
-        return build_remote_spec(RemoteScheme::Https, authority, path);
+        return build_remote_spec(
+            RemoteScheme::Https,
+            authority,
+            path,
+            AuthorityPortMode::Strip,
+        );
     }
 
     if let Some(rest) = trimmed.strip_prefix("https://") {
         let (authority, path) = rest.split_once('/')?;
-        return build_remote_spec(RemoteScheme::Https, authority, path);
+        return build_remote_spec(
+            RemoteScheme::Https,
+            authority,
+            path,
+            AuthorityPortMode::Preserve,
+        );
     }
 
     if let Some(rest) = trimmed.strip_prefix("http://") {
         let (authority, path) = rest.split_once('/')?;
-        return build_remote_spec(RemoteScheme::Http, authority, path);
+        return build_remote_spec(
+            RemoteScheme::Http,
+            authority,
+            path,
+            AuthorityPortMode::Preserve,
+        );
     }
 
     None
 }
 
-fn build_remote_spec(scheme: RemoteScheme, authority: &str, path: &str) -> Option<RemoteSpec> {
-    let host = sanitize_remote_authority(authority)?;
+fn build_remote_spec(
+    scheme: RemoteScheme,
+    authority: &str,
+    path: &str,
+    port_mode: AuthorityPortMode,
+) -> Option<RemoteSpec> {
+    let host = sanitize_remote_authority(authority, port_mode)?;
     Some(RemoteSpec {
         scheme,
         host_kind: classify_remote_host(&host),
@@ -390,7 +421,7 @@ fn build_remote_spec(scheme: RemoteScheme, authority: &str, path: &str) -> Optio
     })
 }
 
-fn sanitize_remote_authority(authority: &str) -> Option<String> {
+fn sanitize_remote_authority(authority: &str, port_mode: AuthorityPortMode) -> Option<String> {
     let trimmed = authority.trim();
     let without_userinfo = trimmed
         .rsplit_once('@')
@@ -398,9 +429,44 @@ fn sanitize_remote_authority(authority: &str) -> Option<String> {
         .unwrap_or(trimmed)
         .trim();
     if without_userinfo.is_empty() {
-        None
-    } else {
-        Some(without_userinfo.to_owned())
+        return None;
+    }
+
+    match port_mode {
+        AuthorityPortMode::Preserve => Some(without_userinfo.to_owned()),
+        AuthorityPortMode::Strip => strip_port_from_authority(without_userinfo),
+    }
+}
+
+fn strip_port_from_authority(authority: &str) -> Option<String> {
+    let trimmed = authority.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let (host, remainder) = rest.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        if remainder.is_empty() {
+            return Some(format!("[{host}]"));
+        }
+        if remainder.starts_with(':') {
+            return Some(format!("[{host}]"));
+        }
+        return None;
+    }
+
+    match trimmed.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty()
+                && !port.is_empty()
+                && port.chars().all(|character| character.is_ascii_digit()) =>
+        {
+            Some(host.to_owned())
+        },
+        _ => Some(trimmed.to_owned()),
     }
 }
 
@@ -488,15 +554,9 @@ where
 
 fn gitlab_instance_supports_issues(remote: &RemoteSpec) -> bool {
     let url = format!("{}/api/v4/metadata", remote.base_url());
-    let token = gitlab_access_token_from_env();
-    let mut request = ureq::get(&url)
+    let mut response = match ureq::get(&url)
         .header("Accept", "application/json")
-        .header("User-Agent", "Arbor");
-    if let Some(token) = token.as_deref() {
-        request = request.header("PRIVATE-TOKEN", token);
-    }
-
-    let response = match request
+        .header("User-Agent", "Arbor")
         .config()
         .timeout_global(Some(ISSUE_REQUEST_TIMEOUT))
         .build()
@@ -506,7 +566,20 @@ fn gitlab_instance_supports_issues(remote: &RemoteSpec) -> bool {
         Err(_) => return false,
     };
 
-    matches!(response.status().as_u16(), 200..=299 | 401 | 403)
+    if !response.status().is_success() {
+        return false;
+    }
+
+    let body = match response.body_mut().read_to_string() {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    let metadata: GitLabMetadataPayload = match serde_json::from_str(&body) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+
+    !metadata.version.trim().is_empty()
 }
 
 fn github_access_token_from_env() -> Option<String> {
@@ -579,6 +652,24 @@ mod tests {
             Some(RemoteSpec {
                 scheme: RemoteScheme::Https,
                 host: "gitlab.example.com".to_owned(),
+                host_kind: RemoteHostKind::Other,
+                path: "group/arbor".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_remote("ssh://git@gitlab.example.com:2222/group/arbor.git"),
+            Some(RemoteSpec {
+                scheme: RemoteScheme::Https,
+                host: "gitlab.example.com".to_owned(),
+                host_kind: RemoteHostKind::Other,
+                path: "group/arbor".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_remote("https://gitlab.example.com:8443/group/arbor.git"),
+            Some(RemoteSpec {
+                scheme: RemoteScheme::Https,
+                host: "gitlab.example.com:8443".to_owned(),
                 host_kind: RemoteHostKind::Other,
                 path: "group/arbor".to_owned(),
             })

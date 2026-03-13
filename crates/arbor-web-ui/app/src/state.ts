@@ -32,6 +32,7 @@ export type AppState = {
   issuesLoading: boolean;
   issuesError: string | null;
   issuesRepoRoot: string | null;
+  issuesLoadedRepoRoot: string | null;
   rightPanelTab: RightPanelTab;
 
   selectedRepoRoot: string | null;
@@ -56,6 +57,7 @@ export function createInitialState(): AppState {
     issuesLoading: false,
     issuesError: null,
     issuesRepoRoot: null,
+    issuesLoadedRepoRoot: null,
     rightPanelTab: "changes",
     selectedRepoRoot: null,
     selectedWorktreePath: null,
@@ -173,7 +175,7 @@ export async function refresh(): Promise<void> {
     const shouldRefreshIssues =
       state.rightPanelTab === "issues" &&
       nextIssuesRepoRoot !== null &&
-      (issueRepoChanged || state.issueSource === null);
+      (issueRepoChanged || state.issuesLoadedRepoRoot !== nextIssuesRepoRoot);
 
     updateState({
       repositories,
@@ -191,6 +193,7 @@ export async function refresh(): Promise<void> {
             issuesError: null,
             issuesLoading: false,
             issuesRepoRoot: nextIssuesRepoRoot,
+            issuesLoadedRepoRoot: null,
           }
         : {}),
       loading: false,
@@ -267,6 +270,7 @@ export function selectWorktree(path: string | null): void {
           issuesError: null,
           issuesLoading: false,
           issuesRepoRoot: nextIssuesRepoRoot,
+          issuesLoadedRepoRoot: null,
         }
       : {}),
   });
@@ -276,7 +280,7 @@ export function selectWorktree(path: string | null): void {
   if (
     state.rightPanelTab === "issues" &&
     nextIssuesRepoRoot !== null &&
-    (issueRepoChanged || state.issueSource === null)
+    (issueRepoChanged || state.issuesLoadedRepoRoot !== nextIssuesRepoRoot)
   ) {
     refreshIssues(nextIssuesRepoRoot, true);
   }
@@ -292,7 +296,10 @@ export function setRightPanelTab(tab: RightPanelTab): void {
   if (tab === "issues") {
     const repoRoot = selectedIssueRepoRoot();
     if (repoRoot !== null) {
-      refreshIssues(repoRoot, state.issuesRepoRoot !== repoRoot || state.issueSource === null);
+      refreshIssues(
+        repoRoot,
+        state.issuesRepoRoot !== repoRoot || state.issuesLoadedRepoRoot !== repoRoot,
+      );
     }
   }
 }
@@ -317,6 +324,7 @@ export function refreshIssues(
       issuesError: null,
       issuesLoading: false,
       issuesRepoRoot: null,
+      issuesLoadedRepoRoot: null,
     });
     return;
   }
@@ -344,6 +352,7 @@ export function refreshIssues(
         issuesError: null,
         issuesLoading: false,
         issuesRepoRoot: repoRoot,
+        issuesLoadedRepoRoot: repoRoot,
       });
     })
     .catch((error) => {
@@ -357,6 +366,7 @@ export function refreshIssues(
         issuesError: error instanceof Error ? error.message : "failed to load issues",
         issuesLoading: false,
         issuesRepoRoot: repoRoot,
+        issuesLoadedRepoRoot: repoRoot,
       });
     });
 }

@@ -371,6 +371,35 @@ test.describe("Arbor Web UI", () => {
     ).toBeVisible();
   });
 
+  test("issues tab does not refetch unsupported providers on background refresh", async ({ page }) => {
+    let issuesRequestCount = 0;
+
+    await page.unroute("**/api/v1/issues**");
+    await page.route("**/api/v1/issues**", (route) => {
+      issuesRequestCount += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          source: null,
+          issues: [],
+          notice: "No supported issue provider resolved from the origin remote.",
+        }),
+      });
+    });
+
+    const changesPanel = page.getByTestId("changes-panel");
+    await changesPanel.getByRole("button", { name: /Issues/ }).click();
+
+    await expect(
+      changesPanel.getByText("No supported issue provider resolved from the origin remote."),
+    ).toBeVisible();
+
+    await page.waitForTimeout(11_000);
+
+    expect(issuesRequestCount).toBe(1);
+  });
+
   test("full layout screenshot", async ({ page }) => {
     const changesPanel = page.getByTestId("changes-panel");
     await expect(changesPanel.getByText("src/main.rs")).toBeVisible();
