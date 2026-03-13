@@ -477,6 +477,7 @@ impl ArborWindow {
                                                 let is_active =
                                                     self.active_worktree_index == Some(index);
                                                 let diff_summary = worktree.diff_summary;
+                                                let pr_loading = worktree.pr_loading;
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
                                                 let is_merged_pr = worktree
@@ -663,6 +664,19 @@ impl ArborWindow {
                                                                     );
                                                                 }
 
+                                                                if compact_sidebar && pr_loading {
+                                                                        right = right.child(loading_badge(
+                                                                            theme,
+                                                                            format!(
+                                                                                "{} PR…",
+                                                                                loading_spinner_frame(
+                                                                                    self
+                                                                                        .loading_animation_frame,
+                                                                                )
+                                                                            ),
+                                                                        ));
+                                                                }
+
                                                                 if self.worktree_stats_loading
                                                                     && diff_summary.is_none()
                                                                     && !compact_sidebar
@@ -784,6 +798,18 @@ impl ArborWindow {
                                                                         }
                                                                     }),
                                                             )
+                                                            .when(pr_loading, |this| {
+                                                                this.child(loading_badge(
+                                                                    theme,
+                                                                    format!(
+                                                                        "{} PR…",
+                                                                        loading_spinner_frame(
+                                                                            self
+                                                                                .loading_animation_frame,
+                                                                        )
+                                                                    ),
+                                                                ))
+                                                            })
                                                             .when_some(pr_details.clone(), |this, pr| {
                                                                 let (checks_icon, checks_color) = match pr.checks_status {
                                                                     github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),

@@ -222,6 +222,8 @@ impl ArborWindow {
                     worktrees: Vec::new(),
                     worktree_stats_loading: false,
                     worktree_prs_loading: false,
+                    loading_animation_active: false,
+                    loading_animation_frame: 0,
                     active_worktree_index: None,
                     worktree_selection_epoch: 0,
                     changed_files: Vec::new(),
@@ -570,6 +572,8 @@ impl ArborWindow {
             worktrees: Vec::new(),
             worktree_stats_loading: false,
             worktree_prs_loading: false,
+            loading_animation_active: false,
+            loading_animation_frame: 0,
             active_worktree_index: None,
             worktree_selection_epoch: 0,
             changed_files: Vec::new(),
@@ -852,6 +856,51 @@ impl ArborWindow {
                 });
                 if updated.is_err() {
                     break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn has_active_loading_indicator(&self) -> bool {
+        self.worktree_stats_loading
+            || self.worktree_prs_loading
+            || self.issues_loading
+            || self
+                .create_modal
+                .as_ref()
+                .is_some_and(|modal| modal.managed_preview_loading)
+    }
+
+    fn ensure_loading_animation(&mut self, cx: &mut Context<Self>) {
+        if self.loading_animation_active || !self.has_active_loading_indicator() {
+            return;
+        }
+
+        self.loading_animation_active = true;
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async move {
+                    std::thread::sleep(Duration::from_millis(100));
+                })
+                .await;
+
+                let updated = this.update(cx, |this, cx| {
+                    if !this.has_active_loading_indicator() {
+                        this.loading_animation_active = false;
+                        return false;
+                    }
+
+                    this.loading_animation_frame =
+                        this.loading_animation_frame.wrapping_add(1) % LOADING_SPINNER_FRAMES.len();
+                    cx.notify();
+                    true
+                });
+
+                match updated {
+                    Ok(true) => {},
+                    Ok(false) | Err(_) => break,
                 }
             }
         })
@@ -1665,6 +1714,11 @@ impl ArborWindow {
                     .map(|pr_number| (worktree.path.clone(), pr_number))
             })
             .collect();
+        let previous_pr_loading: HashMap<PathBuf, bool> = self
+            .worktrees
+            .iter()
+            .map(|worktree| (worktree.path.clone(), worktree.pr_loading))
+            .collect();
         let previous_pr_urls: HashMap<PathBuf, String> = self
             .worktrees
             .iter()
@@ -1780,6 +1834,10 @@ impl ArborWindow {
         }
 
         for worktree in &mut next_worktrees {
+            worktree.pr_loading = previous_pr_loading
+                .get(&worktree.path)
+                .copied()
+                .unwrap_or(false);
             worktree.diff_summary = previous_summaries.get(&worktree.path).copied();
             worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
             worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
@@ -1875,6 +1933,7 @@ impl ArborWindow {
             ));
         }
 
+        self.ensure_loading_animation(cx);
         self.refresh_worktree_diff_summaries(cx);
         self.refresh_worktree_ports(cx);
         self.refresh_agent_tasks(cx);
@@ -2241,109 +2300,159 @@ impl ArborWindow {
             })
             .collect();
 
-        let tracked_branches: Vec<(PathBuf, String, Option<String>)> = self
+        let eligible_paths: HashSet<PathBuf> = self
             .worktrees
             .iter()
             .filter(|worktree| should_lookup_pull_request_for_worktree(worktree))
-            .map(|worktree| {
-                (
-                    worktree.path.clone(),
-                    worktree.branch.clone(),
-                    repository_slug_by_group_key
-                        .get(&worktree.group_key)
-                        .cloned(),
-                )
+            .map(|worktree| worktree.path.clone())
+            .collect();
+        let tracked_branches: Vec<(PathBuf, String, String)> = self
+            .worktrees
+            .iter()
+            .filter(|worktree| should_lookup_pull_request_for_worktree(worktree))
+            .filter_map(|worktree| {
+                repository_slug_by_group_key
+                    .get(&worktree.group_key)
+                    .cloned()
+                    .map(|slug| (worktree.path.clone(), worktree.branch.clone(), slug))
             })
             .collect();
         let github_token = self.github_access_token();
         let github_service = self.github_service.clone();
 
-        if tracked_branches.is_empty() {
-            let mut changed = false;
-            for worktree in &mut self.worktrees {
-                if worktree.pr_number.take().is_some()
-                    || worktree.pr_url.take().is_some()
-                    || worktree.pr_details.take().is_some()
-                {
-                    changed = true;
-                }
+        let tracked_paths: HashSet<PathBuf> = tracked_branches
+            .iter()
+            .map(|(path, ..)| path.clone())
+            .collect();
+
+        let mut changed = false;
+        for worktree in &mut self.worktrees {
+            let is_pr_eligible = eligible_paths.contains(&worktree.path);
+            let next_pr_loading = tracked_paths.contains(&worktree.path);
+
+            if worktree.pr_loading != next_pr_loading {
+                worktree.pr_loading = next_pr_loading;
+                changed = true;
             }
+
+            if !next_pr_loading
+                && (!is_pr_eligible
+                    || worktree.pr_number.is_some()
+                    || worktree.pr_url.is_some()
+                    || worktree.pr_details.is_some())
+                && (worktree.pr_number.take().is_some()
+                    || worktree.pr_url.take().is_some()
+                    || worktree.pr_details.take().is_some())
+            {
+                changed = true;
+            }
+        }
+
+        let next_prs_loading = !tracked_branches.is_empty();
+        if self.worktree_prs_loading != next_prs_loading {
+            self.worktree_prs_loading = next_prs_loading;
+            changed = true;
+        }
+
+        if tracked_branches.is_empty() {
             if changed {
                 cx.notify();
             }
             return;
         }
 
-        self.worktree_prs_loading = true;
+        if changed {
+            cx.notify();
+        }
+
+        self.ensure_loading_animation(cx);
+
         cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_spawn(async move {
-                    tracked_branches
-                        .into_iter()
-                        .map(|(path, branch, repo_slug)| {
-                            // Try gh CLI first for rich details
-                            let details = repo_slug.as_ref().and_then(|slug| {
-                                github_service::pull_request_details(slug, &branch)
-                            });
+            for (path, branch, repo_slug) in tracked_branches {
+                let github_service = github_service.clone();
+                let github_token = github_token.clone();
+                let path_for_lookup = path.clone();
+                let path_for_update = path.clone();
+                let result = cx
+                    .background_spawn(async move {
+                        let details = github_service::pull_request_details(&repo_slug, &branch);
 
-                            let (pr_number, pr_url) = if let Some(ref d) = details {
-                                (Some(d.number), Some(d.url.clone()))
-                            } else {
-                                // Fall back to octocrab for just the number
-                                let num = repo_slug.as_ref().and_then(|_| {
-                                    github_pr_number_for_worktree(
-                                        github_service.as_ref(),
-                                        &path,
-                                        &branch,
-                                        github_token.as_deref(),
-                                    )
-                                });
-                                let url = num.and_then(|n| {
-                                    repo_slug.as_ref().map(|slug| github_pr_url(slug, n))
-                                });
-                                (num, url)
-                            };
+                        let (pr_number, pr_url) = if let Some(ref details) = details {
+                            (Some(details.number), Some(details.url.clone()))
+                        } else {
+                            let number = github_pr_number_for_worktree(
+                                github_service.as_ref(),
+                                &path_for_lookup,
+                                &branch,
+                                github_token.as_deref(),
+                            );
+                            let url = number.map(|pr_number| github_pr_url(&repo_slug, pr_number));
+                            (number, url)
+                        };
 
-                            (path, pr_number, pr_url, details)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await;
+                        (pr_number, pr_url, details)
+                    })
+                    .await;
 
-            let _ = this.update(cx, |this, cx| {
-                this.worktree_prs_loading = false;
+                let _ = this.update(cx, |this, cx| {
+                    let Some(worktree) = this
+                        .worktrees
+                        .iter_mut()
+                        .find(|worktree| worktree.path == path_for_update)
+                    else {
+                        if this.worktree_prs_loading
+                            && !this.worktrees.iter().any(|worktree| worktree.pr_loading)
+                        {
+                            this.worktree_prs_loading = false;
+                            cx.notify();
+                        }
+                        return;
+                    };
 
-                type PrInfo = (
-                    Option<u64>,
-                    Option<String>,
-                    Option<github_service::PrDetails>,
-                );
-                let pr_by_path: HashMap<PathBuf, PrInfo> = results
-                    .into_iter()
-                    .map(|(path, num, url, details)| (path, (num, url, details)))
-                    .collect();
+                    let (next_num, next_url, next_details) = result;
+                    let mut changed = false;
 
-                let mut changed = false;
-
-                for worktree in &mut this.worktrees {
-                    let (next_num, next_url, next_details) = pr_by_path
-                        .get(&worktree.path)
-                        .cloned()
-                        .unwrap_or((None, None, None));
+                    if worktree.pr_loading {
+                        worktree.pr_loading = false;
+                        changed = true;
+                    }
                     if worktree.pr_number != next_num || worktree.pr_url != next_url {
                         worktree.pr_number = next_num;
                         worktree.pr_url = next_url;
                         changed = true;
                     }
-                    // Always update pr_details (no PartialEq on PrDetails)
+
                     let had_details = worktree.pr_details.is_some();
                     let has_details = next_details.is_some();
                     worktree.pr_details = next_details;
                     if had_details != has_details {
                         changed = true;
                     }
-                }
 
+                    let still_loading = this.worktrees.iter().any(|worktree| worktree.pr_loading);
+                    if this.worktree_prs_loading != still_loading {
+                        this.worktree_prs_loading = still_loading;
+                        changed = true;
+                    }
+
+                    if changed {
+                        cx.notify();
+                    }
+                });
+            }
+
+            let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
+                for worktree in &mut this.worktrees {
+                    if worktree.pr_loading {
+                        worktree.pr_loading = false;
+                        changed = true;
+                    }
+                }
+                if this.worktree_prs_loading {
+                    this.worktree_prs_loading = false;
+                    changed = true;
+                }
                 if changed {
                     cx.notify();
                 }
@@ -3965,6 +4074,7 @@ impl WorktreeSummary {
             label,
             branch,
             is_primary_checkout,
+            pr_loading: false,
             pr_number: None,
             pr_url: None,
             pr_details: None,
@@ -5854,6 +5964,49 @@ fn input_caret(theme: ThemePalette) -> Div {
     div().w(px(1.)).h(px(14.)).bg(rgb(theme.accent)).mt(px(1.))
 }
 
+const LOADING_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn loading_spinner_frame(frame: usize) -> &'static str {
+    LOADING_SPINNER_FRAMES[frame % LOADING_SPINNER_FRAMES.len()]
+}
+
+fn workspace_loading_status_label(
+    diff_loading_count: usize,
+    pr_loading_count: usize,
+) -> Option<String> {
+    let diff_label = match diff_loading_count {
+        0 => None,
+        1 => Some("1 diff".to_owned()),
+        count => Some(format!("{count} diffs")),
+    };
+    let pr_label = match pr_loading_count {
+        0 => None,
+        1 => Some("1 PR".to_owned()),
+        count => Some(format!("{count} PRs")),
+    };
+
+    match (pr_label, diff_label) {
+        (None, None) => None,
+        (Some(pr_label), None) => Some(format!("loading {pr_label}")),
+        (None, Some(diff_label)) => Some(format!("loading {diff_label}")),
+        (Some(pr_label), Some(diff_label)) => Some(format!("loading {pr_label} · {diff_label}")),
+    }
+}
+
+fn loading_badge(theme: ThemePalette, text: impl Into<String>) -> Div {
+    div()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.accent))
+        .bg(rgb(theme.panel_active_bg))
+        .px_2()
+        .py(px(1.))
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme.accent))
+        .child(text.into())
+}
+
 fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
     div()
         .text_xs()
@@ -7352,6 +7505,7 @@ mod tests {
             label: "wt".to_owned(),
             branch: "feature/hover".to_owned(),
             is_primary_checkout: false,
+            pr_loading: false,
             pr_number: None,
             pr_url: None,
             pr_details: None,
@@ -8201,6 +8355,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn workspace_loading_status_label_formats_pr_progress() {
+        assert_eq!(
+            crate::workspace_loading_status_label(0, 3).as_deref(),
+            Some("loading 3 PRs")
+        );
+    }
+
+    #[test]
+    fn workspace_loading_status_label_formats_combined_progress() {
+        assert_eq!(
+            crate::workspace_loading_status_label(2, 1).as_deref(),
+            Some("loading 1 PR · 2 diffs")
+        );
+    }
+
+    #[test]
+    fn workspace_loading_status_label_omits_when_idle() {
+        assert_eq!(crate::workspace_loading_status_label(0, 0), None);
+    }
+
+    #[test]
+    fn loading_spinner_frame_wraps_cleanly() {
+        assert_eq!(crate::loading_spinner_frame(0), "⠋");
+        assert_eq!(
+            crate::loading_spinner_frame(crate::LOADING_SPINNER_FRAMES.len()),
+            "⠋"
+        );
     }
 
     #[test]

@@ -98,6 +98,7 @@ impl ArborWindow {
         self.issues_error = None;
         self.issues_notice = None;
         self.issues_target = Some(target.clone());
+        self.ensure_loading_animation(cx);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -700,6 +701,9 @@ impl ArborWindow {
         self.github_repo_slug = repository.github_repo_slug.clone();
         self.worktree_stats_loading = false;
         self.worktree_prs_loading = false;
+        for worktree in &mut self.worktrees {
+            worktree.pr_loading = false;
+        }
         self.active_diff_session_id = None;
         self.active_file_view_session_id = None;
         self.active_worktree_index = self

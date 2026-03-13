@@ -355,15 +355,27 @@ impl ArborWindow {
                         format!("theme {}", self.theme_kind.label()),
                     ))
                     .child(
-                        if self.worktree_stats_loading || self.worktree_prs_loading {
-                            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                            let frame_index = (SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis()
-                                / 100) as usize
-                                % frames.len();
-                            status_text(theme, format!("{} loading", frames[frame_index]))
+                        if let Some(label) = workspace_loading_status_label(
+                            if self.worktree_stats_loading {
+                                self.worktrees
+                                    .iter()
+                                    .filter(|worktree| worktree.diff_summary.is_none())
+                                    .count()
+                            } else {
+                                0
+                            },
+                            self.worktrees
+                                .iter()
+                                .filter(|worktree| worktree.pr_loading)
+                                .count(),
+                        ) {
+                            loading_badge(
+                                theme,
+                                format!(
+                                    "{} {label}",
+                                    loading_spinner_frame(self.loading_animation_frame)
+                                ),
+                            )
                         } else {
                             status_text(theme, "ready")
                         },

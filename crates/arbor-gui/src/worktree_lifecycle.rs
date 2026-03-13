@@ -148,6 +148,7 @@ impl ArborWindow {
         modal.managed_preview = None;
         modal.managed_preview_loading = true;
         modal.managed_preview_error = None;
+        self.ensure_loading_animation(cx);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
