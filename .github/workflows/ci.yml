@@ -30,6 +30,20 @@ jobs:
           advanced-security: false
           online-audits: false
 
+  binary-names:
+    name: Binary Name Collisions
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Check for case-insensitive binary name collisions
+        run: ./scripts/ci/check-binary-names.sh --cargo
+
   fmt:
     name: Format
     needs: [zizmor]
