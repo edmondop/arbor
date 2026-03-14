@@ -1754,6 +1754,7 @@ struct ArborWindow {
     show_about: bool,
     show_theme_picker: bool,
     theme_picker_selected_index: usize,
+    theme_picker_scroll_handle: ScrollHandle,
     settings_modal: Option<SettingsModal>,
     daemon_auth_modal: Option<DaemonAuthModal>,
     /// When set, a successful auth submission should retry fetching for this remote daemon index.
