@@ -181,6 +181,7 @@ impl RepositoryIssueProvider for GitHubIssueProvider {
                         title: issue.title.clone(),
                         state: issue.state,
                         url: Some(issue.html_url),
+                        body: normalize_issue_body(issue.body),
                         suggested_worktree_name: issue_worktree_name(
                             &issue.number.to_string(),
                             &issue.title,
@@ -259,6 +260,7 @@ impl RepositoryIssueProvider for GitLabIssueProvider {
                 title: issue.title.clone(),
                 state: issue.state,
                 url: issue.web_url,
+                body: normalize_issue_body(issue.description),
                 suggested_worktree_name: issue_worktree_name(&issue.iid.to_string(), &issue.title),
                 updated_at: issue.updated_at,
                 linked_branch: None,
@@ -281,6 +283,7 @@ struct GitHubIssuePayload {
     title: String,
     html_url: String,
     state: String,
+    body: Option<String>,
     updated_at: Option<String>,
     pull_request: Option<serde_json::Value>,
 }
@@ -292,6 +295,7 @@ struct GitLabIssuePayload {
     title: String,
     state: String,
     web_url: Option<String>,
+    description: Option<String>,
     updated_at: Option<String>,
 }
 
@@ -518,6 +522,16 @@ fn issue_worktree_name(reference: &str, title: &str) -> String {
     }
 }
 
+fn normalize_issue_body(body: Option<String>) -> Option<String> {
+    body.and_then(|body| {
+        if body.trim().is_empty() {
+            None
+        } else {
+            Some(body)
+        }
+    })
+}
+
 fn github_repo_slug(remote: &RemoteSpec) -> Option<String> {
     if remote.host_kind != RemoteHostKind::GitHub {
         return None;
@@ -725,5 +739,16 @@ mod tests {
             "issue-42-fix-auth-callback-race"
         );
         assert_eq!(issue_worktree_name("42", ""), "issue-42");
+    }
+
+    #[test]
+    fn normalize_issue_body_discards_empty_text() {
+        assert_eq!(normalize_issue_body(None), None);
+        assert_eq!(normalize_issue_body(Some(String::new())), None);
+        assert_eq!(normalize_issue_body(Some("  \n\t  ".to_owned())), None);
+        assert_eq!(
+            normalize_issue_body(Some("Line one\n\n- bullet".to_owned())),
+            Some("Line one\n\n- bullet".to_owned())
+        );
     }
 }

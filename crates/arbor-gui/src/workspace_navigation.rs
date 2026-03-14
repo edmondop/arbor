@@ -50,18 +50,6 @@ impl ArborWindow {
         self.issue_lists.entry(target.clone()).or_default()
     }
 
-    fn sync_issue_target(&mut self, cx: &mut Context<Self>) {
-        if self.right_pane_tab == RightPaneTab::Issues {
-            if let Some(target) = self.issue_target_for_current_selection() {
-                self.ensure_issues_loaded_for_target(target, cx);
-            } else {
-                cx.notify();
-            }
-        } else {
-            cx.notify();
-        }
-    }
-
     fn ensure_issues_loaded_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
         if self
             .issue_list_state(&target)
@@ -76,6 +64,11 @@ impl ArborWindow {
 
     fn refresh_issues_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
         let Some(client) = self.daemon_client_for_target(&target) else {
+            tracing::warn!(
+                repo_root = %target.repo_root,
+                daemon_target = ?target.daemon_target,
+                "failed to refresh repository issues: no daemon connection is available"
+            );
             let state = self.issue_list_state_mut(&target);
             state.issues.clear();
             state.source = None;
@@ -94,6 +87,7 @@ impl ArborWindow {
         self.ensure_loading_animation(cx);
         cx.notify();
 
+        let daemon_base_url = client.base_url();
         cx.spawn(async move |this, cx| {
             let repo_root = target.repo_root.clone();
             let response = cx
@@ -112,6 +106,13 @@ impl ArborWindow {
                         state.error = None;
                     },
                     Err(error) => {
+                        tracing::warn!(
+                            repo_root = %target.repo_root,
+                            daemon = %daemon_base_url,
+                            daemon_target = ?target.daemon_target,
+                            error = %error,
+                            "failed to refresh repository issues"
+                        );
                         state.issues.clear();
                         state.source = None;
                         state.notice = None;
@@ -129,15 +130,7 @@ impl ArborWindow {
             .repositories
             .iter()
             .enumerate()
-            .filter(|(index, repository)| {
-                !self.collapsed_repositories.contains(index)
-                    && self
-                        .repository_sidebar_tabs
-                        .get(&repository.group_key)
-                        .copied()
-                        .unwrap_or_default()
-                        == RepositorySidebarTab::Issues
-            })
+            .filter(|(index, _)| !self.collapsed_repositories.contains(index))
             .map(|(_, repository)| self.issue_target_for_repository(repository))
             .collect();
 
@@ -410,6 +403,7 @@ impl ArborWindow {
             self.active_file_view_session_id = Some(existing.id);
             self.active_diff_session_id = None;
             self.logs_tab_active = false;
+            self.sync_navigation_ui_state_store(cx);
             cx.notify();
             return;
         }
@@ -447,6 +441,7 @@ impl ArborWindow {
             self.active_file_view_session_id = Some(session_id);
             self.active_diff_session_id = None;
             self.logs_tab_active = false;
+            self.sync_navigation_ui_state_store(cx);
             cx.notify();
             return;
         }
@@ -467,6 +462,7 @@ impl ArborWindow {
         self.active_file_view_session_id = Some(session_id);
         self.active_diff_session_id = None;
         self.logs_tab_active = false;
+        self.sync_navigation_ui_state_store(cx);
 
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -518,6 +514,7 @@ impl ArborWindow {
         self.active_file_view_session_id = Some(session_id);
         self.active_diff_session_id = None;
         self.logs_tab_active = false;
+        self.sync_navigation_ui_state_store(cx);
         cx.notify();
     }
 
@@ -562,6 +559,7 @@ impl ArborWindow {
             Some(CenterTab::Logs) => {
                 self.logs_tab_open = false;
                 self.logs_tab_active = false;
+                self.sync_navigation_ui_state_store(cx);
                 cx.notify();
             },
             None => {},
@@ -708,6 +706,7 @@ impl ArborWindow {
         }
 
         self.active_repository_index = Some(index);
+        self.active_outpost_index = None;
         self.active_remote_worktree = None;
         self.repo_root = repository.root.clone();
         self.github_repo_slug = repository.github_repo_slug.clone();
@@ -725,7 +724,7 @@ impl ArborWindow {
         self.refresh_worktrees(cx);
         self.refresh_repo_config_if_changed(cx);
         self.sync_selected_worktree_notes(cx);
-        self.sync_issue_target(cx);
+        self.sync_navigation_ui_state_store(cx);
         self.focus_terminal_on_next_render = true;
         cx.notify();
     }
@@ -1132,7 +1131,6 @@ impl ArborWindow {
         self.refresh_repo_config_if_changed(cx);
         let _ = self.reload_changed_files();
         self.sync_selected_worktree_notes(cx);
-        self.sync_issue_target(cx);
         self.expanded_dirs.clear();
         self.selected_file_tree_entry = None;
         self.file_tree_entries.clear();
@@ -1142,6 +1140,7 @@ impl ArborWindow {
         if self.ensure_selected_worktree_terminal(cx) {
             self.sync_daemon_session_store(cx);
         }
+        self.sync_navigation_ui_state_store(cx);
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
@@ -1263,8 +1262,8 @@ impl ArborWindow {
         self.changed_files.clear();
         self.selected_changed_file = None;
         self.sync_selected_worktree_notes(cx);
-        self.sync_issue_target(cx);
         self.refresh_remote_changed_files(cx);
+        self.sync_navigation_ui_state_store(cx);
         cx.notify();
     }
 
@@ -1583,19 +1582,13 @@ impl ArborWindow {
         self.right_pane_search.clear();
         self.right_pane_search_cursor = 0;
         self.right_pane_search_active = false;
-        if tab == RightPaneTab::Issues {
-            if let Some(target) = self.issue_target_for_current_selection() {
-                self.ensure_issues_loaded_for_target(target, cx);
-            } else {
-                cx.notify();
-            }
-        }
         if tab == RightPaneTab::FileTree && self.file_tree_entries.is_empty() {
             self.rebuild_file_tree(cx);
         }
         if tab != RightPaneTab::Notes {
             self.worktree_notes_active = false;
         }
+        self.sync_navigation_ui_state_store(cx);
         cx.notify();
     }
 

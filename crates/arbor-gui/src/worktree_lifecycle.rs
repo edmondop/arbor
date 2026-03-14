@@ -26,6 +26,7 @@ impl ArborWindow {
             .and_then(|r| r.github_repo_slug.as_ref())
             .map(|slug| format!("git@github.com:{slug}.git"))
             .unwrap_or_default();
+        self.issue_details_modal = None;
         self.create_modal = Some(CreateModal {
             tab,
             repository_path_cursor: char_count(&repository_path),
@@ -91,6 +92,7 @@ impl ArborWindow {
             .and_then(|repository| repository.github_repo_slug.as_ref())
             .map(|slug| format!("git@github.com:{slug}.git"))
             .unwrap_or_default();
+        self.issue_details_modal = None;
 
         self.create_modal = Some(CreateModal {
             tab: CreateModalTab::LocalWorktree,
@@ -610,6 +612,7 @@ impl ArborWindow {
                                         .position(|worktree| worktree.path == worktree_path)
                                     {
                                         this.active_worktree_index = Some(index);
+                                        this.sync_navigation_ui_state_store(cx);
                                         let _ = this.reload_changed_files();
                                         if this.ensure_selected_worktree_terminal(cx) {
                                             this.sync_daemon_session_store(cx);
@@ -715,6 +718,7 @@ impl ArborWindow {
                             .position(|worktree| worktree.path == created.worktree_path)
                         {
                             this.active_worktree_index = Some(index);
+                            this.sync_navigation_ui_state_store(cx);
                             let _ = this.reload_changed_files();
                             if this.ensure_selected_worktree_terminal(cx) {
                                 this.sync_daemon_session_store(cx);
@@ -832,6 +836,7 @@ impl ArborWindow {
                             .position(|worktree| worktree.path == created.worktree_path)
                         {
                             this.active_worktree_index = Some(index);
+                            this.sync_navigation_ui_state_store(cx);
                             let _ = this.reload_changed_files();
                             if this.ensure_selected_worktree_terminal(cx) {
                                 this.sync_daemon_session_store(cx);

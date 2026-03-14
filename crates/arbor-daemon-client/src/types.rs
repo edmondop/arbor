@@ -47,6 +47,8 @@ pub struct IssueDto {
     pub title: String,
     pub state: String,
     pub url: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
     pub suggested_worktree_name: String,
     pub updated_at: Option<String>,
     pub linked_branch: Option<String>,

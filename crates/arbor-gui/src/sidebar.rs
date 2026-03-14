@@ -229,9 +229,8 @@ impl ArborWindow {
                             let repository_issue_target =
                                 self.issue_target_for_repository(&repository);
                             let repository_group_key = repository.group_key.clone();
-                            let chevron_repository_group_key = repository_group_key.clone();
-                            let chevron_repository_issue_target =
-                                repository_issue_target.clone();
+                                    let chevron_repository_issue_target =
+                                        repository_issue_target.clone();
 
                             div()
                                 .id(("repository-group", repository_index))
@@ -241,12 +240,10 @@ impl ArborWindow {
                                 .child(
                                     div()
                                         .id(("repository-row", repository_index))
-                                        .cursor_pointer()
                                         .flex()
                                         .items_center()
                                         .gap_1()
                                         .h(px(32.))
-                                        .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_repository(repository_index, cx);
                                         }))
@@ -404,13 +401,7 @@ impl ArborWindow {
                                                                             this.collapsed_repositories
                                                                                 .insert(repository_index);
                                                                         }
-                                                                        if was_collapsed
-                                                                            && this
-                                                                                .repository_sidebar_tab_for_group(
-                                                                                    &chevron_repository_group_key,
-                                                                                )
-                                                                                == RepositorySidebarTab::Issues
-                                                                        {
+                                                                        if was_collapsed {
                                                                             this.ensure_issues_loaded_for_target(
                                                                                 chevron_repository_issue_target
                                                                                     .clone(),
@@ -433,16 +424,6 @@ impl ArborWindow {
                                                         .font_weight(FontWeight::MEDIUM)
                                                         .text_color(rgb(theme.text_primary))
                                                         .child(repository.label.clone()),
-                                                )
-                                                // Worktree count badge
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(rgb(theme.text_disabled))
-                                                        .child(format!(
-                                                            "{}",
-                                                            repo_worktrees.len()
-                                                        )),
                                                 ),
                                         )
                                         .when_some(repo_agent_dot_color, |this, color| {
@@ -455,20 +436,10 @@ impl ArborWindow {
                                             )
                                         })
                                         .child(
-                                            div()
-                                                .id(("repository-add-worktree", repository_index))
-                                                .size(px(20.))
-                                                .rounded_sm()
-                                                .cursor_pointer()
-                                                .flex_none()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(theme.text_muted))
-                                                .hover(|this| this.text_color(rgb(theme.text_primary)))
-                                                .child("+")
+                                            repository_add_worktree_button(
+                                                &theme,
+                                                ("repository-add-worktree", repository_index),
+                                            )
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     if this.active_repository_index
                                                         != Some(repository_index)
@@ -493,6 +464,10 @@ impl ArborWindow {
                                         repository_group_key.clone(),
                                         repository_sidebar_tab,
                                         repository_issue_target.clone(),
+                                        repo_worktrees
+                                            .iter()
+                                            .filter(|(_, worktree)| !worktree.is_primary_checkout)
+                                            .count(),
                                         cx,
                                     ))
                                     .when(
@@ -1437,20 +1412,10 @@ impl ArborWindow {
                                                         )
                                                         // "+" button
                                                         .child(
-                                                            div()
-                                                                .id(("remote-repo-add-wt", plus_id))
-                                                                .size(px(20.))
-                                                                .rounded_sm()
-                                                                .cursor_pointer()
-                                                                .flex_none()
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .text_sm()
-                                                                .font_weight(FontWeight::SEMIBOLD)
-                                                                .text_color(rgb(theme.text_muted))
-                                                                .hover(|this| this.text_color(rgb(theme.text_primary)))
-                                                                .child("+")
+                                                            repository_add_worktree_button(
+                                                                &theme,
+                                                                ("remote-repo-add-wt", plus_id),
+                                                            )
                                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                                     this.open_remote_create_modal(
                                                                         plus_url.clone(),
@@ -1698,10 +1663,21 @@ impl ArborWindow {
         repository_group_key: String,
         active_tab: RepositorySidebarTab,
         issue_target: IssueTarget,
+        worktree_count: usize,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = self.theme();
-        let tab_button = |label: &'static str, tab: RepositorySidebarTab| {
+        let issue_badge = self.issue_list_state(&issue_target).and_then(|state| {
+            if state.loading && !state.loaded {
+                Some("...".to_owned())
+            } else if state.loaded || state.notice.is_some() || state.error.is_some() {
+                Some(state.issues.len().to_string())
+            } else {
+                None
+            }
+        });
+        let tab_button =
+            |label: &'static str, tab: RepositorySidebarTab, badge_label: Option<String>| {
             let is_active = active_tab == tab;
             let group_key = repository_group_key.clone();
             let issue_target = issue_target.clone();
@@ -1751,7 +1727,38 @@ impl ArborWindow {
                     }
                     cx.stop_propagation();
                 }))
-                .child(label)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(4.))
+                        .child(label)
+                        .when_some(badge_label, |this, badge_label| {
+                            this.child(
+                                div()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .bg(rgb(theme.panel_bg))
+                                    .min_w(px(14.))
+                                    .h(px(14.))
+                                    .px_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(10.))
+                                    .font_family(FONT_MONO)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(if is_active {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child(badge_label),
+                            )
+                        }),
+                )
         };
 
         div()
@@ -1759,8 +1766,12 @@ impl ArborWindow {
             .pr_1()
             .flex()
             .gap_1()
-            .child(tab_button("Worktrees", RepositorySidebarTab::Worktrees))
-            .child(tab_button("Issues", RepositorySidebarTab::Issues))
+            .child(tab_button(
+                "Worktrees",
+                RepositorySidebarTab::Worktrees,
+                Some(worktree_count.to_string()),
+            ))
+            .child(tab_button("Issues", RepositorySidebarTab::Issues, issue_badge))
     }
 
     fn render_repository_issue_sidebar(
@@ -1842,6 +1853,8 @@ impl ArborWindow {
             let issue_target = issue_target.clone();
             let issue_source_label = modal_source_label.clone();
             let issue_context = issue.clone();
+            let issue_url = issue.url.clone();
+            let has_issue_url = issue_url.is_some();
             let issue_status_color = if issue.linked_review.is_some() {
                 theme.accent
             } else if issue.linked_branch.is_some() {
@@ -1851,13 +1864,13 @@ impl ArborWindow {
             };
             let issue_status_label = if let Some(review) = issue.linked_review.as_ref() {
                 match review.kind {
-                    terminal_daemon_http::IssueReviewKind::PullRequest => "PR",
-                    terminal_daemon_http::IssueReviewKind::MergeRequest => "MR",
+                    terminal_daemon_http::IssueReviewKind::PullRequest => "PR exists",
+                    terminal_daemon_http::IssueReviewKind::MergeRequest => "MR exists",
                 }
             } else if issue.linked_branch.is_some() {
-                "branch"
+                "Branch exists"
             } else {
-                "open"
+                "Open"
             };
 
             content = content.child(
@@ -1865,6 +1878,8 @@ impl ArborWindow {
                     .id(ElementId::Name(
                         format!("repository-issue-row-{repository_index}-{row_id}").into(),
                     ))
+                    .w_full()
+                    .min_w_0()
                     .cursor_pointer()
                     .rounded_sm()
                     .border_1()
@@ -1872,12 +1887,12 @@ impl ArborWindow {
                     .bg(rgb(theme.panel_bg))
                     .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                     .px_2()
-                    .py_1()
+                    .py_2()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
+                    .items_start()
+                    .gap_2()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_issue_create_modal_for_target(
+                        this.open_issue_details_modal_for_target(
                             issue_target.clone(),
                             issue_source_label.clone(),
                             issue_context.clone(),
@@ -1886,77 +1901,204 @@ impl ArborWindow {
                     }))
                     .child(
                         div()
+                            .mt(px(2.))
+                            .w(px(3.))
+                            .h_full()
+                            .rounded_full()
+                            .bg(rgb(issue_status_color)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
+                            .flex_1()
+                            .flex_col()
+                            .gap(px(6.))
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_family(FONT_MONO)
-                                    .text_color(rgb(theme.accent))
-                                    .child(issue.display_id.clone()),
+                                    .flex()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.))
+                                            .child(
+                                                div()
+                                                    .when_some(
+                                                        issue_url.clone(),
+                                                        |this, issue_url| {
+                                                            this.cursor_pointer()
+                                                                .text_xs()
+                                                                .font_family(FONT_MONO)
+                                                                .font_weight(
+                                                                    FontWeight::SEMIBOLD,
+                                                                )
+                                                                .text_color(rgb(theme.accent))
+                                                                .hover(|this| {
+                                                                    this.text_color(rgb(
+                                                                        theme.text_primary,
+                                                                    ))
+                                                                })
+                                                                .on_mouse_down(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(
+                                                                        move |this, _, _, cx| {
+                                                                            this.open_external_url(
+                                                                                &issue_url,
+                                                                                cx,
+                                                                            );
+                                                                            cx.stop_propagation();
+                                                                        },
+                                                                    ),
+                                                                )
+                                                                .child(issue.display_id.clone())
+                                                        },
+                                                    )
+                                                    .when(!has_issue_url, |this| {
+                                                        this.text_xs()
+                                                            .font_family(FONT_MONO)
+                                                            .font_weight(
+                                                                FontWeight::SEMIBOLD,
+                                                            )
+                                                            .text_color(rgb(theme.accent))
+                                                            .child(issue.display_id.clone())
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(theme.text_primary))
+                                                    .child(issue.title.clone()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(rgb(issue_status_color))
+                                            .px(px(8.))
+                                            .py(px(3.))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(issue_status_color))
+                                            .child(issue_status_label),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(issue_status_color))
-                                    .child(issue_status_label),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .flex_wrap()
+                                    .child(
+                                        div()
+                                            .rounded_full()
+                                            .bg(rgb(theme.panel_active_bg))
+                                            .px(px(8.))
+                                            .py(px(3.))
+                                            .text_xs()
+                                            .font_family(FONT_MONO)
+                                            .text_color(rgb(theme.text_muted))
+                                            .child(issue.suggested_worktree_name.clone()),
+                                    )
+                                    .when_some(issue.updated_at.clone(), |this, updated_at| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(theme.text_disabled))
+                                                .child(updated_at),
+                                        )
+                                    }),
+                            )
+                            .when(
+                                issue.linked_review.is_some() || issue.linked_branch.is_some(),
+                                |this| {
+                                    this.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_wrap()
+                                            .when_some(
+                                                issue.linked_review.clone(),
+                                                |this, review| {
+                                                    let review_url = review.url.clone();
+                                                    let review_color = match review.kind {
+                                                        terminal_daemon_http::IssueReviewKind::PullRequest => theme.accent,
+                                                        terminal_daemon_http::IssueReviewKind::MergeRequest => 0x72d69c,
+                                                    };
+                                                    this.child(
+                                                        div()
+                                                            .rounded_full()
+                                                            .border_1()
+                                                            .border_color(rgb(review_color))
+                                                            .bg(rgb(theme.panel_active_bg))
+                                                            .px(px(8.))
+                                                            .py(px(3.))
+                                                            .text_xs()
+                                                            .font_weight(
+                                                                FontWeight::SEMIBOLD,
+                                                            )
+                                                            .text_color(rgb(review_color))
+                                                            .when(
+                                                                review_url.is_some(),
+                                                                |this| {
+                                                                    this.cursor_pointer()
+                                                                        .hover(|this| {
+                                                                            this.opacity(0.9)
+                                                                        })
+                                                                        .on_mouse_down(
+                                                                            MouseButton::Left,
+                                                                            cx.listener(
+                                                                                move |this,
+                                                                                      _,
+                                                                                      _,
+                                                                                      cx| {
+                                                                                    if let Some(
+                                                                                        url,
+                                                                                    ) = review_url
+                                                                                        .as_deref()
+                                                                                    {
+                                                                                        this.open_external_url(
+                                                                                            url,
+                                                                                            cx,
+                                                                                        );
+                                                                                        cx.stop_propagation();
+                                                                                    }
+                                                                                },
+                                                                            ),
+                                                                        )
+                                                                },
+                                                            )
+                                                            .child(review.label),
+                                                    )
+                                                },
+                                            )
+                                            .when_some(
+                                                issue.linked_branch.clone(),
+                                                |this, branch| {
+                                                    this.child(
+                                                        div()
+                                                            .rounded_full()
+                                                            .bg(rgb(theme.panel_active_bg))
+                                                            .px(px(8.))
+                                                            .py(px(3.))
+                                                            .text_xs()
+                                                            .font_family(FONT_MONO)
+                                                            .text_color(rgb(theme.text_primary))
+                                                            .child(branch),
+                                                    )
+                                                },
+                                            ),
+                                    )
+                                },
                             ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.text_primary))
-                            .child(issue.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .font_family(FONT_MONO)
-                                    .text_color(rgb(theme.text_disabled))
-                                    .child(issue.suggested_worktree_name.clone()),
-                            )
-                            .when_some(issue.linked_review.clone(), |this, review| {
-                                let review_url = review.url.clone();
-                                this.child(
-                                    div()
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .text_color(rgb(theme.accent))
-                                        .hover(|this| this.text_color(rgb(theme.text_primary)))
-                                        .child(review.label)
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, _, cx| {
-                                                if let Some(url) = review_url.as_deref() {
-                                                    this.open_external_url(url, cx);
-                                                    cx.stop_propagation();
-                                                }
-                                            }),
-                                        ),
-                                )
-                            })
-                            .when_some(issue.linked_branch.clone(), |this, branch| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .font_family(FONT_MONO)
-                                        .text_color(rgb(theme.text_muted))
-                                        .child(branch),
-                                )
-                            }),
                     ),
             );
         }
@@ -2686,4 +2828,30 @@ impl ArborWindow {
                 .child(card),
         )
     }
+}
+
+fn repository_add_worktree_button<I>(theme: &ThemePalette, id: I) -> Stateful<Div>
+where
+    I: Into<ElementId>,
+{
+    div()
+        .id(id)
+        .size(px(20.))
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.sidebar_bg))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme.text_muted))
+        .hover(|this| {
+            this.text_color(rgb(theme.text_primary))
+                .bg(rgb(theme.panel_active_bg))
+        })
+        .child("+")
 }

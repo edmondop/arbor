@@ -160,8 +160,19 @@ impl ArborWindow {
             preferred_checkout_kind: Some(self.preferred_checkout_kind),
             sidebar_order: self.last_persisted_ui_state.sidebar_order.clone(),
             repository_sidebar_tabs: self.repository_sidebar_tabs_snapshot(),
+            selected_sidebar_selection: self.sidebar_selection_snapshot(),
+            right_pane_tab: Some(persisted_right_pane_tab(self.right_pane_tab)),
+            logs_tab_open: Some(self.logs_tab_open),
+            logs_tab_active: Some(self.logs_tab_active),
             pull_request_cache: self.pull_request_cache_snapshot(),
         }
+    }
+
+    fn queued_ui_state_base(&self) -> ui_state_store::UiState {
+        self.pending_ui_state_save
+            .clone()
+            .or_else(|| self.ui_state_save_in_flight.clone())
+            .unwrap_or_else(|| self.last_persisted_ui_state.clone())
     }
 
     fn repository_sidebar_tabs_snapshot(&self) -> HashMap<String, RepositorySidebarTab> {
@@ -170,6 +181,30 @@ impl ArborWindow {
             .filter(|(_, tab)| **tab != RepositorySidebarTab::Worktrees)
             .map(|(group_key, tab)| (group_key.clone(), *tab))
             .collect()
+    }
+
+    fn sidebar_selection_snapshot(&self) -> Option<ui_state_store::PersistedSidebarSelection> {
+        if let Some(outpost_index) = self.active_outpost_index {
+            return self.outposts.get(outpost_index).map(|outpost| {
+                ui_state_store::PersistedSidebarSelection::Outpost {
+                    repo_root: outpost.repo_root.display().to_string(),
+                    outpost_id: outpost.outpost_id.clone(),
+                }
+            });
+        }
+
+        if let Some(worktree) = self.active_worktree() {
+            return Some(ui_state_store::PersistedSidebarSelection::Worktree {
+                repo_root: worktree.repo_root.display().to_string(),
+                path: worktree.path.display().to_string(),
+            });
+        }
+
+        self.selected_repository().map(|repository| {
+            ui_state_store::PersistedSidebarSelection::Repository {
+                root: repository.root.display().to_string(),
+            }
+        })
     }
 
     fn pull_request_cache_snapshot(
@@ -250,14 +285,23 @@ impl ArborWindow {
     }
 
     fn sync_pull_request_cache_store(&mut self, cx: &mut Context<Self>) {
-        let mut next_state = self.last_persisted_ui_state.clone();
+        let mut next_state = self.queued_ui_state_base();
         next_state.pull_request_cache = self.pull_request_cache_snapshot();
         self.queue_ui_state_save(next_state, cx);
     }
 
     fn sync_repository_sidebar_tabs_store(&mut self, cx: &mut Context<Self>) {
-        let mut next_state = self.last_persisted_ui_state.clone();
+        let mut next_state = self.queued_ui_state_base();
         next_state.repository_sidebar_tabs = self.repository_sidebar_tabs_snapshot();
+        self.queue_ui_state_save(next_state, cx);
+    }
+
+    fn sync_navigation_ui_state_store(&mut self, cx: &mut Context<Self>) {
+        let mut next_state = self.queued_ui_state_base();
+        next_state.selected_sidebar_selection = self.sidebar_selection_snapshot();
+        next_state.right_pane_tab = Some(persisted_right_pane_tab(self.right_pane_tab));
+        next_state.logs_tab_open = Some(self.logs_tab_open);
+        next_state.logs_tab_active = Some(self.logs_tab_active);
         self.queue_ui_state_save(next_state, cx);
     }
 

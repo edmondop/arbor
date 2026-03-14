@@ -30,9 +30,37 @@ pub struct UiState {
     /// Selected left-pane subtab per repository group.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub repository_sidebar_tabs: HashMap<String, RepositorySidebarTab>,
+    pub selected_sidebar_selection: Option<PersistedSidebarSelection>,
+    pub right_pane_tab: Option<PersistedRightPaneTab>,
+    pub logs_tab_open: Option<bool>,
+    pub logs_tab_active: Option<bool>,
     /// Resolved pull request state by worktree path for fast startup rendering.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub pull_request_cache: HashMap<String, CachedPullRequestState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PersistedSidebarSelection {
+    Repository {
+        root: String,
+    },
+    Worktree {
+        repo_root: String,
+        path: String,
+    },
+    Outpost {
+        repo_root: String,
+        outpost_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PersistedRightPaneTab {
+    Changes,
+    FileTree,
+    Notes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -148,7 +176,10 @@ fn home_dir() -> PathBuf {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use {
-        super::{CachedPullRequestState, JsonUiStateStore, UiState, UiStateStore},
+        super::{
+            CachedPullRequestState, JsonUiStateStore, PersistedRightPaneTab,
+            PersistedSidebarSelection, UiState, UiStateStore,
+        },
         crate::{
             RepositorySidebarTab,
             github_service::{CheckStatus, PrDetails, PrState, ReviewDecision},
@@ -223,6 +254,40 @@ mod tests {
             loaded.repository_sidebar_tabs,
             state.repository_sidebar_tabs
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn json_ui_state_store_round_trips_navigation_selection_and_tabs() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("arbor-ui-state-nav-{unique}.json"));
+        let store = JsonUiStateStore::new(path.clone());
+
+        let state = UiState {
+            selected_sidebar_selection: Some(PersistedSidebarSelection::Worktree {
+                repo_root: "/tmp/repo".to_owned(),
+                path: "/tmp/repo/issue-42".to_owned(),
+            }),
+            right_pane_tab: Some(PersistedRightPaneTab::Notes),
+            logs_tab_open: Some(true),
+            logs_tab_active: Some(false),
+            ..UiState::default()
+        };
+
+        store.save(&state).expect("save ui state");
+        let loaded = store.load().expect("load ui state");
+
+        assert_eq!(
+            loaded.selected_sidebar_selection,
+            state.selected_sidebar_selection
+        );
+        assert_eq!(loaded.right_pane_tab, state.right_pane_tab);
+        assert_eq!(loaded.logs_tab_open, state.logs_tab_open);
+        assert_eq!(loaded.logs_tab_active, state.logs_tab_active);
 
         let _ = fs::remove_file(path);
     }

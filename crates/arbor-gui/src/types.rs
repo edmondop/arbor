@@ -100,6 +100,13 @@ struct CreateModalIssueContext {
     url: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct IssueDetailsModal {
+    target: IssueTarget,
+    source_label: String,
+    issue: terminal_daemon_http::IssueDto,
+}
+
 type SharedTerminalRuntime = Arc<dyn TerminalRuntimeHandle>;
 
 #[derive(Clone)]
@@ -947,7 +954,6 @@ enum CenterTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RightPaneTab {
     Changes,
-    Issues,
     FileTree,
     Notes,
 }
@@ -1789,6 +1795,7 @@ struct ArborWindow {
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
     create_modal: Option<CreateModal>,
+    issue_details_modal: Option<IssueDetailsModal>,
     preferred_checkout_kind: CheckoutKind,
     github_auth_modal: Option<GitHubAuthModal>,
     delete_modal: Option<DeleteModal>,
