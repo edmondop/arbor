@@ -1703,6 +1703,7 @@ struct ArborWindow {
     worktrees: Vec<WorktreeSummary>,
     worktree_stats_loading: bool,
     worktree_prs_loading: bool,
+    github_rate_limited_until: Option<SystemTime>,
     expanded_pr_checks_worktree: Option<PathBuf>,
     active_worktree_index: Option<usize>,
     worktree_selection_epoch: usize,
