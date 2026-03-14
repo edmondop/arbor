@@ -185,7 +185,12 @@ jobs:
           lipo -create \
             target/aarch64-apple-darwin/release/arbor-cli \
             target/x86_64-apple-darwin/release/arbor-cli \
-            -output dist/arbor
+            -output dist/arbor-cli
+
+          # Verify no case-insensitive filename collisions in dist/ (macOS APFS
+          # is case-insensitive by default, so "Arbor" and "arbor" are the same file).
+          ./scripts/ci/check-binary-names.sh dist
+
           ./scripts/ci/package-macos.sh "$TAG" "universal2-apple-darwin" "dist/Arbor" "dist"
       - name: Import signing certificate
         if: env.MACOS_CERTIFICATE != ''
