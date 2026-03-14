@@ -79,7 +79,10 @@ export async function refresh(): Promise<void> {
 
     // Auto-select first repo on initial load
     if (selectedRepoRoot === null && repositories.length > 0) {
-      selectedRepoRoot = repositories[0].root;
+      const firstRepository = repositories[0];
+      if (firstRepository !== undefined) {
+        selectedRepoRoot = firstRepository.root;
+      }
     }
 
     let selectedWorktreePath =
@@ -294,18 +297,18 @@ export function startAgentActivityWs(): void {
  */
 export function agentStateForWorktree(worktreePath: string): "working" | "waiting" | null {
   let bestState: "working" | "waiting" | null = null;
-  let bestLen = 0;
 
   for (const session of state.agentSessions) {
     if (!session.cwd.startsWith(worktreePath)) continue;
-    if (worktreePath.length > bestLen) {
-      bestState = session.state;
-      bestLen = worktreePath.length;
-      continue;
-    }
-    if (worktreePath.length === bestLen && session.state === "waiting") {
-      bestState = "waiting";
-    }
+    bestState = mergeAgentState(bestState, session.state);
   }
   return bestState;
+}
+
+function mergeAgentState(
+  current: "working" | "waiting" | null,
+  next: "working" | "waiting",
+): "working" | "waiting" {
+  if (current === "working" || next === "working") return "working";
+  return "waiting";
 }
