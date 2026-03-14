@@ -1,6 +1,6 @@
 # QA Checklist
 
-This checklist is focused on the branch-added Tier 1 workflow features plus the related keyboard/UI follow-ups.
+This checklist focuses on the current high-risk Arbor workflows and the related keyboard / UI follow-ups.
 
 ## QA-01: `arbor.toml` Repo Config Loads
 

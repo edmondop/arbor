@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Building &amp; Development | Arbor Docs</title>
-  <meta name="description" content="Arbor development guide — task runner commands, CI, releases, and changelog tooling.">
+  <meta name="description" content="Arbor development guide, covering task runner commands, crate architecture, releases, and changelog tooling.">
   <link rel="icon" type="image/png" href="../images/arbor-icon-1024.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -113,6 +113,18 @@
               <td class="py-2 pr-4 font-mono text-xs text-slate-800">just run</td>
               <td class="py-2">Build and run the desktop app</td>
             </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just run-mcp</td>
+              <td class="py-2">Run the daemon and MCP server together</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just docs-build</td>
+              <td class="py-2">Build the mdBook docs from <code class="font-mono text-xs">docs/src</code></td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just changelog</td>
+              <td class="py-2">Generate <code class="font-mono text-xs">CHANGELOG.md</code> with git-cliff</td>
+            </tr>
             <tr>
               <td class="py-2 pr-4 font-mono text-xs text-slate-800">just run-httpd</td>
               <td class="py-2">Build and run the HTTP daemon</td>
@@ -125,7 +137,7 @@
     <!-- Crate Architecture -->
     <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
       <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Crate Architecture</h2>
-      <p class="mt-3 text-sm leading-relaxed text-slate-600">The project is split into four crates:</p>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">Arbor is a workspace of focused crates rather than one monolith. The most important ones are:</p>
       <div class="mt-4 overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
@@ -136,8 +148,16 @@
           </thead>
           <tbody class="text-slate-600">
             <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-cli</td>
+              <td class="py-2">CLI for Arbor's daemon API (<code class="font-mono text-xs">arbor-cli</code>)</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-daemon-client</td>
+              <td class="py-2">Typed client and DTO layer shared by CLI and MCP</td>
+            </tr>
+            <tr class="border-b border-slate-100">
               <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-core</td>
-              <td class="py-2">Worktree primitives, change detection, agent hooks</td>
+              <td class="py-2">Worktree primitives, config parsing, process and task types, agent hooks</td>
             </tr>
             <tr class="border-b border-slate-100">
               <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-gui</td>
@@ -147,9 +167,25 @@
               <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-httpd</td>
               <td class="py-2">Remote HTTP daemon (<code class="font-mono text-xs">arbor-httpd</code> binary)</td>
             </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-mcp</td>
+              <td class="py-2">MCP server backed by the daemon (<code class="font-mono text-xs">arbor-mcp</code>)</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-terminal-emulator</td>
+              <td class="py-2">Embedded terminal engine glue and Ghostty integration</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-ssh / arbor-mosh</td>
+              <td class="py-2">Remote outpost transports</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-symphony</td>
+              <td class="py-2">Optional workflow orchestration runtime</td>
+            </tr>
             <tr>
               <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-web-ui</td>
-              <td class="py-2">TypeScript dashboard assets + helper crate</td>
+              <td class="py-2">TypeScript dashboard assets served by the daemon</td>
             </tr>
           </tbody>
         </table>
@@ -177,7 +213,7 @@
     <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
       <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Releases</h2>
       <p class="mt-3 text-sm leading-relaxed text-slate-600">
-        Push a tag in <code class="font-mono text-xs">YYYYMMDD.NN</code> format (example: <code class="font-mono text-xs">20260301.01</code>) to trigger an automated release.
+        Push a tag in <code class="font-mono text-xs">YYYYMMDD.NN</code> format (example: <code class="font-mono text-xs">20260314.01</code>) to trigger an automated release.
       </p>
       <p class="mt-2 text-sm text-slate-600">
         Workflow: <a class="text-arbor-600 underline" href="https://github.com/penso/arbor/actions/workflows/release.yml" target="_blank" rel="noreferrer">Release</a>
@@ -195,6 +231,9 @@
       <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Changelog</h2>
       <p class="mt-3 text-sm leading-relaxed text-slate-600">
         This project uses <a class="text-arbor-600 underline" href="https://git-cliff.org/" target="_blank" rel="noreferrer">git-cliff</a> for changelog generation. Config lives in <code class="font-mono text-xs">cliff.toml</code>.
+      </p>
+      <p class="mt-2 text-sm leading-relaxed text-slate-600">
+        The current config matches Arbor's real release tags and commit style: it groups both conventional and sentence-case commits, filters merge commits, skips noise such as docs-only and dependency bumps, and deduplicates repeated merge-history messages.
       </p>
       <div class="mt-4 overflow-x-auto">
         <table class="w-full text-sm">
@@ -215,7 +254,7 @@
             </tr>
             <tr>
               <td class="py-2 pr-4 font-mono text-xs text-slate-800">just changelog-release &lt;version&gt;</td>
-              <td class="py-2">Preview a release section tagged as <code class="font-mono text-xs">v&lt;version&gt;</code></td>
+              <td class="py-2">Preview a release section tagged as <code class="font-mono text-xs">YYYYMMDD.NN</code></td>
             </tr>
           </tbody>
         </table>

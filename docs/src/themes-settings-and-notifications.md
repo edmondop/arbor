@@ -2,7 +2,8 @@
 
 ## Themes
 
-Arbor includes a large theme set and a theme picker modal.
+Arbor includes a large theme set and a keyboard-driven theme picker modal.
+The current set spans Omarchy defaults, darker coding themes, and newer white VS Code inspired options.
 
 Keyboard interaction now includes:
 
@@ -16,8 +17,11 @@ Keyboard interaction now includes:
 The settings surface includes:
 
 - daemon bind mode
+- daemon URL and remote-connection state
+- embedded terminal engine selection
 - notifications toggle
 - GitHub auth-related state and connected daemon behavior
+- branch-aware title and other workspace polish persisted across restarts
 
 ## Notifications
 
@@ -25,6 +29,7 @@ Arbor supports both local and remote notification paths:
 
 - native desktop notifications from the GUI
 - webhook delivery from the daemon
+- terminal bell and completion awareness from daemon-backed session activity
 
 The repo config can filter notifications by event name. Current webhook event names are:
 
@@ -41,7 +46,7 @@ Webhook delivery is transition-aware and retrying:
 
 ## Command Palette UX
 
-The command palette is designed to support keyboard-first navigation:
+The command palette is designed to support keyboard-first navigation across both built-in actions and repo-local content:
 
 - `Cmd+K` opens it
 - arrow keys move selection

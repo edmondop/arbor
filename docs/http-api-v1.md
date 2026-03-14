@@ -34,6 +34,21 @@ Returns daemon health and version.
 
 Returns known repository roots from `~/.arbor/repositories.json`.
 
+### `GET /api/v1/issues`
+
+Returns provider-backed issues for one repository.
+
+Query params:
+
+- `repo_root` (required): repository root path
+
+Response includes:
+
+- the resolved issue source (`github` or `gitlab`)
+- issue id, display id, title, state, and URL
+- a suggested worktree name
+- linked branch and linked review metadata when Arbor can detect them
+
 ### `GET /api/v1/worktrees`
 
 Returns worktrees across known repositories.
@@ -105,6 +120,32 @@ Request body:
 ```json
 {
   "path": "/Users/penso/.arbor/worktrees/arbor/feature-docs"
+}
+```
+
+### `POST /api/v1/worktrees/managed/preview`
+
+Previews the sanitized worktree name, derived branch, and target path for a managed worktree.
+
+Request body:
+
+```json
+{
+  "repo_root": "/Users/penso/code/arbor",
+  "worktree_name": "Issue 59 Fix changelog generation"
+}
+```
+
+### `POST /api/v1/worktrees/managed`
+
+Creates a managed worktree from a typed name or issue-derived label.
+
+Request body:
+
+```json
+{
+  "repo_root": "/Users/penso/code/arbor",
+  "worktree_name": "Issue 59 Fix changelog generation"
 }
 ```
 
@@ -221,7 +262,8 @@ WebSocket stream for real-time agent activity updates.
 
 ### `GET /api/v1/processes`
 
-Returns managed processes loaded from `arbor.toml`.
+Returns managed processes loaded from `arbor.toml` and `Procfile`.
+Each process reports its source, runtime status, restart count, memory usage, and linked terminal session id when present.
 
 ### `POST /api/v1/processes/start-all`
 
@@ -247,6 +289,42 @@ Restarts one named process.
 
 WebSocket stream for real-time managed process updates.
 
+### `GET /api/v1/tasks`
+
+Returns scheduled `[[tasks]]` loaded from `arbor.toml`.
+
+### `POST /api/v1/tasks/:name/run`
+
+Manually triggers one scheduled task, ignoring its cron schedule.
+
+### `GET /api/v1/tasks/:name/history`
+
+Returns recent execution history for one task, including exit code, stdout tail, and whether an agent trigger fired.
+
+### `GET /api/v1/tasks/ws`
+
+WebSocket stream for task snapshots, status updates, and execution events.
+
+### `GET /api/v1/logs/ws`
+
+WebSocket stream of daemon log lines for the desktop app and other tooling.
+
 ### `POST /api/v1/shutdown`
 
 Requests daemon shutdown. This is limited to localhost callers.
+
+### `POST /api/v1/config/bind`
+
+Updates the daemon bind mode.
+
+### `GET /api/v1/config/bind`
+
+Returns the current bind mode.
+
+## Optional Symphony Endpoints
+
+When Arbor is built with the `symphony` feature, the daemon also exposes:
+
+- `GET /api/v1/symphony/state`
+- `POST /api/v1/symphony/refresh`
+- `GET /api/v1/symphony/:issue_identifier`

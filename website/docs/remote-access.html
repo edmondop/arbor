@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Remote Access &amp; HTTP API | Arbor Docs</title>
-  <meta name="description" content="Arbor remote daemon setup, connection methods, and full HTTP API reference.">
+  <meta name="description" content="Arbor remote daemon setup, connection methods, web UI and CLI entry points, and the current HTTP API reference.">
   <link rel="icon" type="image/png" href="../images/arbor-icon-1024.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -62,24 +62,27 @@
 
     <div class="mt-4 mb-10">
       <p class="text-xs font-bold uppercase tracking-[0.18em] text-arbor-700">Documentation</p>
-      <h1 class="mt-2 font-display text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">Remote Access &amp; HTTP API</h1>
+      <h1 class="mt-2 font-display text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">Remote Access, Web UI, and HTTP API</h1>
     </div>
 
     <!-- Remote Access -->
     <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Running the Remote Daemon</h2>
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Running the Daemon</h2>
       <p class="mt-3 text-sm leading-relaxed text-slate-600">Start the daemon with any of these methods:</p>
       <ul class="mt-3 space-y-2 text-sm text-slate-700">
         <li class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs"><code>just run-httpd</code></li>
+        <li class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs"><code>Arbor --daemon</code></li>
         <li class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs"><code>ARBOR_HTTPD_BIND=0.0.0.0:8787 cargo +nightly-2025-11-30 run -p arbor-httpd</code></li>
         <li class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs"><code>Arbor --daemon --bind 0.0.0.0:8787</code></li>
       </ul>
 
-      <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Connecting from the GUI</h3>
-      <p class="mt-2 text-sm leading-relaxed text-slate-600">From the GUI, <strong>Connect to Host...</strong> accepts:</p>
+      <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Connecting Clients</h3>
+      <p class="mt-2 text-sm leading-relaxed text-slate-600">Arbor's daemon is shared by the native GUI, the bundled web dashboard, <code class="font-mono text-xs">arbor-cli</code>, and <code class="font-mono text-xs">arbor-mcp</code>.</p>
       <ul class="mt-2 list-disc pl-5 text-sm text-slate-700 space-y-1">
-        <li><code class="font-mono text-xs">http://IP:port/</code> — direct HTTP access</li>
-        <li><code class="font-mono text-xs">ssh://IP/</code> or <code class="font-mono text-xs">ssh://user@IP:22/</code> — creates a local SSH tunnel and routes daemon traffic securely over SSH</li>
+        <li><code class="font-mono text-xs">http://HOST:8787/</code> opens the bundled web UI and also serves the HTTP API under <code class="font-mono text-xs">/api/v1</code>.</li>
+        <li>The desktop GUI accepts <code class="font-mono text-xs">http://IP:port/</code> for direct access.</li>
+        <li>The desktop GUI also accepts <code class="font-mono text-xs">ssh://IP/</code> or <code class="font-mono text-xs">ssh://user@IP:22/</code> to create a local SSH tunnel and route daemon traffic over SSH.</li>
+        <li><code class="font-mono text-xs">arbor-cli</code> and <code class="font-mono text-xs">arbor-mcp</code> use <code class="font-mono text-xs">ARBOR_DAEMON_URL</code> and optional <code class="font-mono text-xs">ARBOR_DAEMON_AUTH_TOKEN</code>.</li>
       </ul>
 
       <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Desktop Daemon URL Override</h3>
@@ -87,9 +90,12 @@
         Set <code class="font-mono text-xs">daemon_url = "http://127.0.0.1:8787"</code> in <code class="font-mono text-xs">~/.config/arbor/config.toml</code>.
       </p>
 
-      <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Web UI</h3>
+      <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Auth and Web UI Assets</h3>
       <p class="mt-2 text-sm leading-relaxed text-slate-600">
-        If <code class="font-mono text-xs">crates/arbor-web-ui/app/dist/index.html</code> is missing, the daemon attempts an on-demand build with <code class="font-mono text-xs">npm</code>.
+        Loopback callers are allowed without authentication. Non-loopback callers must send <code class="font-mono text-xs">Authorization: Bearer &lt;token&gt;</code> when <code class="font-mono text-xs">[daemon].auth_token</code> is configured in <code class="font-mono text-xs">~/.config/arbor/config.toml</code>.
+      </p>
+      <p class="mt-2 text-sm leading-relaxed text-slate-600">
+        If <code class="font-mono text-xs">crates/arbor-web-ui/app/dist/index.html</code> is missing, the daemon attempts an on-demand build with <code class="font-mono text-xs">npm</code> so the bundled dashboard stays available.
       </p>
     </section>
 
@@ -97,7 +103,7 @@
     <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
       <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">HTTP API Reference (v1)</h2>
       <p class="mt-3 text-sm leading-relaxed text-slate-600">
-        Base URL defaults to <code class="font-mono text-xs">http://0.0.0.0:8787</code> (set via <code class="font-mono text-xs">ARBOR_HTTPD_BIND</code>).
+        Base URL defaults to <code class="font-mono text-xs">http://127.0.0.1:8787</code> on localhost and can bind remotely when auth is configured or <code class="font-mono text-xs">ARBOR_HTTPD_BIND</code> is set.
       </p>
 
       <!-- Health -->
@@ -112,11 +118,28 @@
         <p class="mt-1 text-sm text-slate-600">Returns known repository roots from <code class="font-mono text-xs">~/.arbor/repositories.json</code>.</p>
       </div>
 
+      <!-- Issues -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/issues</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns provider-backed issues for one repository, including suggested worktree names and linked branch / review metadata.</p>
+        <p class="mt-1 text-xs text-slate-500">Query param: <code class="font-mono">repo_root</code> (required).</p>
+      </div>
+
       <!-- Worktrees -->
       <div class="mt-5 border-t border-slate-100 pt-5">
         <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/worktrees</span></h3>
         <p class="mt-1 text-sm text-slate-600">Returns worktrees across known repositories.</p>
         <p class="mt-1 text-xs text-slate-500">Query param: <code class="font-mono">repo_root</code> (optional) — filter to one repository root path.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/worktrees/managed/preview</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Previews the sanitized worktree name, branch, and path for a managed worktree.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/worktrees/managed</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Creates a managed worktree from an issue-derived or manually entered name.</p>
       </div>
 
       <!-- List terminals -->
@@ -151,8 +174,9 @@
       <!-- Write -->
       <div class="mt-5 border-t border-slate-100 pt-5">
         <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/terminals/:session_id/write</span></h3>
-        <p class="mt-1 text-sm text-slate-600">Writes UTF-8 input to a terminal.</p>
-        <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>{ "data": "ls -la\n" }</code></pre>
+        <p class="mt-1 text-sm text-slate-600">Writes raw terminal input bytes to a session.</p>
+        <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>ls -la
+</code></pre>
       </div>
 
       <!-- Resize -->
@@ -183,9 +207,9 @@
       </div>
     </section>
 
-    <!-- WebSocket -->
+    <!-- Runtime Streams -->
     <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">WebSocket Streaming</h2>
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Runtime Streams and Daemon Control</h2>
       <h3 class="mt-4 font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/terminals/:session_id/ws</span></h3>
       <p class="mt-2 text-sm leading-relaxed text-slate-600">WebSocket stream for interactive terminal I/O.</p>
 
@@ -200,6 +224,63 @@
 {"type":"output", ...}
 {"type":"exit", ...}
 {"type":"error", ...}</code></pre>
+
+      <div class="mt-6 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/agent/activity</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns the current agent activity snapshot.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/agent/notify</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Accepts hook updates that move an agent session into working or waiting state.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/agent/activity/ws</span></h3>
+        <p class="mt-1 text-sm text-slate-600">WebSocket stream for real-time agent activity updates.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/processes</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns managed processes from <code class="font-mono text-xs">Procfile</code> and <code class="font-mono text-xs">arbor.toml</code>, including source, status, restart count, memory usage, and linked terminal session id.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/processes/start-all</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Starts all configured managed processes. Individual start, stop, and restart endpoints also exist under <code class="font-mono text-xs">/api/v1/processes/:name/*</code>.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/processes/ws</span></h3>
+        <p class="mt-1 text-sm text-slate-600">WebSocket stream for process snapshots and status updates.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/tasks</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns scheduled <code class="font-mono text-xs">[[tasks]]</code> loaded from <code class="font-mono text-xs">arbor.toml</code>.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/tasks/:name/run</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Manually triggers one scheduled task. Task history is available from <code class="font-mono text-xs">/api/v1/tasks/:name/history</code>, and task streaming uses <code class="font-mono text-xs">/api/v1/tasks/ws</code>.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/logs/ws</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Streams daemon log lines over WebSocket for the desktop app and other tooling.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/config/bind</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Updates the daemon bind mode. Use <code class="font-mono text-xs">GET /api/v1/config/bind</code> to read the current setting.</p>
+      </div>
+
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-rose-700">POST <span class="text-slate-800">/api/v1/shutdown</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Requests daemon shutdown. This is limited to localhost callers.</p>
+      </div>
+
+      <p class="mt-6 text-sm leading-relaxed text-slate-600">If Arbor is built with the optional <code class="font-mono text-xs">symphony</code> feature, additional endpoints are exposed under <code class="font-mono text-xs">/api/v1/symphony/*</code>.</p>
     </section>
   </main>
 

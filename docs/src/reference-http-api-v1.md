@@ -13,15 +13,18 @@ Base URL defaults to:
 
 ## Main Endpoints
 
-### Health and Repositories
+### Health, Repositories, and Issues
 
 - `GET /api/v1/health`
 - `GET /api/v1/repositories`
+- `GET /api/v1/issues?repo_root=...`
 
 ### Worktrees
 
 - `GET /api/v1/worktrees`
 - `POST /api/v1/worktrees`
+- `POST /api/v1/worktrees/managed/preview`
+- `POST /api/v1/worktrees/managed`
 - `POST /api/v1/worktrees/delete`
 - `GET /api/v1/worktrees/changes`
 - `POST /api/v1/worktrees/commit`
@@ -55,10 +58,26 @@ Base URL defaults to:
 - `POST /api/v1/processes/:name/restart`
 - `GET /api/v1/processes/ws`
 
-### Daemon Control
+### Tasks
+
+- `GET /api/v1/tasks`
+- `POST /api/v1/tasks/:name/run`
+- `GET /api/v1/tasks/:name/history`
+- `GET /api/v1/tasks/ws`
+
+### Daemon Control and Logs
 
 - `POST /api/v1/shutdown`
 - `POST /api/v1/config/bind`
 - `GET /api/v1/config/bind`
+- `GET /api/v1/logs/ws`
+
+### Optional Symphony Endpoints
+
+When the `symphony` feature is enabled:
+
+- `GET /api/v1/symphony/state`
+- `POST /api/v1/symphony/refresh`
+- `GET /api/v1/symphony/:issue_identifier`
 
 For the canonical standalone reference, see [../http-api-v1.md](../http-api-v1.md).

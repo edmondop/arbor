@@ -16,61 +16,74 @@
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/penso/arbor?utm_source=badge)
 
 Arbor is a **fully native app for agentic coding** built with Rust and [GPUI](https://gpui.rs).
-It gives you one place to manage repositories, parallel worktrees, embedded terminals, diffs, AI coding agent activity, and a daemon-backed MCP server.
+It gives you one place to manage repositories, issue-driven worktrees, embedded terminals, managed processes, diffs, PR context, AI coding agent activity, and a shared daemon that also powers Arbor's web UI, CLI, and MCP server.
 
 ## Why Arbor
 
-- Fully native desktop app (UI + terminal stack, Rust + GPUI), optimized for long-running local workflows
-- One workspace for worktrees, terminals, file changes, and git actions
-- Built for parallel coding sessions across local repos and remote outposts
+- Fully native desktop app, UI and terminal stack included, optimized for long-running local workflows
+- One daemon-backed model for the desktop app, web UI, CLI, and MCP server
+- Built for parallel coding sessions across local repos, issue queues, and remote outposts
 
 ## Core Capabilities
 
-### Worktree Management
+### Repositories, Worktrees, and Issues
 - List, create, and delete worktrees across multiple repositories
+- Create managed worktrees directly from GitHub or GitLab issues
+- Preview sanitized worktree names, branch names, and target paths before creation
+- Repo-local branch naming rules via `[branch]` in `arbor.toml`
 - Delete confirmation with unpushed commit detection
 - Optional branch cleanup on worktree deletion
 - Worktree navigation history (back/forward)
 - Last git activity timestamp per worktree
+- Automatic issue linking to existing branches and open PRs / MRs
 
-### Embedded Terminal
+### Embedded Terminal, Processes, and Tasks
 - Built-in PTY terminal with truecolor and `xterm-256color` support
 - Multiple terminal tabs per worktree
-- Embedded-only terminal model, no external terminal backends
 - Experimental embedded `libghostty-vt` engine behind a compile-time feature flag, used by default when available
 - Persistent daemon-based sessions (survive app restarts)
 - Session attach/detach and signals (interrupt/terminate/kill)
+- Managed processes from both `Procfile` and `arbor.toml`
+- Process restart state, memory metrics, and terminal-session linkage
+- Scheduled `[[tasks]]` from `arbor.toml`, with optional Claude or Codex triggers
+- Bell-aware terminal activity and completion notifications
 
-### Diff and Changes
+### Diff, PR, and Review Context
 - Side-by-side diff display with addition/deletion line counts
 - Changed file listing per worktree
 - File tree browsing with directory expand/collapse
 - Multi-tab diff sessions
+- PR summary and detail cards in the changes pane
+- Native inline PR comment actions and review-comment refresh support
 
 ### AI Agent Visibility
 - Detects running coding agents: Claude Code, Codex, OpenCode
 - Working/waiting state indicators with color-coded dots
-- Real-time updates over WebSocket streaming
+- Real-time updates over WebSocket streaming in both the desktop and web UI
+- Legacy session compatibility and targeted clear events for long-lived daemon sessions
 
-### MCP Server
+### Remote Daemon and Companion Binaries
+- `arbor-httpd` serves the remote daemon API and bundled web UI
+- `arbor-cli` exposes daemon-backed health, repo, worktree, terminal, process, and task commands
 - Dedicated `arbor-mcp` binary backed by Arbor's daemon API
-- Structured MCP tools for repositories, worktrees, terminals, processes, and agent activity
+- Structured MCP tools for repositories, worktrees, terminals, processes, tasks, and agent activity
 - MCP resources for daemon snapshots and prompts for common Arbor workflows
 - Supports `ARBOR_DAEMON_URL` and `ARBOR_DAEMON_AUTH_TOKEN` for remote authenticated daemons
-
-### Remote Outposts
 - Create and manage remote worktrees over SSH
 - Multi-host configuration with custom ports and identity files
 - Mosh support for better connectivity
 - Remote terminal sessions via `arbor-httpd`
 - Outpost status tracking (available, unreachable, provisioning)
+- Optional Symphony runtime endpoints when the feature is enabled
 
-### GitHub + UI + Config
+### UI and Config
 - Automatic PR detection and linking per worktree
 - Git actions in the UI: commit, push
-- Three-pane layout (repositories, terminal, changes/file tree)
+- Three-pane layout across `arbor-gui` and `arbor-web-ui`
+- Command palette coverage for actions, repos, worktrees, issues, presets, and task templates
 - Resizable panes, collapsible sidebar, desktop notifications
-- Twenty-five themes, including Omarchy defaults
+- More than twenty-five themes, including Omarchy defaults and white VS Code inspired themes
+- Branch-aware window titles and daemon / rate-limit status polish
 - TOML config at `~/.config/arbor/config.toml` with hot reload
 
 ## Install
@@ -84,6 +97,7 @@ brew install penso/arbor/arbor
 ### Prebuilt Binaries
 
 Download the latest build from [Releases](https://github.com/penso/arbor/releases).
+Release bundles ship the desktop app plus `arbor-httpd`, `arbor-mcp`, and `arbor-cli`.
 
 ### Quick Start from Source
 
@@ -101,9 +115,8 @@ just run-mcp
 
 ## Documentation
 
-Full documentation is available at [penso.github.io/arbor/docs](https://penso.github.io/arbor/docs/).
-
-To build the local docs book:
+The live docs site is available at [penso.github.io/arbor/docs](https://penso.github.io/arbor/docs/).
+The in-repo mdBook sources live under [`docs/src`](docs/src), and you can build them locally with:
 
 ```bash
 just docs-build
@@ -113,12 +126,81 @@ just docs-build
 
 | Crate | Description |
 |-------|-------------|
+| `arbor-benchmarks` | CodSpeed and local benchmark targets |
+| `arbor-cli` | CLI for Arbor's daemon API (`arbor-cli` binary) |
 | `arbor-daemon-client` | Typed client and shared API DTOs for `arbor-httpd` |
 | `arbor-core` | Worktree primitives, change detection, agent hooks |
 | `arbor-gui` | GPUI desktop app (`arbor` binary) |
 | `arbor-httpd` | Remote HTTP daemon (`arbor-httpd` binary) |
 | `arbor-mcp` | MCP server exposing Arbor via stdio (`arbor-mcp` binary) |
+| `arbor-mosh` | Mosh transport for remote outposts |
+| `arbor-ssh` | SSH transport for remote outposts |
+| `arbor-symphony` | Optional workflow orchestration runtime |
+| `arbor-terminal-emulator` | Embedded terminal engine glue and Ghostty integration |
 | `arbor-web-ui` | TypeScript dashboard assets + helper crate |
+
+## Repo Config
+
+Repo-local behavior is configured with `<repo>/arbor.toml`.
+Arbor currently reads repo presets, managed processes, worktree scripts, scheduled tasks, branch naming rules, agent defaults, and notification routing from that file.
+
+Example:
+
+```toml
+[[presets]]
+name = "Review"
+icon = "R"
+command = "codex --prompt-file .arbor/tasks/review.md"
+
+[[processes]]
+name = "web"
+command = "npm run dev"
+working_dir = "app"
+auto_start = true
+auto_restart = true
+restart_delay_ms = 2000
+
+[scripts]
+setup = ["cp .env.example .env"]
+teardown = ["rm -f .env"]
+
+[branch]
+prefix_mode = "github-user"
+
+[agent]
+default_preset = "codex"
+auto_checkpoint = true
+
+[notifications]
+desktop = true
+events = ["agent_started", "agent_finished", "agent_error"]
+webhook_urls = ["https://example.com/hook"]
+
+[[tasks]]
+name = "triage-prs"
+schedule = "0 */30 * * * * *"
+command = "./scripts/triage-prs"
+enabled = true
+
+[tasks.trigger]
+on_exit_code = 0
+on_stdout = true
+agent = "codex"
+prompt_template = "Review this output and prepare a follow-up plan:\n\n{stdout}"
+```
+
+Task templates for the command palette default to `<repo>/.arbor/tasks/*.md`.
+
+## CLI
+
+Arbor also ships `arbor-cli` for daemon-backed scripting:
+
+```bash
+cargo run -p arbor-cli -- health
+cargo run -p arbor-cli -- worktrees list --json
+cargo run -p arbor-cli -- processes list --json
+cargo run -p arbor-cli -- tasks list --json
+```
 
 ## MCP
 
@@ -173,7 +255,7 @@ See [docs/mcp.md](docs/mcp.md) for the full MCP setup guide.
 
 - **Rust nightly** — the project uses `nightly-2025-11-30` (install via [rustup](https://rustup.rs/))
 - **[just](https://github.com/casey/just)** — task runner
-- **[CaskaydiaMono Nerd Font](https://www.nerdfonts.com/)** — icons in the UI use Nerd Font glyphs
+- **A Caskaydia / Cascadia Nerd Font variant** — icons in the UI use Nerd Font glyphs
 
 #### macOS
 
@@ -186,7 +268,7 @@ Or manually:
 ```
 xcode-select --install
 xcodebuild -downloadComponent MetalToolchain
-brew install --cask font-caskaydia-mono-nerd-font
+brew install --cask font-caskaydia-cove-nerd-font
 ```
 
 #### Linux (Debian/Ubuntu)

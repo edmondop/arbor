@@ -21,8 +21,8 @@ ARBOR_DAEMON_URL=http://127.0.0.1:8787 cargo run -p arbor-mcp
 
 ## What Arbor Exposes Over MCP
 
-- tools for repositories, worktrees, changed files, terminals, processes, and agent activity
-- resources for daemon state
+- tools for repositories, worktrees, changed files, terminals, processes, tasks, and agent activity
+- resources for daemon state such as `arbor://health`, `arbor://processes`, and `arbor://tasks`
 - prompts for common Arbor workflows
 
 ## Remote Auth

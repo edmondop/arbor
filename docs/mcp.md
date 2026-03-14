@@ -93,9 +93,12 @@ auth_token = "replace-me"
 
 Arbor's MCP server exposes:
 
-- Tools for repositories, worktrees, changed files, git commit/push, terminals, processes, and agent activity
-- Resources for daemon snapshots such as `arbor://health` and `arbor://processes`
+- Tools for repositories, worktrees, changed files, git commit/push, terminals, processes, tasks, and agent activity
+- Resources for daemon snapshots such as `arbor://health`, `arbor://processes`, and `arbor://tasks`
 - Prompts for common Arbor workflows such as reviewing a worktree or stabilizing a process
+
+Today the MCP surface focuses on daemon-backed worktree, terminal, process, and task flows.
+Issue browsing and managed-worktree previews still live in the GUI and web surfaces.
 
 ## Disabling the Binary
 

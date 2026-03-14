@@ -16,6 +16,7 @@ New-Item -Path $BinDir -ItemType Directory -Force | Out-Null
 New-Item -Path $ShareDir -ItemType Directory -Force | Out-Null
 Copy-Item -Path $BinaryPath -Destination (Join-Path $BinDir "$AppName.exe") -Force
 Copy-Item -Path README.md -Destination (Join-Path $StagingDir 'README.md') -Force
+Copy-Item -Path CHANGELOG.md -Destination (Join-Path $StagingDir 'CHANGELOG.md') -Force
 
 # Bundle arbor-httpd alongside the main binary
 $HttpdPath = Join-Path (Split-Path $BinaryPath) 'arbor-httpd.exe'

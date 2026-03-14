@@ -1,23 +1,20 @@
 # Arbor Documentation
 
-Arbor is a native Rust + GPUI app for agentic coding across local repositories, parallel worktrees, embedded terminals, remote outposts, and daemon-backed automation.
+Arbor is a native Rust + GPUI workspace for agentic coding across local repositories, remote daemons, and companion tools such as `arbor-cli` and `arbor-mcp`.
 
-This book has two goals:
-
-- explain the current Arbor feature surface in one place
-- provide a practical QA checklist for the Tier 1 workflow features added on this branch
+This book documents the current product surface across both user-facing UIs, `arbor-gui` and `arbor-web-ui`, plus the daemon APIs they share.
 
 ## What Arbor Covers
 
 Arbor currently includes:
 
-- multi-repository and multi-worktree navigation
-- embedded and daemon-backed terminal sessions
-- side-by-side diffs, changed files, and file-tree browsing
-- GitHub PR visibility and agent activity state tracking
-- repo-local automation through `arbor.toml`
-- remote daemon access, remote outposts, and MCP integration
-- command palette, theme picker, notifications, and UI settings
+- multi-repository workspaces and linked worktrees
+- issue-driven managed worktree creation and repo-aware branch naming
+- embedded terminals, daemon session restore, managed processes, and scheduled tasks
+- changed files, file trees, side-by-side diffs, PR summaries, and native PR review comments
+- real-time coding-agent activity, notifications, notes, and command palette workflows
+- remote daemons, SSH / mosh outposts, the bundled web UI, CLI, and MCP server
+- repo-local automation through `arbor.toml` and app-wide settings through `config.toml`
 
 ## Read This Book In Order If You Are New
 
@@ -30,4 +27,4 @@ Arbor currently includes:
 7. [Remote Access, Daemon, and MCP](./remote-daemon-and-mcp.md)
 8. [Themes, Settings, and Notifications](./themes-settings-and-notifications.md)
 
-If you are validating this branch, go straight to [QA Checklist](./qa-checklist.md).
+Use [QA Checklist](./qa-checklist.md) for a focused regression sweep of the highest-risk workflows.
