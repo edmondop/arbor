@@ -393,8 +393,6 @@ impl LiveSession {
         }
 
         *activity_state = Some(AgentState::Waiting);
-        drop(activity_state);
-
         if let Some(sender) = self.activity_tx.as_ref() {
             let _ = sender.send(TerminalActivityEvent::Update {
                 session_id: self.session_id.clone(),
@@ -410,8 +408,6 @@ impl LiveSession {
             return;
         }
         state.take();
-        drop(state);
-
         if let Some(sender) = self.activity_tx.as_ref() {
             let _ = sender.send(TerminalActivityEvent::Clear {
                 session_id: self.session_id.clone(),
@@ -424,8 +420,6 @@ impl LiveSession {
         if state.take().is_none() {
             return;
         }
-        drop(state);
-
         if let Some(sender) = self.activity_tx.as_ref() {
             let _ = sender.send(TerminalActivityEvent::Clear {
                 session_id: self.session_id.clone(),
@@ -1096,5 +1090,31 @@ mod tests {
             *lock_or_recover(&session.state),
             TerminalSessionState::Completed
         );
+    }
+
+    #[test]
+    fn clear_waiting_for_input_emits_clear_before_waiting_can_be_reintroduced() {
+        let (session, mut activity_rx) = test_live_session();
+
+        session.note_waiting_for_input();
+        session.clear_waiting_for_input();
+        session.clear_activity();
+
+        assert_eq!(
+            activity_rx.try_recv().ok(),
+            Some(TerminalActivityEvent::Update {
+                session_id: "daemon-test-1".into(),
+                cwd: PathBuf::from("/tmp/worktree"),
+                state: AgentState::Waiting,
+            })
+        );
+        assert_eq!(
+            activity_rx.try_recv().ok(),
+            Some(TerminalActivityEvent::Clear {
+                session_id: "daemon-test-1".into(),
+            })
+        );
+        assert!(activity_rx.try_recv().is_err());
+        assert_eq!(*lock_or_recover(&session.activity_state), None);
     }
 }
