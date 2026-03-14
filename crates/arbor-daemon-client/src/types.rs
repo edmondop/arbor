@@ -41,6 +41,18 @@ pub struct IssueReviewDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct IssueLabelDto {
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct IssueTypeDto {
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct IssueDto {
     pub id: String,
     pub display_id: String,
@@ -51,6 +63,10 @@ pub struct IssueDto {
     pub body: Option<String>,
     pub suggested_worktree_name: String,
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<IssueLabelDto>,
+    #[serde(default)]
+    pub issue_type: Option<IssueTypeDto>,
     pub linked_branch: Option<String>,
     pub linked_review: Option<IssueReviewDto>,
 }

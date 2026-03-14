@@ -313,8 +313,11 @@ impl ArborWindow {
                         .right_pane_width
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
+                    issue_details_focus: cx.focus_handle(),
                     welcome_clone_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    issue_details_scroll_handle: ScrollHandle::new(),
+                    issue_details_scrollbar_drag_offset: None,
                     last_terminal_grid_size: None,
                     center_tabs_scroll_handle: ScrollHandle::new(),
                     diff_scroll_handle: UniformListScrollHandle::new(),
@@ -745,8 +748,11 @@ impl ArborWindow {
                 .right_pane_width
                 .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
             terminal_focus: cx.focus_handle(),
+            issue_details_focus: cx.focus_handle(),
             welcome_clone_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
+            issue_details_scroll_handle: ScrollHandle::new(),
+            issue_details_scrollbar_drag_offset: None,
             last_terminal_grid_size: None,
             center_tabs_scroll_handle: ScrollHandle::new(),
             diff_scroll_handle: UniformListScrollHandle::new(),
@@ -3680,7 +3686,7 @@ impl ArborWindow {
         if self.issue_details_modal.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => {
-                    self.close_issue_details_modal(cx);
+                    self.close_issue_details_modal(Some(window), cx);
                     cx.stop_propagation();
                 },
                 "enter" | "return" => {

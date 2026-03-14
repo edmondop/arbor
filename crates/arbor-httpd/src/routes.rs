@@ -38,7 +38,7 @@ use {
             Path as AxumPath, Query, State,
             ws::{Message, WebSocket, WebSocketUpgrade},
         },
-        http::StatusCode,
+        http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
     },
     futures_util::StreamExt,
@@ -188,13 +188,15 @@ pub(crate) async fn list_repositories(
 
 pub(crate) async fn list_repository_issues(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<IssuesQuery>,
 ) -> ApiResult<IssueListResponse> {
     let repo_root = PathBuf::from(query.repo_root);
     let issue_service = state.issue_service.clone();
     let repo_root_for_issue_fetch = repo_root.clone();
+    let github_token = github_token_from_headers(&headers);
     let mut issues = tokio::task::spawn_blocking(move || {
-        issue_service.list_repository_issues(&repo_root_for_issue_fetch)
+        issue_service.list_repository_issues(&repo_root_for_issue_fetch, github_token)
     })
     .await
     .map_err(|error| internal_error(format!("failed to join issue fetch task: {error}")))?
@@ -207,6 +209,15 @@ pub(crate) async fn list_repository_issues(
         );
     }
     Ok(Json(issues))
+}
+
+fn github_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("X-Arbor-GitHub-Token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 async fn enrich_issue_list_with_local_links(

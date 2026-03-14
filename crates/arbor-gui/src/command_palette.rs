@@ -204,7 +204,7 @@ impl ArborWindow {
                             .map(|review| review.label.to_ascii_lowercase())
                             .unwrap_or_default(),
                     ),
-                    action: CommandPaletteAction::OpenIssueCreateModal(issue.clone()),
+                    action: CommandPaletteAction::OpenIssueCreateModal(Box::new(issue.clone())),
                 }
             })
             .collect()
@@ -411,7 +411,7 @@ impl ArborWindow {
             },
             CommandPaletteAction::OpenIssueCreateModal(issue) => {
                 self.command_palette_modal = None;
-                self.open_issue_create_modal(issue, cx);
+                self.open_issue_create_modal(*issue, cx);
             },
             CommandPaletteAction::LaunchTaskTemplate(task) => {
                 self.command_palette_modal = None;

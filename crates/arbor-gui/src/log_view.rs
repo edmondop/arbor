@@ -35,9 +35,16 @@ impl ArborWindow {
                                 div()
                                     .id("log-copy-all")
                                     .cursor_pointer()
+                                    .my(px(2.))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
                                     .text_xs()
                                     .text_color(rgb(theme.text_muted))
-                                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                                    .hover(|this| {
+                                        this.bg(rgb(theme.panel_active_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
                                     .child("Copy All")
                                     .on_mouse_down(
                                         MouseButton::Left,

@@ -1965,8 +1965,8 @@ impl ArborWindow {
         };
 
         div()
-            .pl(px(22.))
-            .pr_1()
+            .w_full()
+            .px_1()
             .flex()
             .gap_1()
             .child(tab_button(
@@ -2053,17 +2053,40 @@ impl ArborWindow {
             let issue_context = issue.clone();
             let issue_url = issue.url.clone();
             let has_issue_url = issue_url.is_some();
+            let linked_review = issue.linked_review.clone();
             let issue_relative_updated_at = issue
                 .updated_at
                 .as_deref()
                 .and_then(relative_time_from_rfc3339_utc);
-            let issue_status_color = if issue.linked_review.is_some() {
+            let issue_status_color = if linked_review.is_some() {
                 theme.accent
             } else if issue.linked_branch.is_some() {
-                theme.text_primary
+                0xe5c07b
             } else {
                 theme.text_disabled
             };
+            let (title_badge_label, issue_title_text) = split_issue_title_badge(&issue.title);
+            let issue_type_label = issue
+                .issue_type
+                .as_ref()
+                .map(|issue_type| issue_type.name.clone())
+                .or(title_badge_label.clone());
+            let issue_type_color = issue
+                .issue_type
+                .as_ref()
+                .and_then(|issue_type| issue_type.color.as_deref())
+                .map(str::to_owned);
+            let type_key = issue_type_label
+                .as_deref()
+                .map(normalize_issue_badge_key)
+                .unwrap_or_default();
+            let issue_labels: Vec<_> = issue
+                .labels
+                .iter()
+                .filter(|label| normalize_issue_badge_key(&label.name) != type_key)
+                .take(2)
+                .cloned()
+                .collect();
 
             content = content.child(
                 div()
@@ -2076,11 +2099,12 @@ impl ArborWindow {
                     .flex()
                     .items_center()
                     .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_issue_details_modal_for_target(
                             issue_target.clone(),
                             issue_source_label.clone(),
                             issue_context.clone(),
+                            window,
                             cx,
                         );
                     }))
@@ -2098,12 +2122,11 @@ impl ArborWindow {
                             .py(px(6.))
                             .flex()
                             .items_start()
-                            .gap(px(4.))
+                            .gap_2()
                             .child(
                                 div()
-                                    .mt(px(2.))
-                                    .w(px(3.))
-                                    .h_full()
+                                    .mt(px(5.))
+                                    .size(px(6.))
                                     .rounded_full()
                                     .bg(rgb(issue_status_color)),
                             )
@@ -2119,43 +2142,119 @@ impl ArborWindow {
                                         div()
                                             .flex()
                                             .items_center()
+                                            .items_start()
                                             .justify_between()
                                             .gap_2()
-                                            .child(div().min_w_0().when_some(
-                                                issue_url.clone(),
-                                                |this, issue_url| {
-                                                    this.cursor_pointer()
-                                                        .text_xs()
-                                                        .font_family(FONT_MONO)
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .whitespace_nowrap()
-                                                        .text_color(rgb(theme.accent))
-                                                        .hover(|this| {
-                                                            this.text_color(rgb(
-                                                                theme.text_primary,
-                                                            ))
-                                                        })
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(move |this, _, _, cx| {
-                                                                this.open_external_url(
-                                                                    &issue_url,
-                                                                    cx,
-                                                                );
-                                                                cx.stop_propagation();
-                                                            }),
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .flex_wrap()
+                                                    .gap_2()
+                                                    .child(div().min_w_0().when_some(
+                                                        issue_url.clone(),
+                                                        |this, issue_url| {
+                                                            this.cursor_pointer()
+                                                                .text_xs()
+                                                                .font_family(FONT_MONO)
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .whitespace_nowrap()
+                                                                .text_color(rgb(theme.accent))
+                                                                .hover(|this| {
+                                                                    this.text_color(rgb(
+                                                                        theme.text_primary,
+                                                                    ))
+                                                                })
+                                                                .on_mouse_down(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(move |this, _, _, cx| {
+                                                                        this.open_external_url(
+                                                                            &issue_url,
+                                                                            cx,
+                                                                        );
+                                                                        cx.stop_propagation();
+                                                                    }),
+                                                                )
+                                                                .child(issue.display_id.clone())
+                                                        },
+                                                    )
+                                                    .when(!has_issue_url, |this| {
+                                                        this.text_xs()
+                                                            .font_family(FONT_MONO)
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .whitespace_nowrap()
+                                                            .text_color(rgb(theme.accent))
+                                                            .child(issue.display_id.clone())
+                                                    }))
+                                                    .when_some(issue_type_label.clone(), |this, issue_type_label| {
+                                                        let (badge_text_color, badge_border_color, badge_bg_color) =
+                                                            issue_type_badge_colors(
+                                                                theme,
+                                                                &issue_type_label,
+                                                                issue_type_color.as_deref(),
+                                                            );
+                                                        this.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .rounded_full()
+                                                                .border_1()
+                                                                .border_color(rgb(badge_border_color))
+                                                                .bg(rgb(badge_bg_color))
+                                                                .px(px(6.))
+                                                                .h(px(16.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .text_size(px(10.))
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(rgb(badge_text_color))
+                                                                .child(issue_type_label),
                                                         )
-                                                        .child(issue.display_id.clone())
-                                                },
+                                                    })
+                                                    .children(issue_labels.into_iter().map(|label| {
+                                                        let (badge_text_color, badge_border_color, badge_bg_color) =
+                                                            issue_label_badge_colors(
+                                                                theme,
+                                                                label.color.as_deref(),
+                                                            );
+                                                        div()
+                                                            .flex_none()
+                                                            .rounded_full()
+                                                            .border_1()
+                                                            .border_color(rgb(badge_border_color))
+                                                            .bg(rgb(badge_bg_color))
+                                                            .px(px(6.))
+                                                            .h(px(16.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_size(px(10.))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(rgb(badge_text_color))
+                                                            .child(label.name)
+                                                    }))
+                                                    .when_some(linked_review.clone(), |this, linked_review| {
+                                                        this.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .rounded_full()
+                                                                .border_1()
+                                                                .border_color(rgb(theme.border))
+                                                                .bg(rgb(theme.panel_bg))
+                                                                .px(px(6.))
+                                                                .h(px(16.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .text_size(px(10.))
+                                                                .font_family(FONT_MONO)
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(rgb(theme.accent))
+                                                                .child(linked_review.label),
+                                                        )
+                                                    }),
                                             )
-                                            .when(!has_issue_url, |this| {
-                                                this.text_xs()
-                                                    .font_family(FONT_MONO)
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .whitespace_nowrap()
-                                                    .text_color(rgb(theme.accent))
-                                                    .child(issue.display_id.clone())
-                                            }))
                                             .when_some(issue_relative_updated_at, |this, updated_at| {
                                                 this.child(
                                                     div()
@@ -2173,7 +2272,7 @@ impl ArborWindow {
                                             .text_xs()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(rgb(theme.text_primary))
-                                            .child(issue.title.clone()),
+                                            .child(issue_title_text),
                                     ),
                             ),
                     ),
@@ -2863,6 +2962,72 @@ impl ArborWindow {
                 .child(card),
         )
     }
+}
+
+fn split_issue_title_badge(title: &str) -> (Option<String>, String) {
+    let trimmed = title.trim();
+    let Some(rest) = trimmed.strip_prefix('[') else {
+        return (None, trimmed.to_owned());
+    };
+    let Some((badge, remainder)) = rest.split_once(']') else {
+        return (None, trimmed.to_owned());
+    };
+    let badge = badge.trim();
+    if badge.is_empty() {
+        return (None, trimmed.to_owned());
+    }
+
+    let clean_title = remainder
+        .trim_start_matches(':')
+        .trim_start_matches('-')
+        .trim();
+    let clean_title = if clean_title.is_empty() {
+        trimmed
+    } else {
+        clean_title
+    };
+    (Some(badge.to_owned()), clean_title.to_owned())
+}
+
+fn normalize_issue_badge_key(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '_', '-'], "")
+}
+
+fn issue_type_badge_colors(
+    theme: ThemePalette,
+    label: &str,
+    metadata_color: Option<&str>,
+) -> (u32, u32, u32) {
+    if let Some(color) = metadata_color.and_then(parse_issue_badge_hex_color) {
+        return (color, color, theme.panel_bg);
+    }
+
+    match normalize_issue_badge_key(label).as_str() {
+        "bug" => (0xeb6f92, 0xeb6f92, theme.panel_bg),
+        "feature" | "enhancement" => (theme.accent, theme.accent, theme.panel_bg),
+        "task" | "chore" => (0xe5c07b, 0xe5c07b, theme.panel_bg),
+        "docs" | "documentation" => (0x72d69c, 0x72d69c, theme.panel_bg),
+        _ => (theme.text_muted, theme.border, theme.panel_bg),
+    }
+}
+
+fn issue_label_badge_colors(theme: ThemePalette, metadata_color: Option<&str>) -> (u32, u32, u32) {
+    if let Some(color) = metadata_color.and_then(parse_issue_badge_hex_color) {
+        return (color, color, theme.panel_bg);
+    }
+
+    (theme.text_muted, theme.border, theme.panel_bg)
+}
+
+fn parse_issue_badge_hex_color(value: &str) -> Option<u32> {
+    let trimmed = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    if trimmed.len() != 6 {
+        return None;
+    }
+    u32::from_str_radix(trimmed, 16).ok()
 }
 
 fn normalized_sidebar_order(

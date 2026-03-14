@@ -196,6 +196,8 @@ mod tests {
             body: None,
             suggested_worktree_name: suggested_worktree_name.to_owned(),
             updated_at: Some("2026-03-13T12:00:00Z".to_owned()),
+            labels: Vec::new(),
+            issue_type: None,
             linked_branch: None,
             linked_review: None,
         }

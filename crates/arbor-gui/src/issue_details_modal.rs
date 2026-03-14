@@ -4,6 +4,7 @@ impl ArborWindow {
         target: IssueTarget,
         source_label: String,
         issue: terminal_daemon_http::IssueDto,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let raw_body = issue.body.as_deref();
@@ -42,11 +43,16 @@ impl ArborWindow {
             source_label,
             issue,
         });
+        window.focus(&self.issue_details_focus);
         cx.notify();
     }
 
-    fn close_issue_details_modal(&mut self, cx: &mut Context<Self>) {
+    fn close_issue_details_modal(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.issue_details_modal = None;
+        self.issue_details_scrollbar_drag_offset = None;
+        if let Some(window) = window {
+            window.focus(&self.terminal_focus);
+        }
         cx.notify();
     }
 
@@ -84,21 +90,55 @@ impl ArborWindow {
         let source_label = modal.source_label;
         let issue_heading = format!("Issue {issue_number}");
         let issue_description = issue_body_text(issue.body.as_deref());
-        let description_body = div()
-            .id("issue-details-description-body")
+        let issue_description_lines: Vec<String> = issue_description
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    " ".to_owned()
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect();
+        let mut description_body = div()
+            .relative()
             .w_full()
             .h_full()
-            .overflow_y_scroll()
-            .scrollbar_width(px(10.))
-            .pr_1()
-            .text_sm()
-            .whitespace_normal()
-            .text_color(rgb(if issue_has_body {
-                theme.text_primary
-            } else {
-                theme.text_muted
-            }))
-            .child(issue_description);
+            .child(
+                div()
+                    .id("issue-details-description-body")
+                    .w_full()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(10.))
+                    .track_scroll(&self.issue_details_scroll_handle)
+                    .pr(px(18.))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(issue_description_lines.into_iter().enumerate().map(
+                        |(index, line)| {
+                            div()
+                                .id(("issue-details-line", index))
+                                .text_sm()
+                                .whitespace_normal()
+                                .text_color(rgb(if issue_has_body {
+                                    theme.text_primary
+                                } else {
+                                    theme.text_muted
+                                }))
+                                .child(line)
+                        },
+                    )),
+            );
+
+        if let Some(scrollbar) = issue_details_scrollbar_indicator(
+            &self.issue_details_scroll_handle,
+            theme,
+            cx,
+        ) {
+            description_body = description_body.child(scrollbar);
+        }
 
         div()
             .absolute()
@@ -108,15 +148,15 @@ impl ArborWindow {
             .justify_center()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close_issue_details_modal(cx);
+                cx.listener(|this, _, window, cx| {
+                    this.close_issue_details_modal(Some(window), cx);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _, _, cx| {
-                    this.close_issue_details_modal(cx);
+                cx.listener(|this, _, window, cx| {
+                    this.close_issue_details_modal(Some(window), cx);
                     cx.stop_propagation();
                 }),
             )
@@ -137,6 +177,20 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .track_focus(&self.issue_details_focus)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        match event.keystroke.key.as_str() {
+                            "escape" => {
+                                this.close_issue_details_modal(Some(window), cx);
+                                cx.stop_propagation();
+                            },
+                            "enter" | "return" => {
+                                this.open_create_modal_from_issue_details(cx);
+                                cx.stop_propagation();
+                            },
+                            _ => {},
+                        }
+                    }))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -148,7 +202,6 @@ impl ArborWindow {
                             .flex_none()
                             .flex()
                             .items_start()
-                            .justify_between()
                             .gap_3()
                             .child(
                                 div()
@@ -205,23 +258,6 @@ impl ArborWindow {
                                                 ))
                                             }),
                                     ),
-                            )
-                            .child(
-                                div()
-                                    .id("issue-details-close")
-                                    .cursor_pointer()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_muted))
-                                    .hover(|this| this.text_color(rgb(theme.text_primary)))
-                                    .child("Close")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_issue_details_modal(cx);
-                                        cx.stop_propagation();
-                                    })),
                             ),
                     )
                     .when(linked_review.is_some() || linked_branch.is_some(), |this| {
@@ -289,8 +325,8 @@ impl ArborWindow {
                                     .text_color(rgb(theme.text_primary))
                                     .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                     .child("Cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_issue_details_modal(cx);
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_issue_details_modal(Some(window), cx);
                                         cx.stop_propagation();
                                     })),
                             )
@@ -335,6 +371,195 @@ impl ArborWindow {
                     ),
             )
     }
+}
+
+fn issue_details_scrollbar_indicator(
+    scroll_handle: &ScrollHandle,
+    theme: ThemePalette,
+    cx: &mut Context<ArborWindow>,
+) -> Option<Div> {
+    let scroll_handle_for_draw = scroll_handle.clone();
+    let scroll_handle_for_click = scroll_handle.clone();
+    let scroll_handle_for_drag = scroll_handle.clone();
+    let entity = cx.entity();
+
+    Some(
+        div()
+            .absolute()
+            .top(px(4.))
+            .right(px(4.))
+            .bottom(px(4.))
+            .w(px(8.))
+            .cursor_pointer()
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let Some(metrics) =
+                            issue_details_scrollbar_metrics(&scroll_handle_for_draw, bounds)
+                        else {
+                            return;
+                        };
+
+                        window.paint_quad(fill(metrics.track_bounds, rgb(theme.panel_bg)));
+                        window.paint_quad(fill(metrics.thumb_bounds, rgb(theme.accent)));
+
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            let scroll_handle = scroll_handle_for_click.clone();
+                            move |event: &MouseDownEvent, _, _, cx| {
+                                let Some(metrics) =
+                                    issue_details_scrollbar_metrics(&scroll_handle, bounds)
+                                else {
+                                    return;
+                                };
+                                if !metrics.track_bounds.contains(&event.position) {
+                                    return;
+                                }
+
+                                if metrics.thumb_bounds.contains(&event.position) {
+                                    let anchor = event.position.y - metrics.thumb_bounds.origin.y;
+                                    entity.update(cx, |this, cx| {
+                                        this.issue_details_scrollbar_drag_offset = Some(anchor);
+                                        cx.notify();
+                                    });
+                                } else {
+                                    let centered_anchor = px(metrics.thumb_bounds.size.height
+                                        .to_f64() as f32
+                                        / 2.);
+                                    issue_details_set_scroll_offset(
+                                        &scroll_handle,
+                                        metrics.track_bounds,
+                                        metrics.thumb_bounds.size.height,
+                                        event.position.y,
+                                        centered_anchor,
+                                    );
+                                    entity.update(cx, |this, cx| {
+                                        this.issue_details_scrollbar_drag_offset =
+                                            Some(centered_anchor);
+                                        cx.notify();
+                                    });
+                                }
+                            }
+                        });
+
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |_: &MouseUpEvent, _, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    if this.issue_details_scrollbar_drag_offset.take().is_some() {
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        });
+
+                        window.on_mouse_event(move |event: &MouseMoveEvent, _, _, cx| {
+                            if !event.dragging() {
+                                return;
+                            }
+
+                            let Some(anchor) = entity.read(cx).issue_details_scrollbar_drag_offset
+                            else {
+                                return;
+                            };
+
+                            let Some(metrics) =
+                                issue_details_scrollbar_metrics(&scroll_handle_for_drag, bounds)
+                            else {
+                                return;
+                            };
+
+                            issue_details_set_scroll_offset(
+                                &scroll_handle_for_drag,
+                                metrics.track_bounds,
+                                metrics.thumb_bounds.size.height,
+                                event.position.y,
+                                anchor,
+                            );
+                            cx.notify(entity.entity_id());
+                        });
+                    },
+                )
+                .size_full(),
+            ),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct IssueDetailsScrollbarMetrics {
+    track_bounds: Bounds<Pixels>,
+    thumb_bounds: Bounds<Pixels>,
+}
+
+fn issue_details_scrollbar_metrics(
+    scroll_handle: &ScrollHandle,
+    bounds: Bounds<Pixels>,
+) -> Option<IssueDetailsScrollbarMetrics> {
+    let viewport_height = scroll_handle.bounds().size.height;
+    if viewport_height <= px(0.) {
+        return None;
+    }
+
+    let max_offset = scroll_handle.max_offset();
+    if max_offset.height <= px(0.) {
+        return None;
+    }
+
+    let track_bounds = Bounds::new(
+        point(bounds.origin.x, bounds.origin.y),
+        size(bounds.size.width, bounds.size.height),
+    );
+    let track_height = track_bounds.size.height;
+    let track_height_px = track_height.to_f64() as f32;
+    let viewport_height_px = viewport_height.to_f64() as f32;
+    let max_offset_px = max_offset.height.to_f64() as f32;
+    let thumb_height = px(
+        ((track_height_px * (viewport_height_px / (viewport_height_px + max_offset_px))).max(36.))
+            .min(track_height_px),
+    );
+    let thumb_travel = (track_height - thumb_height).max(px(0.));
+    let current_offset_y = (-scroll_handle.offset().y).clamp(px(0.), max_offset.height);
+    let thumb_top = if max_offset.height <= px(0.) || thumb_travel <= px(0.) {
+        px(0.)
+    } else {
+        px((thumb_travel.to_f64() as f32)
+            * ((current_offset_y.to_f64() as f32) / (max_offset.height.to_f64() as f32)))
+    };
+    let thumb_bounds = Bounds::new(
+        point(track_bounds.origin.x + px(1.), track_bounds.origin.y + thumb_top),
+        size((track_bounds.size.width - px(2.)).max(px(1.)), thumb_height),
+    );
+
+    Some(IssueDetailsScrollbarMetrics {
+        track_bounds,
+        thumb_bounds,
+    })
+}
+
+fn issue_details_set_scroll_offset(
+    scroll_handle: &ScrollHandle,
+    track_bounds: Bounds<Pixels>,
+    thumb_height: Pixels,
+    pointer_y: Pixels,
+    drag_anchor: Pixels,
+) {
+    let max_offset = scroll_handle.max_offset();
+    if max_offset.height <= px(0.) {
+        return;
+    }
+
+    let thumb_travel = (track_bounds.size.height - thumb_height).max(px(0.));
+    if thumb_travel <= px(0.) {
+        return;
+    }
+
+    let desired_thumb_top =
+        (pointer_y - track_bounds.origin.y - drag_anchor).clamp(px(0.), thumb_travel);
+    let ratio = (desired_thumb_top.to_f64() as f32) / (thumb_travel.to_f64() as f32);
+    let target_offset_y = px((max_offset.height.to_f64() as f32) * ratio);
+    let current_offset = scroll_handle.offset();
+    scroll_handle.set_offset(point(current_offset.x, -target_offset_y));
 }
 
 const ISSUE_DESCRIPTION_FALLBACK: &str = "No issue description is available for this issue.";

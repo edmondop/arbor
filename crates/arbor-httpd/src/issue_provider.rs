@@ -1,14 +1,47 @@
 use {
     crate::managed_worktree,
-    arbor_daemon_client::{IssueDto, IssueListResponse, IssueSourceDto},
+    arbor_daemon_client::{
+        IssueDto, IssueLabelDto, IssueListResponse, IssueSourceDto, IssueTypeDto,
+    },
     secrecy::{ExposeSecret, SecretString},
     serde::Deserialize,
     std::{collections::HashSet, env, path::Path, time::Duration},
 };
 
+const GITHUB_GRAPHQL_API_URL: &str = "https://api.github.com/graphql";
 const ISSUE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const GITLAB_METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ISSUE_PAGE_SIZE: usize = 100;
+const GITHUB_ISSUES_GRAPHQL_QUERY: &str = r#"
+query($owner: String!, $repo: String!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        state
+        url
+        body
+        updatedAt
+        issueType {
+          name
+          color
+        }
+        labels(first: 8) {
+          nodes {
+            name
+            color
+          }
+        }
+      }
+    }
+  }
+}
+"#;
 
 pub(crate) trait RepositoryIssueProvider: Send + Sync {
     fn resolve_source(
@@ -16,7 +49,11 @@ pub(crate) trait RepositoryIssueProvider: Send + Sync {
         repo_root: &Path,
         origin_remote_url: &str,
     ) -> Option<ResolvedIssueSource>;
-    fn list_issues(&self, source: &ResolvedIssueSource) -> Result<Vec<IssueDto>, String>;
+    fn list_issues(
+        &self,
+        source: &ResolvedIssueSource,
+        github_token: Option<&SecretString>,
+    ) -> Result<Vec<IssueDto>, String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +110,7 @@ impl RepositoryIssueService {
     pub(crate) fn list_repository_issues(
         &self,
         repo_root: &Path,
+        github_token: Option<String>,
     ) -> Result<IssueListResponse, String> {
         let Some(origin_remote_url) = origin_remote_url(repo_root)? else {
             return Ok(IssueListResponse {
@@ -87,7 +125,12 @@ impl RepositoryIssueService {
                 continue;
             };
 
-            let issues = provider.list_issues(&source)?;
+            let github_token = github_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(|token| SecretString::from(token.to_owned()));
+            let issues = provider.list_issues(&source, github_token.as_ref())?;
             return Ok(IssueListResponse {
                 source: Some(source.into_dto()),
                 issues,
@@ -130,25 +173,36 @@ impl RepositoryIssueProvider for GitHubIssueProvider {
         })
     }
 
-    fn list_issues(&self, source: &ResolvedIssueSource) -> Result<Vec<IssueDto>, String> {
+    fn list_issues(
+        &self,
+        source: &ResolvedIssueSource,
+        github_token: Option<&SecretString>,
+    ) -> Result<Vec<IssueDto>, String> {
         let (owner, repository) = source
             .repository
             .split_once('/')
             .ok_or_else(|| format!("invalid GitHub repository slug `{}`", source.repository))?;
-        let token = github_access_token_from_env();
+        let token = github_token.cloned().or_else(github_access_token_from_env);
+        if token.is_none() {
+            return list_github_issues_via_rest(source, owner, repository, None);
+        }
         let mut issues = Vec::new();
-        let mut page = 1usize;
+        let mut after: Option<String> = None;
 
         loop {
-            let url = format!(
-                "{}/repos/{}/{}/issues?state=open&sort=updated&direction=desc&per_page={}&page={page}",
-                source.api_base_url,
-                percent_encode(owner),
-                percent_encode(repository),
-                ISSUE_PAGE_SIZE,
-            );
-            let mut request = ureq::get(&url)
+            let request_body = serde_json::json!({
+                "query": GITHUB_ISSUES_GRAPHQL_QUERY,
+                "variables": {
+                    "owner": owner,
+                    "repo": repository,
+                    "after": after,
+                },
+            });
+            let request_body_json = serde_json::to_string(&request_body)
+                .map_err(|error| format!("failed to serialize GitHub GraphQL request: {error}"))?;
+            let mut request = ureq::post(GITHUB_GRAPHQL_API_URL)
                 .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
                 .header("User-Agent", "Arbor");
             if let Some(token) = token.as_ref() {
                 request = request.header(
@@ -157,12 +211,18 @@ impl RepositoryIssueProvider for GitHubIssueProvider {
                 );
             }
 
-            let mut response = request
+            let response = request
                 .config()
                 .timeout_global(Some(ISSUE_REQUEST_TIMEOUT))
                 .build()
-                .call()
-                .map_err(|error| format!("GitHub request failed: {error}"))?;
+                .send(&request_body_json);
+            let mut response = match response {
+                Ok(response) => response,
+                Err(error) if is_github_graphql_forbidden(&error) => {
+                    return list_github_issues_via_rest(source, owner, repository, token.as_ref());
+                },
+                Err(error) => return Err(format!("GitHub request failed: {error}")),
+            };
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -174,38 +234,159 @@ impl RepositoryIssueProvider for GitHubIssueProvider {
                 .body_mut()
                 .read_to_string()
                 .map_err(|error| format!("failed to read GitHub response: {error}"))?;
-            let page_items: Vec<GitHubIssuePayload> = serde_json::from_str(&body)
-                .map_err(|error| format!("failed to decode GitHub issues: {error}"))?;
-            let page_len = page_items.len();
-
-            issues.extend(
-                page_items
+            let response: GitHubGraphqlResponse<GitHubIssuesGraphqlData> =
+                serde_json::from_str(&body)
+                    .map_err(|error| format!("failed to decode GitHub GraphQL issues: {error}"))?;
+            if !response.errors.is_empty() {
+                let messages = response
+                    .errors
                     .into_iter()
-                    .filter(|issue| issue.pull_request.is_none())
-                    .map(|issue| IssueDto {
-                        id: issue.number.to_string(),
-                        display_id: format!("#{}", issue.number),
-                        title: issue.title.clone(),
-                        state: issue.state,
-                        url: Some(issue.html_url),
-                        body: normalize_issue_body(issue.body),
-                        suggested_worktree_name: issue_worktree_name(
-                            &issue.number.to_string(),
-                            &issue.title,
-                        ),
-                        updated_at: issue.updated_at,
-                        linked_branch: None,
-                        linked_review: None,
-                    }),
-            );
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(format!("GitHub GraphQL returned errors: {messages}"));
+            }
+            let connection = response
+                .data
+                .and_then(|data| data.repository)
+                .map(|repository| repository.issues)
+                .ok_or_else(|| {
+                    "GitHub GraphQL response was missing repository issues".to_owned()
+                })?;
 
-            if page_len < ISSUE_PAGE_SIZE {
+            issues.extend(connection.nodes.into_iter().flatten().map(|issue| {
+                IssueDto {
+                    id: issue.number.to_string(),
+                    display_id: format!("#{}", issue.number),
+                    title: issue.title.clone(),
+                    state: issue.state,
+                    url: Some(issue.url),
+                    body: normalize_issue_body(issue.body),
+                    suggested_worktree_name: issue_worktree_name(
+                        &issue.number.to_string(),
+                        &issue.title,
+                    ),
+                    updated_at: issue.updated_at,
+                    labels: issue
+                        .labels
+                        .nodes
+                        .into_iter()
+                        .flatten()
+                        .map(|label| IssueLabelDto {
+                            name: label.name,
+                            color: Some(label.color),
+                        })
+                        .collect(),
+                    issue_type: issue.issue_type.map(|issue_type| IssueTypeDto {
+                        name: issue_type.name,
+                        color: Some(issue_type.color),
+                    }),
+                    linked_branch: None,
+                    linked_review: None,
+                }
+            }));
+
+            if !connection.page_info.has_next_page {
                 break;
             }
-            page += 1;
+            after = connection.page_info.end_cursor;
         }
 
         Ok(issues)
+    }
+}
+
+fn list_github_issues_via_rest(
+    source: &ResolvedIssueSource,
+    owner: &str,
+    repository: &str,
+    token: Option<&SecretString>,
+) -> Result<Vec<IssueDto>, String> {
+    let mut issues = Vec::new();
+    let mut page = 1usize;
+
+    loop {
+        let url = format!(
+            "{}/repos/{}/{}/issues?state=open&sort=updated&direction=desc&per_page={}&page={page}",
+            source.api_base_url,
+            percent_encode(owner),
+            percent_encode(repository),
+            ISSUE_PAGE_SIZE,
+        );
+        let mut request = ureq::get(&url)
+            .header("Accept", "application/json")
+            .header("User-Agent", "Arbor");
+        if let Some(token) = token {
+            request = request.header(
+                "Authorization",
+                &format!("Bearer {}", token.expose_secret()),
+            );
+        }
+
+        let mut response = request
+            .config()
+            .timeout_global(Some(ISSUE_REQUEST_TIMEOUT))
+            .build()
+            .call()
+            .map_err(|error| format!("GitHub request failed: {error}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(format!("GitHub returned {status}: {body}"));
+        }
+
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|error| format!("failed to read GitHub response: {error}"))?;
+        let page_items: Vec<GitHubIssueRestPayload> = serde_json::from_str(&body)
+            .map_err(|error| format!("failed to decode GitHub issues: {error}"))?;
+        let page_len = page_items.len();
+
+        issues.extend(
+            page_items
+                .into_iter()
+                .filter(|issue| issue.pull_request.is_none())
+                .map(|issue| IssueDto {
+                    id: issue.number.to_string(),
+                    display_id: format!("#{}", issue.number),
+                    title: issue.title.clone(),
+                    state: issue.state,
+                    url: Some(issue.html_url),
+                    body: normalize_issue_body(issue.body),
+                    suggested_worktree_name: issue_worktree_name(
+                        &issue.number.to_string(),
+                        &issue.title,
+                    ),
+                    updated_at: issue.updated_at,
+                    labels: issue
+                        .labels
+                        .into_iter()
+                        .map(|label| IssueLabelDto {
+                            name: label.name,
+                            color: Some(label.color),
+                        })
+                        .collect(),
+                    issue_type: None,
+                    linked_branch: None,
+                    linked_review: None,
+                }),
+        );
+
+        if page_len < ISSUE_PAGE_SIZE {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(issues)
+}
+
+fn is_github_graphql_forbidden(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::StatusCode(status_code) => *status_code == 403,
+        _ => false,
     }
 }
 
@@ -222,7 +403,11 @@ impl RepositoryIssueProvider for GitLabIssueProvider {
         resolve_gitlab_source(&remote, gitlab_instance_supports_issues, &trusted_hosts)
     }
 
-    fn list_issues(&self, source: &ResolvedIssueSource) -> Result<Vec<IssueDto>, String> {
+    fn list_issues(
+        &self,
+        source: &ResolvedIssueSource,
+        _github_token: Option<&SecretString>,
+    ) -> Result<Vec<IssueDto>, String> {
         let token = gitlab_access_token_for_source(source);
         let mut issues = Vec::new();
         let mut page = 1usize;
@@ -262,17 +447,30 @@ impl RepositoryIssueProvider for GitLabIssueProvider {
                 .map_err(|error| format!("failed to decode GitLab issues: {error}"))?;
             let page_len = page_items.len();
 
-            issues.extend(page_items.into_iter().map(|issue| IssueDto {
-                id: issue.id.to_string(),
-                display_id: format!("#{}", issue.iid),
-                title: issue.title.clone(),
-                state: issue.state,
-                url: issue.web_url,
-                body: normalize_issue_body(issue.description),
-                suggested_worktree_name: issue_worktree_name(&issue.iid.to_string(), &issue.title),
-                updated_at: issue.updated_at,
-                linked_branch: None,
-                linked_review: None,
+            issues.extend(page_items.into_iter().map(|issue| {
+                IssueDto {
+                    id: issue.id.to_string(),
+                    display_id: format!("#{}", issue.iid),
+                    title: issue.title.clone(),
+                    state: issue.state,
+                    url: issue.web_url,
+                    body: normalize_issue_body(issue.description),
+                    suggested_worktree_name: issue_worktree_name(
+                        &issue.iid.to_string(),
+                        &issue.title,
+                    ),
+                    updated_at: issue.updated_at,
+                    labels: issue
+                        .labels
+                        .into_iter()
+                        .map(|name| IssueLabelDto { name, color: None })
+                        .collect(),
+                    issue_type: issue
+                        .issue_type
+                        .map(|name| IssueTypeDto { name, color: None }),
+                    linked_branch: None,
+                    linked_review: None,
+                }
             }));
 
             if page_len < ISSUE_PAGE_SIZE {
@@ -286,14 +484,91 @@ impl RepositoryIssueProvider for GitLabIssueProvider {
 }
 
 #[derive(Debug, Deserialize)]
-struct GitHubIssuePayload {
+struct GitHubGraphqlResponse<T> {
+    data: Option<T>,
+    #[serde(default)]
+    errors: Vec<GitHubGraphqlError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubGraphqlError {
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubIssuesGraphqlData {
+    repository: Option<GitHubIssuesGraphqlRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubIssuesGraphqlRepository {
+    issues: GitHubIssuesGraphqlIssueConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubIssuesGraphqlIssueConnection {
+    page_info: GitHubIssuesGraphqlPageInfo,
+    #[serde(default)]
+    nodes: Vec<Option<GitHubIssuesGraphqlIssue>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubIssuesGraphqlPageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubIssuesGraphqlIssue {
+    number: u64,
+    title: String,
+    state: String,
+    url: String,
+    body: Option<String>,
+    updated_at: Option<String>,
+    issue_type: Option<GitHubIssuesGraphqlIssueType>,
+    labels: GitHubIssuesGraphqlLabelConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubIssuesGraphqlIssueType {
+    name: String,
+    color: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubIssuesGraphqlLabelConnection {
+    #[serde(default)]
+    nodes: Vec<Option<GitHubIssuesGraphqlLabel>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubIssuesGraphqlLabel {
+    name: String,
+    color: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubIssueRestPayload {
     number: u64,
     title: String,
     html_url: String,
     state: String,
     body: Option<String>,
     updated_at: Option<String>,
+    #[serde(default)]
+    labels: Vec<GitHubIssueRestLabel>,
     pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubIssueRestLabel {
+    name: String,
+    color: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,6 +580,9 @@ struct GitLabIssuePayload {
     web_url: Option<String>,
     description: Option<String>,
     updated_at: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    issue_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

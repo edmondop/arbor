@@ -1638,7 +1638,7 @@ enum CommandPaletteAction {
     LaunchRepoPreset(usize),
     SelectRepository(usize),
     SelectWorktree(usize),
-    OpenIssueCreateModal(terminal_daemon_http::IssueDto),
+    OpenIssueCreateModal(Box<terminal_daemon_http::IssueDto>),
     LaunchTaskTemplate(TaskTemplate),
 }
 
@@ -1871,8 +1871,11 @@ struct ArborWindow {
     left_pane_width: f32,
     right_pane_width: f32,
     terminal_focus: FocusHandle,
+    issue_details_focus: FocusHandle,
     welcome_clone_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
+    issue_details_scroll_handle: ScrollHandle,
+    issue_details_scrollbar_drag_offset: Option<Pixels>,
     last_terminal_grid_size: Option<(u16, u16)>,
     center_tabs_scroll_handle: ScrollHandle,
     diff_scroll_handle: UniformListScrollHandle,

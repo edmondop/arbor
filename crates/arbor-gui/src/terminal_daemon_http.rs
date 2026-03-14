@@ -15,6 +15,7 @@ use {
 };
 
 const API_PATH_PREFIX: &str = "/api/v1";
+const GITHUB_TOKEN_HEADER: &str = "X-Arbor-GitHub-Token";
 const DEFAULT_DAEMON_PORT: u16 = 8787;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -119,6 +120,18 @@ pub struct IssueReviewDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueLabelDto {
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueTypeDto {
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssueDto {
     pub id: String,
     pub display_id: String,
@@ -129,6 +142,10 @@ pub struct IssueDto {
     pub body: Option<String>,
     pub suggested_worktree_name: String,
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<IssueLabelDto>,
+    #[serde(default)]
+    pub issue_type: Option<IssueTypeDto>,
     pub linked_branch: Option<String>,
     pub linked_review: Option<IssueReviewDto>,
 }
@@ -370,13 +387,16 @@ impl HttpTerminalDaemon {
     pub fn list_issues(
         &self,
         repo_root: &str,
+        github_token: Option<&str>,
     ) -> Result<IssueListResponseDto, HttpTerminalDaemonError> {
-        let response = self.send_empty(
+        let github_headers = github_token.map(|token| [(GITHUB_TOKEN_HEADER, token)]);
+        let response = self.send_empty_with_headers(
             "GET",
             &format!(
                 "{API_PATH_PREFIX}/issues?repo_root={}",
                 encode_query_value(repo_root)
             ),
+            github_headers.as_ref().map(|headers| headers.as_slice()),
         )?;
         self.decode_json_response(response, &[200])
     }
@@ -432,7 +452,16 @@ impl HttpTerminalDaemon {
         method: &str,
         path: &str,
     ) -> Result<HttpResponse, HttpTerminalDaemonError> {
-        self.send_request(method, path, None, None)
+        self.send_request(method, path, None, None, None)
+    }
+
+    fn send_empty_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        extra_headers: Option<&[(&str, &str)]>,
+    ) -> Result<HttpResponse, HttpTerminalDaemonError> {
+        self.send_request(method, path, None, None, extra_headers)
     }
 
     fn send_json<T: Serialize>(
@@ -449,6 +478,7 @@ impl HttpTerminalDaemon {
             path,
             Some(body.as_slice()),
             Some("application/json"),
+            None,
         )
     }
 
@@ -463,6 +493,7 @@ impl HttpTerminalDaemon {
             path,
             Some(payload),
             Some("application/octet-stream"),
+            None,
         )
     }
 
@@ -472,6 +503,7 @@ impl HttpTerminalDaemon {
         path: &str,
         body: Option<&[u8]>,
         content_type: Option<&str>,
+        extra_headers: Option<&[(&str, &str)]>,
     ) -> Result<HttpResponse, HttpTerminalDaemonError> {
         let mut stream = self.endpoint.connect()?;
         let request_path = self.endpoint.request_path(path);
@@ -484,6 +516,11 @@ impl HttpTerminalDaemon {
 
         if let Some(token) = self.auth_token.lock().ok().and_then(|guard| guard.clone()) {
             headers.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        if let Some(extra_headers) = extra_headers {
+            for (name, value) in extra_headers {
+                headers.push_str(&format!("{name}: {value}\r\n"));
+            }
         }
         if !body.is_empty() {
             if let Some(content_type) = content_type {
@@ -598,8 +635,11 @@ pub trait TerminalDaemonClient: Send + Sync + fmt::Debug {
     fn health(&self) -> Result<HealthInfo, HttpTerminalDaemonError>;
     fn list_repositories(&self) -> Result<Vec<RemoteRepositoryDto>, HttpTerminalDaemonError>;
     fn list_worktrees(&self) -> Result<Vec<RemoteWorktreeDto>, HttpTerminalDaemonError>;
-    fn list_issues(&self, repo_root: &str)
-    -> Result<IssueListResponseDto, HttpTerminalDaemonError>;
+    fn list_issues(
+        &self,
+        repo_root: &str,
+        github_token: Option<&str>,
+    ) -> Result<IssueListResponseDto, HttpTerminalDaemonError>;
     fn preview_managed_worktree(
         &self,
         repo_root: &str,
@@ -690,8 +730,9 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
     fn list_issues(
         &self,
         repo_root: &str,
+        github_token: Option<&str>,
     ) -> Result<IssueListResponseDto, HttpTerminalDaemonError> {
-        HttpTerminalDaemon::list_issues(self, repo_root)
+        HttpTerminalDaemon::list_issues(self, repo_root, github_token)
     }
 
     fn preview_managed_worktree(
@@ -1185,7 +1226,7 @@ mod tests {
             Err(error) => panic!("failed to create daemon client: {error}"),
         };
 
-        let issues = daemon.list_issues("/tmp/repo with spaces");
+        let issues = daemon.list_issues("/tmp/repo with spaces", Some("oauth-token"));
         if let Err(error) = &issues {
             panic!("issues request failed: {error}");
         }
@@ -1199,6 +1240,13 @@ mod tests {
                 "GET /api/v1/issues?repo_root=%2Ftmp%2Frepo%20with%20spaces HTTP/1.1\r\n"
             ),
             "unexpected request line: {:?}",
+            captured.headers
+        );
+        assert!(
+            captured
+                .headers
+                .contains("X-Arbor-GitHub-Token: oauth-token"),
+            "expected forwarded GitHub token header, got {:?}",
             captured.headers
         );
 

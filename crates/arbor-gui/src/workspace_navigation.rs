@@ -100,10 +100,12 @@ impl ArborWindow {
         cx.notify();
 
         let daemon_base_url = client.base_url();
+        let github_token = self.github_access_token();
         cx.spawn(async move |this, cx| {
             let repo_root = target.repo_root.clone();
+            let github_token = github_token.clone();
             let response = cx
-                .background_spawn(async move { client.list_issues(&repo_root) })
+                .background_spawn(async move { client.list_issues(&repo_root, github_token.as_deref()) })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
