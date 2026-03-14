@@ -206,7 +206,8 @@ pub(crate) async fn list_worktrees(
     }
 
     let mut entries_data: Vec<WorktreeData> = Vec::new();
-    let mut all_process_definitions = Vec::new();
+    let all_process_definitions =
+        crate::process_manager::discover_process_definitions_for_roots(&resolved);
 
     {
         let mut repo_cache = state.repo_cache.lock().await;
@@ -235,7 +236,6 @@ pub(crate) async fn list_worktrees(
                                 repository_root,
                                 &entry.path,
                             );
-                        all_process_definitions.extend(process_definitions.iter().cloned());
                         entries_data.push(WorktreeData {
                             repo_root: repository_root.display().to_string(),
                             path: entry.path.display().to_string(),
