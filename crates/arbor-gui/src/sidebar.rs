@@ -408,6 +408,7 @@ impl ArborWindow {
                                                                                 cx,
                                                                             );
                                                                         }
+                                                                        this.sync_collapsed_repositories_store(cx);
                                                                         cx.stop_propagation();
                                                                         cx.notify();
                                                                     },
@@ -2179,9 +2180,6 @@ impl ArborWindow {
                                                 div()
                                                     .min_w_0()
                                                     .w_full()
-                                                    .overflow_hidden()
-                                                    .whitespace_nowrap()
-                                                    .text_ellipsis()
                                                     .text_sm()
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(rgb(theme.text_primary))

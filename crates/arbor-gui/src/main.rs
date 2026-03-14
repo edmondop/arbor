@@ -200,6 +200,8 @@ impl ArborWindow {
                 };
                 let startup_sidebar_order = startup_ui_state.sidebar_order.clone();
                 let repository_sidebar_tabs = startup_ui_state.repository_sidebar_tabs.clone();
+                let startup_collapsed_repository_groups =
+                    startup_ui_state.collapsed_repository_group_keys.clone();
                 let configured_embedded_shell = loaded_config.config.embedded_shell.clone();
                 let notifications_enabled = loaded_config.config.notifications.unwrap_or(true);
                 let remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded_config
@@ -229,6 +231,14 @@ impl ArborWindow {
                     right_pane_tab_from_persisted(startup_ui_state.right_pane_tab);
                 let startup_logs_tab_open = persisted_logs_tab_open(&startup_ui_state);
                 let startup_logs_tab_active = persisted_logs_tab_active(&startup_ui_state);
+                let pending_startup_worktree_restore = matches!(
+                    startup_ui_state.selected_sidebar_selection.as_ref(),
+                    Some(ui_state_store::PersistedSidebarSelection::Worktree { .. })
+                );
+                let collapsed_repositories = collapsed_repository_indices_from_group_keys(
+                    &repositories,
+                    &startup_collapsed_repository_groups,
+                );
                 let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
 
                 let app = Self {
@@ -257,6 +267,7 @@ impl ArborWindow {
                     worktrees: Vec::new(),
                     worktree_stats_loading: false,
                     worktree_prs_loading: false,
+                    pending_startup_worktree_restore,
                     loading_animation_active: false,
                     loading_animation_frame: 0,
                     github_rate_limited_until: None,
@@ -384,7 +395,7 @@ impl ArborWindow {
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
                     left_pane_visible: true,
-                    collapsed_repositories: HashSet::new(),
+                    collapsed_repositories,
                     repository_context_menu: None,
                     worktree_context_menu: None,
                     worktree_hover_popover: None,
@@ -630,11 +641,21 @@ impl ArborWindow {
         };
         let startup_sidebar_order = startup_ui_state.sidebar_order.clone();
         let repository_sidebar_tabs = startup_ui_state.repository_sidebar_tabs.clone();
+        let startup_collapsed_repository_groups =
+            startup_ui_state.collapsed_repository_group_keys.clone();
         let configured_embedded_shell = loaded_config.config.embedded_shell.clone();
         let notifications_enabled = loaded_config.config.notifications.unwrap_or(true);
         let startup_right_pane_tab = right_pane_tab_from_persisted(startup_ui_state.right_pane_tab);
         let startup_logs_tab_open = persisted_logs_tab_open(&startup_ui_state);
         let startup_logs_tab_active = persisted_logs_tab_active(&startup_ui_state);
+        let pending_startup_worktree_restore = matches!(
+            startup_ui_state.selected_sidebar_selection.as_ref(),
+            Some(ui_state_store::PersistedSidebarSelection::Worktree { .. })
+        );
+        let collapsed_repositories = collapsed_repository_indices_from_group_keys(
+            &repositories,
+            &startup_collapsed_repository_groups,
+        );
         let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
 
         let mut app = Self {
@@ -663,6 +684,7 @@ impl ArborWindow {
             worktrees: Vec::new(),
             worktree_stats_loading: false,
             worktree_prs_loading: false,
+            pending_startup_worktree_restore,
             loading_animation_active: false,
             loading_animation_frame: 0,
             github_rate_limited_until: None,
@@ -754,7 +776,7 @@ impl ArborWindow {
             top_bar_quick_actions_submenu: None,
             ide_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
-            collapsed_repositories: HashSet::new(),
+            collapsed_repositories,
             repository_context_menu: None,
             worktree_context_menu: None,
             worktree_hover_popover: None,
@@ -2307,6 +2329,11 @@ impl ArborWindow {
                         })
                     {
                         this.pending_local_worktree_selection = None;
+                    }
+                    if this.pending_startup_worktree_restore
+                        && (this.active_worktree().is_some() || refresh_errors.is_empty())
+                    {
+                        this.pending_startup_worktree_restore = false;
                     }
                     if this.right_pane_tab == RightPaneTab::FileTree
                         && this.file_tree_entries.is_empty()
@@ -3900,6 +3927,7 @@ impl ArborWindow {
         } else {
             self.collapsed_repositories = (0..self.repositories.len()).collect();
         }
+        self.sync_collapsed_repositories_store(cx);
         cx.notify();
     }
 
@@ -6082,6 +6110,23 @@ fn managed_process_id_from_title(worktree_path: &Path, title: &str) -> Option<St
 
 fn managed_process_session_is_active(session: &TerminalSession) -> bool {
     session.is_initializing || session.state == TerminalState::Running
+}
+
+fn collapsed_repository_indices_from_group_keys(
+    repositories: &[RepositorySummary],
+    collapsed_group_keys: &[String],
+) -> HashSet<usize> {
+    let collapsed_group_keys: HashSet<&str> =
+        collapsed_group_keys.iter().map(String::as_str).collect();
+    repositories
+        .iter()
+        .enumerate()
+        .filter_map(|(index, repository)| {
+            collapsed_group_keys
+                .contains(repository.group_key.as_str())
+                .then_some(index)
+        })
+        .collect()
 }
 
 fn next_active_worktree_index(
@@ -8826,12 +8871,13 @@ mod tests {
     use {
         crate::{
             DaemonTerminalRuntime, DaemonTerminalWsState, DiffLineKind, OutpostSummary,
-            PendingSave, TerminalRuntimeHandle, TerminalRuntimeKind, TerminalSession,
-            TerminalState, WorktreeHoverPopover, WorktreeSummary, apply_daemon_snapshot,
-            auto_commit_body, auto_commit_subject, build_side_by_side_diff_lines,
+            PendingSave, RepositorySummary, TerminalRuntimeHandle, TerminalRuntimeKind,
+            TerminalSession, TerminalState, WorktreeHoverPopover, WorktreeSummary,
+            apply_daemon_snapshot, auto_commit_body, auto_commit_subject,
+            build_side_by_side_diff_lines,
             checkout::CheckoutKind,
             estimated_worktree_hover_popover_card_height, extract_first_url,
-            parse_terminal_backend_kind, prioritized_pr_checks_for_display,
+            parse_terminal_backend_kind, prioritized_pr_checks_for_display, repository_store,
             resolve_github_access_token_from_sources, styled_lines_for_session,
             terminal_backend::{
                 TerminalBackendKind, TerminalCursor, TerminalModes, TerminalStyledCell,
@@ -9315,6 +9361,70 @@ mod tests {
         assert_eq!(
             crate::persisted_sidebar_selection_outpost_index(Some(&outpost_selection), &outposts),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn persisted_sidebar_selection_for_ui_state_preserves_saved_worktree_during_startup() {
+        let current_selection = Some(ui_state_store::PersistedSidebarSelection::Repository {
+            root: "/tmp/repo".to_owned(),
+        });
+        let queued_selection = Some(ui_state_store::PersistedSidebarSelection::Worktree {
+            repo_root: "/tmp/repo".to_owned(),
+            path: "/tmp/repo/issue-42".to_owned(),
+        });
+
+        assert_eq!(
+            crate::persisted_sidebar_selection_for_ui_state(
+                current_selection.clone(),
+                queued_selection.clone(),
+                true,
+            ),
+            queued_selection
+        );
+        assert_eq!(
+            crate::persisted_sidebar_selection_for_ui_state(
+                current_selection.clone(),
+                current_selection.clone(),
+                true,
+            ),
+            current_selection.clone()
+        );
+        assert_eq!(
+            crate::persisted_sidebar_selection_for_ui_state(
+                current_selection.clone(),
+                queued_selection,
+                false,
+            ),
+            current_selection
+        );
+    }
+
+    #[test]
+    fn collapsed_repository_indices_match_saved_group_keys() {
+        let repo_a = RepositorySummary::from_checkout_roots(
+            PathBuf::from("/tmp/repo-a"),
+            "repo-a".to_owned(),
+            vec![repository_store::RepositoryCheckoutRoot {
+                path: PathBuf::from("/tmp/repo-a"),
+                kind: CheckoutKind::LinkedWorktree,
+            }],
+        );
+        let repo_b = RepositorySummary::from_checkout_roots(
+            PathBuf::from("/tmp/repo-b"),
+            "repo-b".to_owned(),
+            vec![repository_store::RepositoryCheckoutRoot {
+                path: PathBuf::from("/tmp/repo-b"),
+                kind: CheckoutKind::LinkedWorktree,
+            }],
+        );
+
+        assert_eq!(
+            crate::collapsed_repository_indices_from_group_keys(&[repo_a, repo_b], &[
+                "repo-b".to_owned(),
+                "missing".to_owned()
+            ],),
+            HashSet::from([1])
         );
     }
 
@@ -10265,6 +10375,39 @@ mod tests {
     fn extract_first_url_ignores_punctuation() {
         let url = extract_first_url("created PR: https://github.com/acme/repo/pull/42.");
         assert_eq!(url.as_deref(), Some("https://github.com/acme/repo/pull/42"));
+    }
+
+    #[test]
+    fn issue_markdown_to_text_produces_readable_plain_text() {
+        let markdown = r#"# Summary
+
+- [x] shipped **bold** change
+- see [docs](https://example.com/docs)
+
+> quoted _note_
+
+```rs
+let answer = 42;
+```
+"#;
+
+        let plain_text = crate::issue_markdown_to_text(markdown);
+        assert_eq!(
+            plain_text,
+            "Summary\n\nshipped bold change\nsee docs (https://example.com/docs)\n\nquoted note\n\nlet answer = 42;"
+        );
+    }
+
+    #[test]
+    fn issue_body_text_falls_back_when_body_is_missing_or_empty() {
+        assert_eq!(
+            crate::issue_body_text(None),
+            crate::ISSUE_DESCRIPTION_FALLBACK
+        );
+        assert_eq!(
+            crate::issue_body_text(Some("   \n\n")),
+            crate::ISSUE_DESCRIPTION_FALLBACK
+        );
     }
 
     #[test]

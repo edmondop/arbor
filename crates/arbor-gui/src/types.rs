@@ -1841,6 +1841,7 @@ struct ArborWindow {
     worktrees: Vec<WorktreeSummary>,
     worktree_stats_loading: bool,
     worktree_prs_loading: bool,
+    pending_startup_worktree_restore: bool,
     loading_animation_active: bool,
     loading_animation_frame: usize,
     github_rate_limited_until: Option<SystemTime>,

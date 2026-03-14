@@ -18,6 +18,13 @@ import {
   fetchIssues,
 } from "./api";
 
+type PersistedNavigationState = {
+  selectedRepoRoot: string | null;
+  selectedWorktreePath: string | null;
+};
+
+const NAVIGATION_STORAGE_KEY = "arbor.navigation";
+
 export type AppState = {
   repositories: Repository[];
   worktrees: Worktree[];
@@ -44,6 +51,7 @@ export type AppState = {
 };
 
 export function createInitialState(): AppState {
+  const persistedNavigation = loadPersistedNavigationState();
   return {
     repositories: [],
     worktrees: [],
@@ -59,8 +67,8 @@ export function createInitialState(): AppState {
     issuesLoadedRepoRoot: null,
     issuesRequestGeneration: 0,
     rightPanelTab: "changes",
-    selectedRepoRoot: null,
-    selectedWorktreePath: null,
+    selectedRepoRoot: persistedNavigation.selectedRepoRoot,
+    selectedWorktreePath: persistedNavigation.selectedWorktreePath,
     activeSessionId: null,
     rightPaneTab: "changes",
     loading: true,
@@ -86,7 +94,18 @@ export function notify(): void {
 export let state = createInitialState();
 
 export function updateState(partial: Partial<AppState>): void {
+  const previousSelectedRepoRoot = state.selectedRepoRoot;
+  const previousSelectedWorktreePath = state.selectedWorktreePath;
   Object.assign(state, partial);
+  if (
+    previousSelectedRepoRoot !== state.selectedRepoRoot ||
+    previousSelectedWorktreePath !== state.selectedWorktreePath
+  ) {
+    persistNavigationState({
+      selectedRepoRoot: state.selectedRepoRoot,
+      selectedWorktreePath: state.selectedWorktreePath,
+    });
+  }
   notify();
 }
 
@@ -423,6 +442,51 @@ function selectedIssueRepoRootForSelection(
     }
   }
   return selectedRepoRoot;
+}
+
+function loadPersistedNavigationState(): PersistedNavigationState {
+  if (typeof window === "undefined") {
+    return { selectedRepoRoot: null, selectedWorktreePath: null };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(NAVIGATION_STORAGE_KEY);
+    if (raw === null) {
+      return { selectedRepoRoot: null, selectedWorktreePath: null };
+    }
+
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) {
+      return { selectedRepoRoot: null, selectedWorktreePath: null };
+    }
+
+    return {
+      selectedRepoRoot: nullableString(parsed["selectedRepoRoot"]),
+      selectedWorktreePath: nullableString(parsed["selectedWorktreePath"]),
+    };
+  } catch {
+    return { selectedRepoRoot: null, selectedWorktreePath: null };
+  }
+}
+
+function persistNavigationState(state: PersistedNavigationState): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(NAVIGATION_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore storage failures, the app still works without persistence.
+  }
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ── Agent activity WebSocket ─────────────────────────────────────────

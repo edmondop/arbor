@@ -8,8 +8,10 @@ import {
   agentStateForWorktree,
 } from "../state";
 
+const COLLAPSED_REPOS_STORAGE_KEY = "arbor.sidebar.collapsedRepos";
+
 /** Track which repo groups are collapsed (by repo root). */
-const collapsedRepos = new Set<string>();
+const collapsedRepos = loadCollapsedRepos();
 
 export function createSidebar(): HTMLElement {
   const sidebar = el("aside", "sidebar");
@@ -35,6 +37,8 @@ export function createSidebar(): HTMLElement {
       sidebar.append(scroll);
       return;
     }
+
+    pruneCollapsedRepos(state.repositories);
 
     for (const repo of state.repositories) {
       const repoWorktrees = state.worktrees.filter((w) => w.repo_root === repo.root);
@@ -63,6 +67,7 @@ function renderRepoGroup(repo: Repository, worktrees: Worktree[]): HTMLElement {
     } else {
       collapsedRepos.add(repo.root);
     }
+    persistCollapsedRepos();
     notify();
   });
 
@@ -184,3 +189,59 @@ function renderWorktreeCard(wt: Worktree): HTMLElement {
 const GITHUB_SVG = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
 
 const GIT_BRANCH_SVG = `<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5z"/></svg>`;
+
+function loadCollapsedRepos(): Set<string> {
+  if (typeof window === "undefined") {
+    return new Set<string>();
+  }
+
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_REPOS_STORAGE_KEY);
+    if (raw === null) {
+      return new Set<string>();
+    }
+
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set<string>();
+    }
+
+    const repoRoots = parsed.filter((value): value is string => typeof value === "string");
+    return new Set<string>(repoRoots);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function persistCollapsedRepos(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      COLLAPSED_REPOS_STORAGE_KEY,
+      JSON.stringify([...collapsedRepos].sort()),
+    );
+  } catch {
+    // Ignore storage failures, the sidebar can still function without persistence.
+  }
+}
+
+function pruneCollapsedRepos(repositories: Repository[]): void {
+  const repositoryRoots = new Set(repositories.map((repository) => repository.root));
+  let changed = false;
+
+  for (const repoRoot of collapsedRepos) {
+    if (repositoryRoots.has(repoRoot)) {
+      continue;
+    }
+
+    collapsedRepos.delete(repoRoot);
+    changed = true;
+  }
+
+  if (changed) {
+    persistCollapsedRepos();
+  }
+}

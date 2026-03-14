@@ -111,6 +111,30 @@ impl ArborWindow {
                 state.loaded = true;
                 match response {
                     Ok(response) => {
+                        let issue_count = response.issues.len();
+                        let issues_with_body_count = response
+                            .issues
+                            .iter()
+                            .filter(|issue| {
+                                issue.body.as_deref().is_some_and(|body| !body.trim().is_empty())
+                            })
+                            .count();
+                        let issues_without_body_count = issue_count - issues_with_body_count;
+                        let first_issue = response
+                            .issues
+                            .first()
+                            .map(|issue| issue.display_id.as_str())
+                            .unwrap_or("none");
+                        tracing::info!(
+                            repo_root = %target.repo_root,
+                            daemon = %daemon_base_url,
+                            daemon_target = ?target.daemon_target,
+                            issue_count,
+                            issues_with_body_count,
+                            issues_without_body_count,
+                            first_issue,
+                            "loaded repository issues"
+                        );
                         state.issues = response.issues;
                         state.source = response.source;
                         state.notice = response.notice;

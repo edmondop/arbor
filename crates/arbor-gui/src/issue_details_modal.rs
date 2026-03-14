@@ -6,6 +6,36 @@ impl ArborWindow {
         issue: terminal_daemon_http::IssueDto,
         cx: &mut Context<Self>,
     ) {
+        let raw_body = issue.body.as_deref();
+        let normalized_body = issue_body_text(raw_body);
+        let uses_fallback = normalized_body == ISSUE_DESCRIPTION_FALLBACK;
+        let preview = issue_body_log_preview(&normalized_body);
+        if uses_fallback {
+            tracing::warn!(
+                repo_root = %target.repo_root,
+                daemon_target = ?target.daemon_target,
+                issue_id = %issue.display_id,
+                title = %issue.title,
+                raw_body_present = raw_body.is_some(),
+                raw_body_len = raw_body.map_or(0, str::len),
+                normalized_body_len = normalized_body.len(),
+                preview = %preview,
+                "opening issue details modal without issue body content"
+            );
+        } else {
+            tracing::info!(
+                repo_root = %target.repo_root,
+                daemon_target = ?target.daemon_target,
+                issue_id = %issue.display_id,
+                title = %issue.title,
+                raw_body_present = raw_body.is_some(),
+                raw_body_len = raw_body.map_or(0, str::len),
+                normalized_body_len = normalized_body.len(),
+                preview = %preview,
+                "opening issue details modal"
+            );
+        }
+
         self.create_modal = None;
         self.issue_details_modal = Some(IssueDetailsModal {
             target,
@@ -42,28 +72,32 @@ impl ArborWindow {
         let issue = modal.issue;
         let issue_url = issue.url.clone();
         let issue_number = issue.display_id.clone();
-        let issue_body = issue.body.clone();
         let issue_state = issue.state.clone();
         let updated_at = issue.updated_at.clone();
         let linked_review = issue.linked_review.clone();
         let linked_branch = issue.linked_branch.clone();
         let title = issue.title.clone();
+        let issue_has_body = issue
+            .body
+            .as_deref()
+            .is_some_and(|body| !body.trim().is_empty());
         let source_label = modal.source_label;
+        let issue_heading = format!("Issue {issue_number}");
+        let issue_description = issue_body_text(issue.body.as_deref());
         let description_body = div()
             .id("issue-details-description-body")
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .max_h(px(320.))
+            .w_full()
+            .h_full()
             .overflow_y_scroll()
             .pr_1()
-            .children(issue_body_lines(
-                issue_body
-                    .as_deref()
-                    .unwrap_or("No issue description is available for this issue."),
-                theme.text_primary,
-                theme.text_muted,
-            ));
+            .text_sm()
+            .whitespace_normal()
+            .text_color(rgb(if issue_has_body {
+                theme.text_primary
+            } else {
+                theme.text_muted
+            }))
+            .child(issue_description);
 
         div()
             .absolute()
@@ -90,6 +124,7 @@ impl ArborWindow {
                 div()
                     .w(px(680.))
                     .max_w(px(680.))
+                    .h(px(640.))
                     .max_h(px(640.))
                     .flex_none()
                     .overflow_hidden()
@@ -109,6 +144,7 @@ impl ArborWindow {
                     })
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_start()
                             .justify_between()
@@ -123,14 +159,15 @@ impl ArborWindow {
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(theme.text_primary))
-                                            .child("Issue"),
+                                            .text_color(rgb(theme.text_muted))
+                                            .child(issue_heading),
                                     )
                                     .child(
                                         div()
                                             .min_w_0()
                                             .text_lg()
                                             .font_weight(FontWeight::SEMIBOLD)
+                                            .line_clamp(3)
                                             .text_color(rgb(theme.text_primary))
                                             .child(title),
                                     )
@@ -140,14 +177,6 @@ impl ArborWindow {
                                             .items_center()
                                             .gap_2()
                                             .flex_wrap()
-                                            .child(issue_meta_chip(
-                                                issue_number.clone(),
-                                                theme.accent,
-                                                theme.panel_active_bg,
-                                                issue_url.is_some(),
-                                                issue_url.clone(),
-                                                cx,
-                                            ))
                                             .child(issue_meta_chip(
                                                 issue_state,
                                                 theme.text_primary,
@@ -197,6 +226,7 @@ impl ArborWindow {
                     .when(linked_review.is_some() || linked_branch.is_some(), |this| {
                         this.child(
                             div()
+                                .flex_none()
                                 .flex()
                                 .items_center()
                                 .gap_2()
@@ -233,29 +263,14 @@ impl ArborWindow {
                     })
                     .child(
                         div()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.panel_bg))
-                            .p_2()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Description"),
-                            )
-                            .child(
-                                div()
-                                    .min_h(px(120.))
-                                    .child(description_body),
-                            ),
+                            .flex_none()
+                            .h(px(380.))
+                            .w_full()
+                            .child(description_body),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_center()
                             .justify_end()
@@ -321,6 +336,8 @@ impl ArborWindow {
     }
 }
 
+const ISSUE_DESCRIPTION_FALLBACK: &str = "No issue description is available for this issue.";
+
 fn issue_meta_chip(
     label: String,
     text_color: u32,
@@ -352,23 +369,198 @@ fn issue_meta_chip(
         .child(label)
 }
 
-fn issue_body_lines(body: &str, text_color: u32, muted_color: u32) -> Vec<Div> {
-    body.split('\n')
-        .map(|line| {
-            if line.is_empty() {
-                div().h(px(8.))
-            } else {
-                div()
-                    .text_sm()
-                    .text_color(rgb(if line.starts_with('#') {
-                        muted_color
-                    } else {
-                        text_color
-                    }))
-                    .child(line.to_owned())
+fn issue_body_text(body: Option<&str>) -> String {
+    let Some(body) = body else {
+        return ISSUE_DESCRIPTION_FALLBACK.to_owned();
+    };
+
+    let plain_text = issue_markdown_to_text(body);
+    if plain_text.trim().is_empty() {
+        ISSUE_DESCRIPTION_FALLBACK.to_owned()
+    } else {
+        plain_text
+    }
+}
+
+fn issue_body_log_preview(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut preview: String = normalized.chars().take(160).collect();
+    if normalized.chars().count() > 160 {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn issue_markdown_to_text(markdown: &str) -> String {
+    let mut plain_lines = Vec::new();
+    let mut in_code_block = false;
+
+    for raw_line in markdown.lines() {
+        let trimmed = raw_line.trim_end();
+        if trimmed.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+
+        let plain_line = if in_code_block {
+            trimmed.to_owned()
+        } else {
+            markdown_line_to_text(trimmed)
+        };
+        plain_lines.push(plain_line);
+    }
+
+    let mut normalized = Vec::new();
+    let mut previous_blank = true;
+    for line in plain_lines {
+        let is_blank = line.trim().is_empty();
+        if is_blank {
+            if !previous_blank {
+                normalized.push(String::new());
             }
-        })
-        .collect()
+        } else {
+            normalized.push(line);
+        }
+        previous_blank = is_blank;
+    }
+
+    while normalized.last().is_some_and(|line| line.is_empty()) {
+        normalized.pop();
+    }
+
+    normalized.join("\n")
+}
+
+fn markdown_line_to_text(line: &str) -> String {
+    let mut text = line.trim_start();
+
+    if let Some(stripped) = text.strip_prefix('>') {
+        text = stripped.trim_start();
+    }
+
+    if let Some(stripped) = strip_markdown_heading(text) {
+        text = stripped;
+    }
+
+    if let Some(stripped) = strip_markdown_list_marker(text) {
+        text = stripped;
+    }
+
+    if let Some(stripped) = strip_markdown_task_marker(text) {
+        text = stripped;
+    }
+
+    let mut plain = markdown_inline_to_text(text);
+    plain = plain
+        .replace("**", "")
+        .replace("__", "")
+        .replace("~~", "")
+        .replace(['`', '*', '_'], "");
+    plain.trim().to_owned()
+}
+
+fn strip_markdown_heading(line: &str) -> Option<&str> {
+    let hashes = line.chars().take_while(|character| *character == '#').count();
+    if hashes == 0 {
+        return None;
+    }
+
+    line[hashes..].strip_prefix(' ').or(Some(&line[hashes..]))
+}
+
+fn strip_markdown_list_marker(line: &str) -> Option<&str> {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(stripped) = line.strip_prefix(marker) {
+            return Some(stripped);
+        }
+    }
+
+    let digit_count = line.chars().take_while(|character| character.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+
+    let rest = &line[digit_count..];
+    rest.strip_prefix(". ")
+        .or_else(|| rest.strip_prefix(") "))
+        .or(None)
+}
+
+fn strip_markdown_task_marker(line: &str) -> Option<&str> {
+    ["[ ] ", "[x] ", "[X] "]
+        .into_iter()
+        .find_map(|marker| line.strip_prefix(marker))
+}
+
+fn markdown_inline_to_text(text: &str) -> String {
+    let mut output = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let character = chars[index];
+        if character == '!' && chars.get(index + 1) == Some(&'[')
+            && let Some((alt_text, next_index)) =
+                markdown_bracket_and_url_to_text(&chars, index + 1, false)
+        {
+            output.push_str(&alt_text);
+            index = next_index;
+            continue;
+        }
+
+        if character == '['
+            && let Some((link_text, next_index)) = markdown_bracket_and_url_to_text(&chars, index, true)
+        {
+            output.push_str(&link_text);
+            index = next_index;
+            continue;
+        }
+
+        if character == '<'
+            && let Some(close_index) = chars[index + 1..].iter().position(|candidate| *candidate == '>')
+        {
+            let end = index + 1 + close_index;
+            let inner: String = chars[index + 1..end].iter().collect();
+            if inner.starts_with("http://") || inner.starts_with("https://") {
+                output.push_str(&inner);
+                index = end + 1;
+                continue;
+            }
+        }
+
+        output.push(character);
+        index += 1;
+    }
+
+    output
+}
+
+fn markdown_bracket_and_url_to_text(
+    chars: &[char],
+    bracket_index: usize,
+    include_url: bool,
+) -> Option<(String, usize)> {
+    let close_bracket_offset = chars[bracket_index + 1..]
+        .iter()
+        .position(|character| *character == ']')?;
+    let close_bracket_index = bracket_index + 1 + close_bracket_offset;
+    if chars.get(close_bracket_index + 1) != Some(&'(') {
+        return None;
+    }
+
+    let close_paren_offset = chars[close_bracket_index + 2..]
+        .iter()
+        .position(|character| *character == ')')?;
+    let close_paren_index = close_bracket_index + 2 + close_paren_offset;
+    let label: String = chars[bracket_index + 1..close_bracket_index].iter().collect();
+    let url: String = chars[close_bracket_index + 2..close_paren_index].iter().collect();
+
+    let rendered = if include_url && !url.trim().is_empty() && label.trim() != url.trim() {
+        format!("{label} ({url})")
+    } else {
+        label
+    };
+    Some((rendered, close_paren_index + 1))
 }
 
 fn issue_updated_label(updated_at: &str) -> String {

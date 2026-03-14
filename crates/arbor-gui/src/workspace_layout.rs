@@ -22,6 +22,27 @@ fn next_pending_ui_state_save(
     Some(next_state.clone())
 }
 
+fn persisted_sidebar_selection_for_ui_state(
+    current_selection: Option<ui_state_store::PersistedSidebarSelection>,
+    queued_selection: Option<ui_state_store::PersistedSidebarSelection>,
+    pending_startup_worktree_restore: bool,
+) -> Option<ui_state_store::PersistedSidebarSelection> {
+    if !pending_startup_worktree_restore {
+        return current_selection;
+    }
+
+    match (current_selection, queued_selection) {
+        (
+            Some(ui_state_store::PersistedSidebarSelection::Repository { root }),
+            Some(ref saved_selection @ ui_state_store::PersistedSidebarSelection::Worktree {
+                ref repo_root,
+                ..
+            }),
+        ) if root == *repo_root => Some(saved_selection.clone()),
+        (current_selection, _) => current_selection,
+    }
+}
+
 impl ArborWindow {
     fn clamp_pane_widths_for_workspace(&mut self, workspace_width: f32) {
         let available_side_width =
@@ -158,9 +179,10 @@ impl ArborWindow {
             compact_sidebar: Some(self.compact_sidebar),
             execution_mode: Some(self.execution_mode),
             preferred_checkout_kind: Some(self.preferred_checkout_kind),
+            collapsed_repository_group_keys: self.collapsed_repository_group_keys_snapshot(),
             sidebar_order: self.sidebar_order.clone(),
             repository_sidebar_tabs: self.repository_sidebar_tabs_snapshot(),
-            selected_sidebar_selection: self.sidebar_selection_snapshot(),
+            selected_sidebar_selection: self.sidebar_selection_snapshot_for_persistence(),
             right_pane_tab: Some(persisted_right_pane_tab(self.right_pane_tab)),
             logs_tab_open: Some(self.logs_tab_open),
             logs_tab_active: Some(self.logs_tab_active),
@@ -181,6 +203,18 @@ impl ArborWindow {
             .filter(|(_, tab)| **tab != RepositorySidebarTab::Worktrees)
             .map(|(group_key, tab)| (group_key.clone(), *tab))
             .collect()
+    }
+
+    fn collapsed_repository_group_keys_snapshot(&self) -> Vec<String> {
+        let mut group_keys: Vec<String> = self
+            .collapsed_repositories
+            .iter()
+            .filter_map(|index| self.repositories.get(*index))
+            .map(|repository| repository.group_key.clone())
+            .collect();
+        group_keys.sort();
+        group_keys.dedup();
+        group_keys
     }
 
     fn sidebar_selection_snapshot(&self) -> Option<ui_state_store::PersistedSidebarSelection> {
@@ -205,6 +239,16 @@ impl ArborWindow {
                 root: repository.root.display().to_string(),
             }
         })
+    }
+
+    fn sidebar_selection_snapshot_for_persistence(
+        &self,
+    ) -> Option<ui_state_store::PersistedSidebarSelection> {
+        persisted_sidebar_selection_for_ui_state(
+            self.sidebar_selection_snapshot(),
+            self.queued_ui_state_base().selected_sidebar_selection,
+            self.pending_startup_worktree_restore,
+        )
     }
 
     fn pull_request_cache_snapshot(
@@ -302,9 +346,15 @@ impl ArborWindow {
         self.queue_ui_state_save(next_state, cx);
     }
 
+    fn sync_collapsed_repositories_store(&mut self, cx: &mut Context<Self>) {
+        let mut next_state = self.queued_ui_state_base();
+        next_state.collapsed_repository_group_keys = self.collapsed_repository_group_keys_snapshot();
+        self.queue_ui_state_save(next_state, cx);
+    }
+
     fn sync_navigation_ui_state_store(&mut self, cx: &mut Context<Self>) {
         let mut next_state = self.queued_ui_state_base();
-        next_state.selected_sidebar_selection = self.sidebar_selection_snapshot();
+        next_state.selected_sidebar_selection = self.sidebar_selection_snapshot_for_persistence();
         next_state.right_pane_tab = Some(persisted_right_pane_tab(self.right_pane_tab));
         next_state.logs_tab_open = Some(self.logs_tab_open);
         next_state.logs_tab_active = Some(self.logs_tab_active);

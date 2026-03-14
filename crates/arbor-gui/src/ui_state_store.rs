@@ -23,6 +23,9 @@ pub struct UiState {
     pub compact_sidebar: Option<bool>,
     pub execution_mode: Option<ExecutionMode>,
     pub preferred_checkout_kind: Option<CheckoutKind>,
+    /// Repository groups collapsed in the left sidebar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed_repository_group_keys: Vec<String>,
     /// Custom sidebar item display order per repository group.
     /// Key: group_key, Value: ordered list of SidebarItemIds.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -254,6 +257,31 @@ mod tests {
         assert_eq!(
             loaded.repository_sidebar_tabs,
             state.repository_sidebar_tabs
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn json_ui_state_store_round_trips_collapsed_repository_groups() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("arbor-ui-state-collapsed-{unique}.json"));
+        let store = JsonUiStateStore::new(path.clone());
+
+        let state = UiState {
+            collapsed_repository_group_keys: vec!["repo-a".to_owned(), "repo-b".to_owned()],
+            ..UiState::default()
+        };
+
+        store.save(&state).expect("save ui state");
+        let loaded = store.load().expect("load ui state");
+
+        assert_eq!(
+            loaded.collapsed_repository_group_keys,
+            state.collapsed_repository_group_keys
         );
 
         let _ = fs::remove_file(path);
