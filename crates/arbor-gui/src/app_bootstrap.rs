@@ -7,11 +7,7 @@ fn open_arbor_window(cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(1180.), px(760.))),
             app_id: Some("so.pen.arbor".to_owned()),
-            titlebar: Some(TitlebarOptions {
-                title: Some(app_window_title(None).into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(9.), px(9.))),
-            }),
+            titlebar: Some(default_titlebar_options(None)),
             window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
             ..Default::default()
         },
@@ -455,11 +451,7 @@ pub(crate) fn run_gui(log_buffer: log_layer::LogBuffer) {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(1180.), px(760.))),
                 app_id: Some("so.pen.arbor".to_owned()),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(app_window_title(None).into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(9.), px(9.))),
-                }),
+                titlebar: Some(default_titlebar_options(None)),
                 window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
                 ..Default::default()
             },
