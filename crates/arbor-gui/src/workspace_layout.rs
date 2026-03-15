@@ -339,9 +339,10 @@ impl ArborWindow {
                         this.last_ui_state_error = None;
                     },
                     Err(error) => {
-                        if this.last_ui_state_error.as_deref() != Some(error.as_str()) {
+                        let message = error.to_string();
+                        if this.last_ui_state_error.as_deref() != Some(message.as_str()) {
                             this.notice = Some(format!("failed to persist UI state: {error}"));
-                            this.last_ui_state_error = Some(error);
+                            this.last_ui_state_error = Some(message);
                             cx.notify();
                         }
                     },
@@ -447,9 +448,10 @@ impl ArborWindow {
                         this.last_issue_cache_error = None;
                     },
                     Err(error) => {
-                        if this.last_issue_cache_error.as_deref() != Some(error.as_str()) {
+                        let message = error.to_string();
+                        if this.last_issue_cache_error.as_deref() != Some(message.as_str()) {
                             this.notice = Some(format!("failed to persist issue cache: {error}"));
-                            this.last_issue_cache_error = Some(error);
+                            this.last_issue_cache_error = Some(message);
                             cx.notify();
                         }
                     },
