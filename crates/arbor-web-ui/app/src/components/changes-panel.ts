@@ -1,14 +1,10 @@
 import { restartProcess, startProcess, stopProcess } from "../api";
 import type { ProcessInfo, Worktree } from "../types";
-import { changeKindInfo, el, formatAge } from "../utils";
-import { openCreateWorktreeModal } from "./create-worktree-modal";
+import { changeKindInfo, el } from "../utils";
 import {
   refresh,
-  refreshIssues,
-  selectedIssueRepoRoot,
   setActiveSession,
   setRightPaneTab,
-  setRightPanelTab,
   state,
   subscribe,
 } from "../state";
@@ -21,26 +17,27 @@ export function createChangesPanel(): HTMLElement {
     panel.replaceChildren();
     const worktree = selectedWorktree();
 
-    panel.append(renderPrimaryTabs());
-
-    if (state.rightPanelTab === "issues") {
-      panel.append(renderIssuesContent());
-      return;
-    }
+    panel.append(renderTabs(worktree));
 
     if (worktree === undefined) {
       panel.append(el("div", "changes-empty", "Select a worktree"));
       return;
     }
 
-    panel.append(renderChangesTabs(worktree));
-
-    if (state.rightPaneTab === "procfile") {
-      panel.append(renderProcfileContent(worktree));
-      return;
+    switch (state.rightPaneTab) {
+      case "files":
+        panel.append(renderFilesContent());
+        break;
+      case "processes":
+        panel.append(renderProcfileContent(worktree));
+        break;
+      case "notes":
+        panel.append(renderNotesContent());
+        break;
+      default:
+        panel.append(renderChangesContent());
+        break;
     }
-
-    panel.append(renderChangesContent());
   }
 
   subscribe(render);
@@ -55,50 +52,21 @@ function selectedWorktree(): Worktree | undefined {
   return state.worktrees.find((entry) => entry.path === state.selectedWorktreePath);
 }
 
-function renderPrimaryTabs(): HTMLElement {
+function renderTabs(worktree: Worktree | undefined): HTMLElement {
   const tabs = el("div", "changes-tabs");
+  const processCount = worktree?.processes.length ?? 0;
   tabs.append(
-    renderPanelTabButton("Changes", "changes", state.changedFiles.length),
-    renderPanelTabButton("Issues", "issues", state.issues.length),
+    renderTabButton("Changes", "changes", state.changedFiles.length),
+    renderTabButton("Files", "files"),
+    renderTabButton("Processes", "processes", processCount),
+    renderTabButton("Notes", "notes"),
   );
   return tabs;
 }
 
-function renderPanelTabButton(
+function renderTabButton(
   label: string,
-  tab: "changes" | "issues",
-  count: number,
-): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.className = "changes-tab-button";
-  button.type = "button";
-  if (state.rightPanelTab === tab) {
-    button.classList.add("active");
-  }
-
-  const content = el("span", "changes-tab-content");
-  content.append(
-    el("span", "changes-tab-label", label),
-    el("span", "changes-tab-count", String(count)),
-  );
-
-  button.append(content);
-  button.addEventListener("click", () => setRightPanelTab(tab));
-  return button;
-}
-
-function renderChangesTabs(worktree: Worktree): HTMLElement {
-  const tabs = el("div", "changes-tabs changes-subtabs");
-  tabs.append(
-    renderPaneTabButton("Changes", "changes"),
-    renderPaneTabButton("Processes", "procfile", worktree.processes.length),
-  );
-  return tabs;
-}
-
-function renderPaneTabButton(
-  label: string,
-  tab: "changes" | "procfile",
+  tab: "changes" | "files" | "processes" | "notes",
   count?: number,
 ): HTMLButtonElement {
   const button = document.createElement("button");
@@ -110,7 +78,7 @@ function renderPaneTabButton(
 
   const content = el("span", "changes-tab-content");
   content.append(el("span", "changes-tab-label", label));
-  if (count !== undefined) {
+  if (count !== undefined && count > 0) {
     content.append(el("span", "changes-tab-count", String(count)));
   }
 
@@ -161,146 +129,15 @@ function renderChangesContent(): HTMLElement {
   return wrapper;
 }
 
-function renderIssuesContent(): HTMLElement {
-  const repoRoot = selectedIssueRepoRoot();
-  if (repoRoot === null) {
-    return el("div", "changes-empty", "Select a repository");
-  }
+function renderFilesContent(): HTMLElement {
+  const wrapper = el("div", "changes-pane-body");
+  wrapper.append(el("div", "changes-empty", "File browser coming soon"));
+  return wrapper;
+}
 
-  if (state.issuesLoading && state.issues.length === 0) {
-    return el("div", "changes-empty", "Loading issues…");
-  }
-
-  if (state.issuesError !== null) {
-    return el("div", "changes-empty changes-empty-error", state.issuesError);
-  }
-
-  if (state.issuesNotice !== null) {
-    return el("div", "changes-empty", state.issuesNotice);
-  }
-
-  const wrapper = el("div", "issues-panel");
-  const source = el("div", "issues-source");
-  const sourceLabel = state.issueSource !== null
-    ? `${state.issueSource.label} · ${state.issueSource.repository}`
-    : repoRoot;
-  source.append(el("span", "issues-source-label", sourceLabel));
-
-  const actions = el("div", "issues-source-actions");
-  if (state.issueSource?.url !== null) {
-    const link = document.createElement("a");
-    link.className = "issues-source-link";
-    link.href = state.issueSource.url;
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.textContent = "Open";
-    actions.append(link);
-  }
-
-  const refreshButton = el("button", "changes-action-btn", "Refresh");
-  refreshButton.type = "button";
-  refreshButton.disabled = state.issuesLoading;
-  refreshButton.addEventListener("click", () => {
-    refreshIssues(repoRoot, true);
-  });
-  actions.append(refreshButton);
-
-  source.append(actions);
-  wrapper.append(source);
-
-  if (state.issues.length === 0) {
-    wrapper.append(el("div", "changes-empty", "No open issues"));
-    return wrapper;
-  }
-
-  const list = el("div", "issues-list");
-  for (const issue of state.issues) {
-    const linkedReview = issue.linked_review;
-    const linkedBranch = issue.linked_branch;
-    const issueActionLabel = linkedReview !== null
-      ? linkedReview.kind === "merge_request"
-        ? "MR exists"
-        : "PR exists"
-      : linkedBranch !== null
-        ? "Branch exists"
-        : "Create worktree";
-    const item = el("article", "issue-item");
-    item.setAttribute("role", "button");
-    item.tabIndex = 0;
-    item.addEventListener("click", () => openCreateWorktreeModal(issue));
-    item.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        openCreateWorktreeModal(issue);
-      }
-    });
-
-    const topRow = el("div", "issue-item-top");
-    topRow.append(
-      el("span", "issue-display-id", issue.display_id),
-      el("span", "issue-title", issue.title),
-    );
-
-    if (issue.url !== null) {
-      const link = document.createElement("a");
-      link.className = "issue-link";
-      link.href = issue.url;
-      link.target = "_blank";
-      link.rel = "noopener";
-      link.textContent = "Open";
-      link.addEventListener("click", (event) => {
-        event.stopPropagation();
-      });
-      topRow.append(link);
-    }
-
-    item.append(topRow);
-
-    if (linkedReview !== null || linkedBranch !== null) {
-      const linkedRow = el("div", "issue-linked");
-
-      if (linkedReview !== null) {
-        if (linkedReview.url !== null) {
-          const reviewLink = document.createElement("a");
-          reviewLink.className = "issue-linked-chip issue-linked-review";
-          reviewLink.href = linkedReview.url;
-          reviewLink.target = "_blank";
-          reviewLink.rel = "noopener";
-          reviewLink.textContent = linkedReview.label;
-          reviewLink.addEventListener("click", (event) => {
-            event.stopPropagation();
-          });
-          linkedRow.append(reviewLink);
-        } else {
-          linkedRow.append(
-            el("span", "issue-linked-chip issue-linked-review", linkedReview.label),
-          );
-        }
-      }
-
-      if (linkedBranch !== null) {
-        linkedRow.append(el("span", "issue-linked-chip issue-linked-branch", linkedBranch));
-      }
-
-      item.append(linkedRow);
-    }
-
-    const bottomRow = el("div", "issue-item-bottom");
-    bottomRow.append(
-      el("span", "issue-state", issue.state),
-      el(
-        "span",
-        "issue-age",
-        issue.updated_at === null ? "recently" : formatIssueAge(issue.updated_at),
-      ),
-      el("span", "issue-cta", issueActionLabel),
-    );
-
-    item.append(bottomRow);
-    list.append(item);
-  }
-
-  wrapper.append(list);
+function renderNotesContent(): HTMLElement {
+  const wrapper = el("div", "changes-pane-body");
+  wrapper.append(el("div", "changes-empty", "Notes coming soon"));
   return wrapper;
 }
 
@@ -451,14 +288,6 @@ async function stopProcessAndRefresh(id: string): Promise<void> {
 async function restartProcessAndRefresh(id: string): Promise<void> {
   await restartProcess(id);
   await refresh();
-}
-
-function formatIssueAge(updatedAt: string): string {
-  const timestamp = Date.parse(updatedAt);
-  if (Number.isNaN(timestamp)) {
-    return updatedAt;
-  }
-  return formatAge(timestamp);
 }
 
 function formatProcessStatus(status: ProcessInfo["status"]): string {

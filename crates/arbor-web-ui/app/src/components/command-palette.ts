@@ -3,7 +3,7 @@ import {
   refresh,
   refreshIssues,
   selectedIssueRepoRoot,
-  setRightPanelTab,
+  setRightPaneTab,
   state,
   subscribe,
 } from "../state";
@@ -45,7 +45,7 @@ const ACTIONS: PaletteItem[] = [
     keywords: "changes files diff right panel",
     run: () => {
       closeCommandPalette();
-      setRightPanelTab("changes");
+      setRightPaneTab("changes");
     },
   },
   {

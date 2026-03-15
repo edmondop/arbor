@@ -61,15 +61,27 @@ function parseChangeKind(value: unknown): ChangeKind | null {
   return null;
 }
 
-async function fetchJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+type RequestOptions = {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+};
+
+async function request(url: string, options: RequestOptions = {}): Promise<Response> {
+  const response = await fetch(url, options);
   if (response.status === 401) {
     window.location.href = "/login";
     throw new Error("authentication required");
   }
   if (!response.ok) {
-    throw new Error(`request failed (${response.status}) for ${url}`);
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `request failed (${response.status}) for ${url}`);
   }
+  return response;
+}
+
+async function fetchJson(url: string): Promise<unknown> {
+  const response = await request(url, { headers: { Accept: "application/json" } });
   return response.json();
 }
 
@@ -283,7 +295,7 @@ type CreateManagedWorktreeRequest = {
 };
 
 async function postJson(url: string, body: unknown): Promise<unknown> {
-  const response = await fetch(url, {
+  const response = await request(url, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -291,14 +303,6 @@ async function postJson(url: string, body: unknown): Promise<unknown> {
     },
     body: JSON.stringify(body),
   });
-  if (response.status === 401) {
-    window.location.href = "/login";
-    throw new Error("authentication required");
-  }
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `request failed (${response.status}) for ${url}`);
-  }
   return response.json();
 }
 
@@ -374,18 +378,11 @@ export async function createTerminal(
   if (command !== undefined) {
     body["command"] = command;
   }
-  const response = await fetch("/api/v1/terminals", {
+  const response = await request("/api/v1/terminals", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (response.status === 401) {
-    window.location.href = "/login";
-    throw new Error("authentication required");
-  }
-  if (!response.ok) {
-    throw new Error(`failed to create terminal (${response.status})`);
-  }
   const payload: unknown = await response.json();
   if (!isRecord(payload) || !isRecord(payload["session"])) {
     throw new Error("unexpected create terminal response");
@@ -493,28 +490,25 @@ function parseProcessInfo(item: unknown): ProcessInfo | null {
   };
 }
 
-async function postProcessAction(url: string): Promise<void> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { Accept: "application/json" },
-  });
-  if (response.status === 401) {
-    window.location.href = "/login";
-    throw new Error("authentication required");
-  }
-  if (!response.ok) {
-    throw new Error(`process action failed (${response.status})`);
-  }
+async function postAction(url: string): Promise<void> {
+  await request(url, { method: "POST", headers: { Accept: "application/json" } });
 }
 
 export async function startProcess(id: string): Promise<void> {
-  await postProcessAction(`/api/v1/processes/${encodeURIComponent(id)}/start`);
+  await postAction(`/api/v1/processes/${encodeURIComponent(id)}/start`);
 }
 
 export async function stopProcess(id: string): Promise<void> {
-  await postProcessAction(`/api/v1/processes/${encodeURIComponent(id)}/stop`);
+  await postAction(`/api/v1/processes/${encodeURIComponent(id)}/stop`);
 }
 
 export async function restartProcess(id: string): Promise<void> {
-  await postProcessAction(`/api/v1/processes/${encodeURIComponent(id)}/restart`);
+  await postAction(`/api/v1/processes/${encodeURIComponent(id)}/restart`);
+}
+
+export async function killTerminal(sessionId: string): Promise<void> {
+  await request(`/api/v1/terminals/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+  });
 }

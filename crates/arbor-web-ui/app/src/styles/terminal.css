@@ -107,6 +107,26 @@
   text-overflow: ellipsis;
 }
 
+.terminal-tab-close {
+  display: none;
+  margin-left: 4px;
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-text-muted, #a1a1aa);
+}
+
+.terminal-tab:hover .terminal-tab-close {
+  display: inline;
+}
+
+.terminal-tab-close:hover {
+  color: #f38ba8;
+  background: rgba(243, 139, 168, 0.15);
+}
+
 .preset-group {
   display: flex;
   gap: 2px;

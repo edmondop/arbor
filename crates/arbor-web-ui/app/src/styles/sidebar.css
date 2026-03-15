@@ -273,3 +273,248 @@
   text-overflow: ellipsis;
   min-width: 0;
 }
+
+/* ── Repo subtabs (Worktrees / Issues) ── */
+
+.repo-subtabs {
+  display: flex;
+  gap: 4px;
+  padding: 2px 4px 4px;
+}
+
+.repo-subtab-btn {
+  flex: 1;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.repo-subtab-btn:hover {
+  color: var(--text);
+}
+
+.repo-subtab-btn.active {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.repo-subtab-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.repo-subtab-badge {
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.repo-subtab-btn.active .repo-subtab-badge {
+  color: var(--text-muted);
+}
+
+/* ── Sidebar issues content ── */
+
+.sidebar-issues-content {
+  display: flex;
+  flex-direction: column;
+  padding: 0 4px;
+}
+
+.sidebar-issues-source-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 0 4px;
+}
+
+.sidebar-issues-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.sidebar-issues-link {
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.sidebar-issues-link:hover {
+  text-decoration: underline;
+}
+
+.sidebar-issues-refresh {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.sidebar-issues-refresh:hover {
+  color: var(--text);
+}
+
+.sidebar-issues-refresh:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sidebar-issues-source {
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-issues-empty {
+  padding: 12px 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-style: italic;
+  text-align: center;
+}
+
+.sidebar-issues-error {
+  color: var(--red);
+}
+
+.sidebar-issues-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-issue-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface2);
+  cursor: pointer;
+  padding: 6px 8px;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.sidebar-issue-card:hover,
+.sidebar-issue-card:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.sidebar-issue-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sidebar-issue-id {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  background: rgba(137, 180, 250, 0.12);
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+
+.sidebar-issue-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-issue-link {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.sidebar-issue-link:hover {
+  color: var(--accent);
+}
+
+.sidebar-issue-linked {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.sidebar-issue-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+}
+
+.sidebar-issue-chip-review {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: rgba(137, 180, 250, 0.08);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.sidebar-issue-chip-branch {
+  font-family: var(--font-mono);
+}
+
+.sidebar-issue-bottom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sidebar-issue-state,
+.sidebar-issue-age {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.sidebar-issue-cta {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

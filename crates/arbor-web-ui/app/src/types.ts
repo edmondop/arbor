@@ -5,8 +5,6 @@ export type Repository = {
   avatar_url: string | null;
 };
 
-export type RightPanelTab = "changes" | "issues";
-
 export type Worktree = {
   repo_root: string;
   path: string;
@@ -20,7 +18,7 @@ export type Worktree = {
   processes: ProcessInfo[];
 };
 
-export type RightPaneTab = "changes" | "procfile";
+export type RightPaneTab = "changes" | "files" | "processes" | "notes";
 
 export type TerminalState = "running" | "completed" | "failed";
 

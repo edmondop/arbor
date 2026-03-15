@@ -7,7 +7,6 @@ import type {
   AgentActivityWsEvent,
   Issue,
   IssueSource,
-  RightPanelTab,
   RightPaneTab,
 } from "./types";
 import {
@@ -39,7 +38,6 @@ export type AppState = {
   issuesRepoRoot: string | null;
   issuesLoadedRepoRoot: string | null;
   issuesRequestGeneration: number;
-  rightPanelTab: RightPanelTab;
 
   selectedRepoRoot: string | null;
   selectedWorktreePath: string | null;
@@ -66,7 +64,6 @@ export function createInitialState(): AppState {
     issuesRepoRoot: null,
     issuesLoadedRepoRoot: null,
     issuesRequestGeneration: 0,
-    rightPanelTab: "changes",
     selectedRepoRoot: persistedNavigation.selectedRepoRoot,
     selectedWorktreePath: persistedNavigation.selectedWorktreePath,
     activeSessionId: null,
@@ -198,7 +195,6 @@ export async function refresh(): Promise<void> {
       );
       const issueRepoChanged = nextIssuesRepoRoot !== state.issuesRepoRoot;
       const shouldRefreshIssues =
-        state.rightPanelTab === "issues" &&
         nextIssuesRepoRoot !== null &&
         (issueRepoChanged || state.issuesLoadedRepoRoot !== nextIssuesRepoRoot);
 
@@ -314,7 +310,6 @@ export function selectWorktree(path: string | null): void {
     refreshChangedFiles(newPath);
   }
   if (
-    state.rightPanelTab === "issues" &&
     nextIssuesRepoRoot !== null &&
     (issueRepoChanged || state.issuesLoadedRepoRoot !== nextIssuesRepoRoot)
   ) {
@@ -324,20 +319,6 @@ export function selectWorktree(path: string | null): void {
 
 export function setActiveSession(sessionId: string | null): void {
   updateState({ activeSessionId: sessionId });
-}
-
-export function setRightPanelTab(tab: RightPanelTab): void {
-  if (state.rightPanelTab === tab) return;
-  updateState({ rightPanelTab: tab });
-  if (tab === "issues") {
-    const repoRoot = selectedIssueRepoRoot();
-    if (repoRoot !== null) {
-      refreshIssues(
-        repoRoot,
-        state.issuesRepoRoot !== repoRoot || state.issuesLoadedRepoRoot !== repoRoot,
-      );
-    }
-  }
 }
 
 export function selectedIssueRepoRoot(): string | null {

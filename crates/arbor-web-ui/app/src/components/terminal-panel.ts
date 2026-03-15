@@ -11,6 +11,7 @@ import {
 } from "../state";
 import {
   createTerminal as apiCreateTerminal,
+  killTerminal as apiKillTerminal,
   buildWsUrl,
   parseWsServerEvent,
   serializeWsClientEvent,
@@ -126,7 +127,14 @@ function renderTabs(): void {
       terminalTabTitle(session),
     );
 
-    tab.append(stateIndicator, icon, label);
+    const closeBtn = el("span", "terminal-tab-close", "\u00d7");
+    closeBtn.title = "Close terminal";
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeTerminal(session.session_id);
+    });
+
+    tab.append(stateIndicator, icon, label, closeBtn);
     tab.addEventListener("click", () => activateSession(session.session_id));
     tabsContainer.append(tab);
   }
@@ -335,6 +343,31 @@ const AGENT_PRESETS: AgentPreset[] = [
   { label: "OpenCode", command: "opencode", cssClass: "preset-icon-opencode" },
   { label: "Copilot", command: "copilot", cssClass: "preset-icon-copilot" },
 ];
+
+async function closeTerminal(sessionId: string): Promise<void> {
+  try {
+    // Teardown if this is the active terminal
+    if (activeInstance !== null && activeInstance.sessionId === sessionId) {
+      teardownActiveInstance();
+    }
+    await apiKillTerminal(sessionId);
+    await refresh();
+
+    // If we just closed the active session, activate another one
+    if (state.activeSessionId === sessionId) {
+      const remaining = filteredSessions();
+      if (remaining.length > 0) {
+        activateSession(remaining[0]!.session_id);
+      } else {
+        setActiveSession(null);
+      }
+    }
+  } catch (error) {
+    setStatus(
+      `Failed to close: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
+  }
+}
 
 async function launchPreset(preset: AgentPreset): Promise<void> {
   const worktreePath = state.selectedWorktreePath;
