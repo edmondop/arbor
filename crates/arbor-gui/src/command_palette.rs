@@ -1,8 +1,4 @@
-use {
-    super::*,
-    gpui::{Image, ImageFormat},
-    std::sync::Arc,
-};
+use super::*;
 
 impl ArborWindow {
     pub(crate) fn open_command_palette(&mut self, cx: &mut Context<Self>) {
@@ -759,54 +755,53 @@ pub(crate) fn command_palette_icon(
 ) -> AnyElement {
     match action {
         CommandPaletteAction::OpenCreateWorktree => {
-            command_palette_svg_icon(CMD_ICON_PLUS_CIRCLE, "\u{f055}", 0x98c379)
+            command_palette_glyph_icon("\u{f055}", 0x98c379, theme)
         },
         CommandPaletteAction::BrowseIssues | CommandPaletteAction::OpenIssueCreateModal(_) => {
-            command_palette_svg_icon(CMD_ICON_ISSUES, "\u{f145}", 0x61afef)
+            command_palette_glyph_icon("\u{f145}", 0x61afef, theme)
         },
         CommandPaletteAction::OpenReviewPullRequest => {
-            command_palette_svg_icon(CMD_ICON_PULL_REQUEST, "\u{f0ea}", 0xc678dd)
+            command_palette_glyph_icon("\u{f0ea}", 0xc678dd, theme)
         },
         CommandPaletteAction::RefreshWorktrees => {
-            command_palette_svg_icon(CMD_ICON_REFRESH, "\u{f021}", 0x61afef)
+            command_palette_glyph_icon("\u{f021}", 0x61afef, theme)
         },
         CommandPaletteAction::ToggleCompactSidebar => {
-            command_palette_svg_icon(CMD_ICON_COMPACT_LIST, "\u{f03a}", 0x56b6c2)
+            command_palette_glyph_icon("\u{f03a}", 0x56b6c2, theme)
         },
         CommandPaletteAction::OpenSettings => {
-            command_palette_svg_icon(CMD_ICON_SETTINGS, "\u{f013}", 0xd19a66)
+            command_palette_glyph_icon("\u{f013}", 0xd19a66, theme)
         },
         CommandPaletteAction::OpenThemePicker => {
-            command_palette_svg_icon(CMD_ICON_THEME, "\u{f1fc}", 0xc678dd)
+            command_palette_glyph_icon("\u{f1fc}", 0xc678dd, theme)
         },
         CommandPaletteAction::SetExecutionMode(mode) => match mode {
-            ExecutionMode::Plan => command_palette_svg_icon(CMD_ICON_PLAN, "\u{f19c}", 0xe5c07b),
-            ExecutionMode::Build => command_palette_svg_icon(CMD_ICON_BUILD, "\u{f085}", 0x72d69c),
-            ExecutionMode::Yolo => command_palette_svg_icon(CMD_ICON_YOLO, "\u{f06d}", 0xeb6f92),
+            ExecutionMode::Plan => command_palette_glyph_icon("\u{f19c}", 0xe5c07b, theme),
+            ExecutionMode::Build => command_palette_glyph_icon("\u{f085}", 0x72d69c, theme),
+            ExecutionMode::Yolo => command_palette_glyph_icon("\u{f06d}", 0xeb6f92, theme),
         },
         CommandPaletteAction::LaunchAgentPreset(kind) => command_palette_preset_icon(*kind, theme),
         CommandPaletteAction::LaunchRepoPreset(_) => {
-            command_palette_svg_icon(CMD_ICON_PLAY, "\u{f04b}", 0xa6e3a1)
+            command_palette_glyph_icon("\u{f04b}", 0xa6e3a1, theme)
         },
         CommandPaletteAction::SelectRepository(_) => {
-            command_palette_svg_icon(CMD_ICON_FOLDER, "\u{f07b}", 0xe5c07b)
+            command_palette_glyph_icon("\u{f07b}", 0xe5c07b, theme)
         },
         CommandPaletteAction::SelectWorktree(_) => {
-            command_palette_svg_icon(CMD_ICON_GIT_BRANCH, "\u{e725}", 0x89b4fa)
+            command_palette_glyph_icon("\u{e725}", 0x89b4fa, theme)
         },
         CommandPaletteAction::LaunchTaskTemplate(task) => task
             .agent
             .map(|kind| command_palette_preset_icon(kind, theme))
-            .unwrap_or_else(|| command_palette_svg_icon(CMD_ICON_TASK, "\u{f0ae}", 0x56b6c2)),
+            .unwrap_or_else(|| command_palette_glyph_icon("\u{f0ae}", 0x56b6c2, theme)),
     }
 }
 
-fn command_palette_svg_icon(
-    svg_bytes: &'static [u8],
-    fallback_glyph: &'static str,
+pub(crate) fn command_palette_glyph_icon(
+    glyph: &'static str,
     color: u32,
+    _theme: ThemePalette,
 ) -> AnyElement {
-    let icon = Arc::new(Image::from_bytes(ImageFormat::Svg, svg_bytes.to_vec()));
     div()
         .w(px(34.))
         .h(px(34.))
@@ -814,16 +809,14 @@ fn command_palette_svg_icon(
         .flex()
         .items_center()
         .justify_center()
-        .text_color(rgb(color))
-        .child(img(icon).size(px(18.)).with_fallback(move || {
+        .child(
             div()
                 .font_family(FONT_MONO)
                 .text_size(px(18.))
                 .line_height(px(18.))
                 .text_color(rgb(color))
-                .child(fallback_glyph)
-                .into_any_element()
-        }))
+                .child(glyph),
+        )
         .into_any_element()
 }
 

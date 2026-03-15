@@ -142,36 +142,6 @@ pub(crate) const PRESET_ICON_OPENCODE_SVG: &[u8] =
 pub(crate) const PRESET_ICON_COPILOT_SVG: &[u8] =
     include_bytes!("../../../assets/preset-icons/copilot-white.svg");
 
-// Command palette action icons
-pub(crate) const CMD_ICON_PLUS_CIRCLE: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/plus-circle.svg");
-pub(crate) const CMD_ICON_ISSUES: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/issues.svg");
-pub(crate) const CMD_ICON_PULL_REQUEST: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/pull-request.svg");
-pub(crate) const CMD_ICON_REFRESH: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/refresh.svg");
-pub(crate) const CMD_ICON_COMPACT_LIST: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/compact-list.svg");
-pub(crate) const CMD_ICON_SETTINGS: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/settings.svg");
-pub(crate) const CMD_ICON_THEME: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/theme.svg");
-pub(crate) const CMD_ICON_PLAN: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/plan.svg");
-pub(crate) const CMD_ICON_BUILD: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/build.svg");
-pub(crate) const CMD_ICON_YOLO: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/yolo.svg");
-pub(crate) const CMD_ICON_PLAY: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/play.svg");
-pub(crate) const CMD_ICON_FOLDER: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/folder.svg");
-pub(crate) const CMD_ICON_GIT_BRANCH: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/git-branch.svg");
-pub(crate) const CMD_ICON_TASK: &[u8] =
-    include_bytes!("../../../assets/command-palette-icons/task.svg");
-
 pub(crate) const BUNDLED_FONT_FILES: &[&str] = &[
     "CaskaydiaMonoNerdFontMono-Regular.ttf",
     "CaskaydiaMonoNerdFontMono-Bold.ttf",
