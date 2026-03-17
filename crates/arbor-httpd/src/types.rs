@@ -39,6 +39,7 @@ pub(crate) struct AgentSession {
     pub(crate) cwd: String,
     pub(crate) state: AgentState,
     pub(crate) updated_at_unix_ms: u64,
+    pub(crate) metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +47,7 @@ pub(crate) struct AgentNotifyRequest {
     pub(crate) hook_event_name: String,
     pub(crate) session_id: String,
     pub(crate) cwd: String,
+    pub(crate) metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
