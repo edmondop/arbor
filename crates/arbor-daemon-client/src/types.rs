@@ -106,6 +106,8 @@ pub struct AgentSessionDto {
     pub cwd: String,
     pub state: String,
     pub updated_at_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +116,7 @@ struct AgentSessionDtoWire {
     cwd: String,
     state: String,
     updated_at_unix_ms: u64,
+    metadata: Option<serde_json::Value>,
 }
 
 fn legacy_agent_session_id(cwd: &str) -> String {
@@ -133,6 +136,7 @@ impl<'de> Deserialize<'de> for AgentSessionDto {
             cwd: wire.cwd,
             state: wire.state,
             updated_at_unix_ms: wire.updated_at_unix_ms,
+            metadata: wire.metadata,
         })
     }
 }
@@ -317,5 +321,53 @@ mod tests {
         assert_eq!(dto.cwd, "/tmp/repo/worktree");
         assert_eq!(dto.state, "waiting");
         assert_eq!(dto.updated_at_unix_ms, 99);
+        assert!(dto.metadata.is_none());
+    }
+
+    #[test]
+    fn agent_session_dto_deserializes_with_metadata() {
+        let dto: AgentSessionDto = serde_json::from_value(serde_json::json!({
+            "session_id": "sess-1",
+            "cwd": "/tmp/test",
+            "state": "working",
+            "updated_at_unix_ms": 42_u64,
+            "metadata": {
+                "terminal": { "type": "tmux", "server": "my-project", "pane_id": "%42" },
+                "git": { "branch": "feat/cool" }
+            }
+        }))
+        .expect("payload with metadata should deserialize");
+
+        let meta = dto.metadata.expect("metadata should be Some");
+        assert_eq!(meta["terminal"]["type"], "tmux");
+        assert_eq!(meta["terminal"]["server"], "my-project");
+        assert_eq!(meta["terminal"]["pane_id"], "%42");
+        assert_eq!(meta["git"]["branch"], "feat/cool");
+    }
+
+    #[test]
+    fn agent_session_dto_without_metadata_omits_field_in_json() {
+        let dto = AgentSessionDto {
+            session_id: "s1".to_owned(),
+            cwd: "/tmp".to_owned(),
+            state: "idle".to_owned(),
+            updated_at_unix_ms: 0,
+            metadata: None,
+        };
+        let json = serde_json::to_value(&dto).expect("should serialize");
+        assert!(json.get("metadata").is_none(), "metadata should be omitted when None");
+    }
+
+    #[test]
+    fn agent_session_dto_with_metadata_includes_field_in_json() {
+        let dto = AgentSessionDto {
+            session_id: "s2".to_owned(),
+            cwd: "/tmp".to_owned(),
+            state: "working".to_owned(),
+            updated_at_unix_ms: 1,
+            metadata: Some(serde_json::json!({"foo": "bar"})),
+        };
+        let json = serde_json::to_value(&dto).expect("should serialize");
+        assert_eq!(json["metadata"]["foo"], "bar");
     }
 }

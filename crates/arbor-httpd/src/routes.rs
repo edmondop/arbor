@@ -1206,6 +1206,7 @@ pub(crate) async fn agent_notify(
         request.session_id.clone(),
         request.cwd.clone(),
         agent_state,
+        request.metadata.clone(),
         AgentSessionUpdateSource::Hook,
     )
     .await;
@@ -1225,6 +1226,7 @@ pub(crate) async fn apply_terminal_activity_event(state: &AppState, event: Termi
                 terminal_agent_session_key(&session_id),
                 cwd.display().to_string(),
                 agent_state,
+                None,
                 AgentSessionUpdateSource::TerminalActivity,
             )
             .await;
@@ -1240,6 +1242,7 @@ async fn upsert_agent_session(
     session_id: String,
     cwd: String,
     agent_state: AgentState,
+    metadata: Option<serde_json::Value>,
     source: AgentSessionUpdateSource,
 ) {
     let now_ms = SystemTime::now()
@@ -1260,6 +1263,7 @@ async fn upsert_agent_session(
             cwd: cwd.clone(),
             state: agent_state,
             updated_at_unix_ms: now_ms,
+            metadata: metadata.clone(),
         });
 
         (
@@ -1268,6 +1272,7 @@ async fn upsert_agent_session(
                 cwd: cwd.clone(),
                 state: agent_state_label(agent_state).to_owned(),
                 updated_at_unix_ms: now_ms,
+                metadata,
             },
             previous_state,
         )
@@ -1663,6 +1668,7 @@ fn agent_session_snapshot(sessions: &mut HashMap<String, AgentSession>) -> Vec<A
                 AgentState::Waiting => "waiting".to_owned(),
             },
             updated_at_unix_ms: session.updated_at_unix_ms,
+            metadata: session.metadata.clone(),
         })
         .collect();
     snapshot.sort_by(|left, right| {

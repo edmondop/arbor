@@ -579,6 +579,7 @@ mod tests {
                 cwd: "/tmp/repo".to_owned(),
                 state: "working".to_owned(),
                 updated_at_unix_ms: 1,
+                metadata: None,
             }])
         }
 
