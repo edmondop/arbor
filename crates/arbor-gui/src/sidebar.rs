@@ -151,6 +151,12 @@ impl ArborWindow {
                             this.select_worktree(wt_index, window, cx);
                         }));
                     if is_active {
+                        // LEARN[GPUI-Bonus-Animation]: GPUI animations. Three args:
+                        // 1. Animation ID — must be unique + change to re-trigger (tuple w/ epoch)
+                        // 2. Animation config — duration + easing curve
+                        // 3. Callback — |element, delta: f32| where delta goes 0.0 → 1.0
+                        // Here: opacity fades from 0.8 to 1.0 over 150ms with ease-in-out.
+                        // When selection_epoch changes, the animation restarts automatically.
                         pane = pane.child(cell.with_animation(
                             ("collapsed-wt-select", selection_epoch),
                             Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),

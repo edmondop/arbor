@@ -77,6 +77,13 @@ pub(crate) fn render_diff_session(
                             .min_w_0()
                             .flex()
                             .child(
+                                // LEARN[GPUI-14-Lists]: uniform_list is GPUI's virtualized list.
+                                // Only VISIBLE rows are rendered — critical for large lists.
+                                // Args: (element_id, total_count, |visible_range, window, cx| -> Vec<Element>)
+                                // The callback receives a Range<usize> of indices that are on screen.
+                                // .track_scroll(handle) enables programmatic scrolling and scroll state.
+                                // "uniform" means all rows have the same height (GPU can skip layout).
+                                // For variable-height rows, use list() instead (more expensive).
                                 uniform_list(
                                     ("diff-list", session_id),
                                     lines.len(),

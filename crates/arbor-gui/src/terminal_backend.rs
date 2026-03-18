@@ -90,6 +90,12 @@ impl EmbeddedTerminal {
         } else {
             TERMINAL_COLS
         };
+        // LEARN: PTY (pseudoterminal) basics. A PTY is a pair: master + slave.
+        // The slave acts like a real terminal to the child process (shell sees /dev/pts/X).
+        // The master is our end — we read output from it and write input to it.
+        // openpty() creates this pair. slave.spawn_command() starts a shell attached to it.
+        // master.try_clone_reader() / take_writer() give us the I/O handles.
+        // This is the same mechanism that Terminal.app, iTerm2, and Alacritty use.
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {

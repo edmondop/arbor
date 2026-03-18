@@ -118,6 +118,11 @@ fn git_relative_path(file_path: &Path) -> Result<String, GitError> {
     Ok(path_text.replace('\\', "/"))
 }
 
+// LEARN: imara-diff (via gix-diff) implements the Histogram diff algorithm — the same one
+// git uses by default since 2.44. The key insight: InternedInput interns both files into
+// integer tokens (one per line), then the diff runs on integers instead of strings.
+// This makes the O(ND) algorithm much faster on large files. postprocess_lines() cleans
+// up hunks to align on line boundaries for human-readable output.
 pub(crate) fn build_side_by_side_diff_lines(before_text: &str, after_text: &str) -> Vec<DiffLine> {
     let before_rope = Rope::from_str(before_text);
     let after_rope = Rope::from_str(after_text);

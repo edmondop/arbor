@@ -644,6 +644,13 @@ impl ArborWindow {
         self.open_add_repository_picker(cx);
     }
 
+    // LEARN[GPUI-08-ActionHandler]: Action handler signature. Every action handler has:
+    //   &mut self        — mutable access to your entity (ArborWindow)
+    //   _: &ActionType   — the action instance (zero-sized for simple actions, data for complex)
+    //   window: &mut Window — window context (for focus, title, bounds)
+    //   cx: &mut Context<Self> — entity context (for notify, spawn, etc.)
+    // The _ pattern for the action is common because simple actions carry no data.
+    // This is wired up in render() via: .on_action(cx.listener(Self::action_spawn_terminal))
     pub(crate) fn action_spawn_terminal(
         &mut self,
         _: &SpawnTerminal,
@@ -707,6 +714,10 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         self.left_pane_visible = !self.left_pane_visible;
+        // LEARN[GPUI-09-Notify]: cx.notify() is GPUI's "setState". It tells GPUI
+        // that this entity's state changed and render() should be called again.
+        // WITHOUT cx.notify(), the UI will NOT update after state changes.
+        // This is explicit by design — GPUI never re-renders speculatively.
         cx.notify();
     }
 

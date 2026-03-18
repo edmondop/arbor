@@ -35,6 +35,10 @@ pub struct SshConnection {
 }
 
 impl SshConnection {
+    // LEARN: Full SSH connection setup via libssh (C library, Rust bindings).
+    // ProcessConfig(true) reads ~/.ssh/config — so Host aliases, ProxyJump, etc. all work.
+    // Auth cascade: try ssh-agent first (fastest, no password prompt), then fall back to
+    // userauth_public_key_auto (tries all keys in ~/.ssh/). This mirrors what `ssh` does.
     pub fn connect(host: &RemoteHost) -> Result<Self, SshError> {
         let session = Session::new()?;
 

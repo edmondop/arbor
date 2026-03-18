@@ -281,6 +281,11 @@ impl ArborMcp {
     }
 }
 
+// LEARN: rmcp's #[tool_handler] proc macro implements the MCP protocol handshake.
+// ServerHandler is the trait that defines an MCP server's capabilities.
+// get_info() tells clients what the server supports (tools, resources, prompts).
+// The tool methods (defined separately via #[tool_router]) get auto-registered
+// with JSON Schema generated from schemars::JsonSchema derives on input types.
 #[tool_handler]
 impl ServerHandler for ArborMcp {
     fn get_info(&self) -> ServerInfo {
@@ -353,6 +358,10 @@ fn map_daemon_error(error: DaemonClientError) -> ErrorData {
     ErrorData::internal_error(error.to_string(), None)
 }
 
+// LEARN: An entire MCP server in 3 lines. rmcp::transport::io::stdio() wraps
+// stdin/stdout as a JSON-RPC transport. The MCP protocol runs over this —
+// AI agents (Claude, etc.) spawn the server as a subprocess and communicate
+// via stdin/stdout. This is the standard way MCP tools integrate with LLMs.
 #[cfg(feature = "stdio-server")]
 pub async fn serve_stdio() -> anyhow::Result<()> {
     let service = ArborMcp::new().serve(rmcp::transport::io::stdio()).await?;

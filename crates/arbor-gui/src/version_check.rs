@@ -65,10 +65,25 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
 }
 
 impl ArborWindow {
-    /// Start a background poller that checks GitHub for new releases.
+    // LEARN[GPUI-12-Async]: The canonical GPUI async pattern. Three layers:
+    //
+    // 1. cx.spawn(async move |this, cx| { ... })
+    //    Creates a task on the main thread. `this` is WeakEntity<Self> (won't
+    //    keep the entity alive). `cx` is AsyncWindowContext (limited API).
+    //
+    // 2. cx.background_spawn(async move { expensive_work() }).await
+    //    Offloads CPU/IO to a thread pool. NEVER block the main thread.
+    //    The .await resumes on the main thread when the work completes.
+    //
+    // 3. this.update(cx, |this, cx| { this.field = result; cx.notify(); })
+    //    The ONLY way to mutate entity state from async. Returns Result
+    //    because the entity might have been dropped (window closed).
+    //    If Err, break the loop — your entity is gone.
+    //
+    // 4. .detach() — fire-and-forget. No one awaits this task.
+    //    Without .detach(), the task would be dropped immediately.
     pub(crate) fn start_version_check_poller(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            // Small initial delay so startup isn't slowed down.
             cx.background_spawn(async move {
                 std::thread::sleep(Duration::from_secs(10));
             })

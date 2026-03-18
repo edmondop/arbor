@@ -173,6 +173,12 @@ impl ArborWindow {
                                     "https://github.com/user/repo or git@github.com:user/repo.git",
                                     clone_url_active,
                                 )
+                                // LEARN[GPUI-10-Focus]: Focus in GPUI is explicit, not implicit.
+                                // 1. Allocate: let handle = cx.focus_handle() (in constructor)
+                                // 2. Attach: .track_focus(&handle) — tells GPUI this element is focusable
+                                // 3. Focus: window.focus(&handle) — programmatically set focus
+                                // Focus determines where key events and IME input are routed.
+                                // Unlike HTML, clicking doesn't auto-focus — you must do it yourself.
                                 .track_focus(&self.welcome_clone_focus)
                                 .on_mouse_down(
                                     MouseButton::Left,

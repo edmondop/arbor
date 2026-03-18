@@ -458,6 +458,13 @@ pub(crate) fn render_terminal_line(
         .overflow_hidden()
         .bg(rgb(theme.terminal_bg))
         .child(
+            // LEARN: canvas() is GPUI's escape hatch to raw GPU painting.
+            // First closure: prepaint (layout phase, unused here).
+            // Second closure: paint phase — you get `bounds` (position/size after layout),
+            // `window` (the GPU surface), and `cx` (app context).
+            // Inside, paint_quad() draws filled rectangles for cell backgrounds,
+            // and text_system().shape_line() does GPU-accelerated text shaping per run.
+            // This is how Alacritty-level terminal rendering works inside GPUI.
             canvas(
                 |_, _, _| {},
                 move |bounds, _, window, cx| {

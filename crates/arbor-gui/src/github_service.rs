@@ -691,6 +691,11 @@ impl GitHubService for OctocrabGitHubService {
         let base_branch = base_branch.to_owned();
         let token = token.to_owned();
 
+        // LEARN: Two async runtimes coexisting. GPUI uses smol internally, but octocrab
+        // requires tokio. Solution: spin up a short-lived tokio Runtime just for this call.
+        // This is the "bridge pattern" — common when a library is locked to one runtime
+        // but your app uses another. The cost is a thread pool per call, but it's acceptable
+        // for infrequent API calls like PR creation.
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|error| GitHubError::Api(format!("failed to create runtime: {error}")))?;
 

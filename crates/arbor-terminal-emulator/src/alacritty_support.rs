@@ -23,6 +23,11 @@ use {
     },
 };
 
+// LEARN: This is "Alacritty without a window" — the terminal emulation core extracted.
+// `Term` is the terminal grid + state machine (cursor, scrollback, colors, cell attributes).
+// `Processor` is the VTE (Virtual Terminal Emulator) parser — it takes raw bytes and drives
+// state transitions on the Term. You feed bytes in, read styled cells out.
+// This pattern lets you embed a full terminal emulator in any UI framework.
 pub(crate) struct AlacrittyState {
     pub(crate) term: Term<AlacrittyEventListener>,
     pub(crate) processor: Processor<StdSyncHandler>,
@@ -92,6 +97,10 @@ impl AlacrittyEventListener {
     }
 }
 
+// LEARN: EventListener is Alacritty's callback trait for terminal events.
+// The terminal emits events (Bell, Title change, ColorRequest, etc.) as it processes
+// escape sequences. This atomic counter pattern is lock-free and lets the UI thread
+// check "did the bell ring?" without synchronization overhead.
 impl EventListener for AlacrittyEventListener {
     fn send_event(&self, event: Event) {
         if matches!(event, Event::Bell) {

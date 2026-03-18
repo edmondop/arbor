@@ -161,6 +161,10 @@ impl EntityInputHandler for ArborWindow {
     }
 }
 
+// LEARN: GPUI's core rendering trait. Unlike React/Elm, there's no virtual DOM or JSX.
+// The entire UI is built from Rust method chains: div().flex_col().bg(...).child(...)
+// GPUI compiles this into a GPU-accelerated flex layout (like CSS flexbox but in Rust).
+// Every frame, render() is called and the element tree is diffed against the previous frame.
 impl Render for ArborWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Update window title to reflect connected daemon
@@ -177,6 +181,27 @@ impl Render for ArborWindow {
         self.sync_ui_state_store(window, cx);
 
         let theme = self.theme();
+        // LEARN[GPUI-04-Render]: This is the root element tree. Read it top-to-bottom:
+        //
+        // div()                    — create a flex container (like <div> in HTML)
+        //   .size_full()           — width: 100%, height: 100%
+        //   .bg(rgb(theme.app_bg)) — background color from theme (u32 hex → GPUI color)
+        //   .flex_col()            — flex-direction: column (children stack vertically)
+        //
+        // LEARN[GPUI-08-ActionDispatch]: .on_action(cx.listener(Self::method))
+        // registers an action handler on THIS element. When a keybinding fires,
+        // GPUI walks UP from the focused element looking for a matching handler.
+        // cx.listener() captures a weak ref to `self` — safe for the retained tree.
+        //
+        // LEARN[GPUI-05-Composition]: .child() adds one child element.
+        // .when(condition, |this| this.child(...)) — conditional rendering.
+        // .when_some(option, |this, val| ...) — render only if Some.
+        // This replaces React's {condition && <Component/>} pattern.
+        //
+        // LEARN[GPUI-13-Modals]: All modals are always in the tree (lines 250-269).
+        // Each render method returns div() (empty) when the modal is closed.
+        // When open, it renders an absolute-positioned overlay with backdrop.
+        // This "always present, conditionally visible" pattern avoids mount/unmount.
         div()
             .size_full()
             .bg(rgb(theme.app_bg))
@@ -287,6 +312,17 @@ impl Render for ArborWindow {
                         ),
                 )
             }))
+            // LEARN[GPUI-FullExample]: Complete mini-app — quit confirmation dialog.
+            // This shows every GPUI concept working together:
+            //   .when() — conditional rendering (only show when quit_overlay_until is Some)
+            //   .absolute().inset_0() — full-window overlay positioned absolutely
+            //   .bg(rgb(0x000000)).opacity(0.5) — semi-transparent backdrop
+            //   .on_click(cx.listener(...)) — click backdrop to dismiss
+            //   .items_center().justify_center() — CSS flexbox centering
+            //   .px_6().py_4().rounded_lg() — padding + border radius
+            //   .child("text") — plain text as child element
+            //   .cursor_pointer() — interactive cursor feedback
+            //   Nested .on_click() handlers — Cancel vs Quit buttons
             .when(self.quit_overlay_until.is_some(), |this| {
                 this.child(
                     div()

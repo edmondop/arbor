@@ -29,6 +29,12 @@ fn new_window(_: &NewWindow, cx: &mut App) {
     open_arbor_window(cx);
 }
 
+// LEARN[GPUI-07-Keybindings]: Keybindings are registered globally on `&mut App`.
+// KeyBinding::new("cmd-t", SpawnTerminal, None) maps Cmd+T to the SpawnTerminal action.
+// The third arg (None) means "no context required" — the binding works everywhere.
+// You could pass Some("TerminalFocused") to scope it to specific focus contexts.
+// When the key combo fires, GPUI walks up the element tree from the focused element
+// looking for an `.on_action(cx.listener(Self::action_spawn_terminal))` handler.
 pub(crate) fn install_app_menu_and_keys(cx: &mut App) {
     cx.on_action(new_window);
     cx.bind_keys([
@@ -443,6 +449,20 @@ pub(crate) fn run_daemon_mode(bind_addr: Option<String>) -> Result<(), DaemonLau
     )))
 }
 
+// LEARN[GPUI-01-Lifecycle]: This is the GPUI entry point. The pattern is:
+// 1. Application::new() — creates the GPU-backed app runtime
+// 2. application.run(|cx: &mut App| { ... }) — starts the event loop
+//    Inside the closure you get `&mut App` (the global context) to:
+//    - Register fonts, menus, keybindings (global setup)
+//    - cx.open_window(...) — creates an OS window, returns Entity<T>
+//    - cx.activate(true) — brings the app to front
+// 3. The window factory closure receives |&mut Window, &mut Context<_>|
+//    and must return Entity<T> where T: Render (your root component)
+// 4. cx.new(|cx| YourStruct { ... }) — allocates the entity
+//
+// MENTAL MODEL: Application owns the event loop. App context is global.
+// Each window has its own Entity<Root>. GPUI calls Root::render() when
+// cx.notify() fires, diffing the element tree to minimize GPU work.
 pub(crate) fn run_gui(log_buffer: log_layer::LogBuffer) {
     let mut application = Application::new();
     if let Some(assets_base) = find_assets_root_dir() {

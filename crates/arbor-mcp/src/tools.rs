@@ -136,6 +136,13 @@ impl ArborMcp {
     }
 }
 
+// LEARN: #[tool_router] auto-generates a ToolRouter that maps MCP tool names
+// to these methods. Each #[tool(description = "...")] generates:
+// 1. A JSON Schema for the input type (from schemars::JsonSchema)
+// 2. A JSON Schema for the output type
+// 3. A tool definition with name, description, input/output schemas
+// The result is a fully self-describing API — AI agents can discover and call
+// these tools without any manual schema writing.
 #[tool_router(router = tool_router)]
 impl ArborMcp {
     #[tool(description = "Get Arbor daemon health and version information")]

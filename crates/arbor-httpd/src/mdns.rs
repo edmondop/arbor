@@ -21,6 +21,11 @@ pub struct MdnsRegistration {
 }
 
 /// Register this arbor-httpd instance on the local network via DNS-SD / Bonjour.
+// LEARN: mDNS (multicast DNS) lets devices discover each other on a LAN without
+// a central server. This registers "_arbor._tcp" as a Bonjour/Avahi service with
+// TXT records carrying metadata (tls, auth, version). Any machine on the same network
+// running the mDNS browser (see arbor-gui/mdns_browser.rs) will auto-discover this daemon.
+// This is the same protocol that AirPlay, Chromecast, and printer discovery use.
 pub fn register_service(
     port: u16,
     tls: bool,

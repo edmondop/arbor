@@ -544,6 +544,17 @@ impl ArborWindow {
         cx.notify();
     }
 
+    // LEARN[GPUI-13-Modals]: Modal pattern. This method is ALWAYS called in render()
+    // (see rendering.rs line 263). When no modal is open, it returns div() (empty —
+    // zero-size, invisible). When open, it returns an absolute-positioned overlay.
+    //
+    // Pattern: store modal state as Option<ModalStruct> on your entity.
+    // Open: self.command_palette_modal = Some(state); cx.notify();
+    // Close: self.command_palette_modal = None; cx.notify();
+    // Render: let Some(modal) = self.modal.clone() else { return div(); };
+    //
+    // The backdrop is a full-window div with .inset_0() and on_click to dismiss.
+    // The actual modal content is a centered child with border/bg/padding.
     pub(crate) fn render_command_palette_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.command_palette_modal.clone() else {
             return div();
