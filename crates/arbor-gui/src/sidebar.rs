@@ -1251,6 +1251,7 @@ impl ArborWindow {
         let agent_dot_color = match worktree.agent_state {
             Some(AgentState::Working) => Some(0xe5c07b_u32),
             Some(AgentState::Waiting) => Some(0x61afef_u32),
+            Some(AgentState::Done) => Some(0x5c6370_u32),
             None => None,
         };
         let drag_item_id = SidebarItemId::Worktree(worktree.path.clone());
