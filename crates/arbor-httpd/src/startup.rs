@@ -120,6 +120,35 @@ pub(crate) async fn build_app_state(
         ts
     };
 
+    let agent_session_store: Arc<dyn arbor_core::agent::AgentSessionStore> = {
+        let dir = crate::file_agent_store::FileAgentSessionStore::default_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp/agent-sessions"));
+        Arc::new(crate::file_agent_store::FileAgentSessionStore::new(dir))
+    };
+
+    let initial_agent_sessions = {
+        let mut sessions = HashMap::new();
+        match agent_session_store.load_all() {
+            Ok(records) => {
+                if !records.is_empty() {
+                    tracing::info!(count = records.len(), "hydrated agent sessions from disk");
+                }
+                for r in records {
+                    sessions.insert(r.session_id.clone(), AgentSession {
+                        cwd: r.cwd,
+                        state: r.state,
+                        updated_at_unix_ms: r.updated_at_unix_ms,
+                        metadata: r.metadata,
+                    });
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to hydrate agent sessions from disk");
+            },
+        }
+        sessions
+    };
+
     let state = AppState {
         repository_store: repository_store.clone(),
         daemon: Arc::new(Mutex::new(LocalTerminalDaemon::new(
@@ -132,7 +161,7 @@ pub(crate) async fn build_app_state(
         task_scheduler: Arc::new(Mutex::new(task_scheduler)),
         github_service: github_service::default_github_pr_service(),
         issue_service: Arc::new(issue_provider::RepositoryIssueService::default()),
-        agent_sessions: Arc::new(Mutex::new(HashMap::new())),
+        agent_sessions: Arc::new(Mutex::new(initial_agent_sessions)),
         agent_broadcast,
         #[cfg(feature = "agent-chat")]
         agent_chat: Arc::new(Mutex::new(agent_chat::AgentChatManager::new())),
