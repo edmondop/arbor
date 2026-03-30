@@ -1191,7 +1191,7 @@ pub(crate) async fn agent_notify(
     );
     let agent_state = match request.hook_event_name.as_str() {
         "UserPromptSubmit" => AgentState::Working,
-        "Stop" => AgentState::Waiting,
+        "Stop" => AgentState::Done,
         _ => {
             tracing::info!(
                 hook_event = request.hook_event_name.as_str(),
@@ -1641,9 +1641,11 @@ fn notification_event_name_for_agent_transition(
 
     match (previous_state, current_state) {
         (Some(AgentState::Working), AgentState::Working)
-        | (Some(AgentState::Waiting), AgentState::Waiting) => None,
+        | (Some(AgentState::Waiting), AgentState::Waiting)
+        | (Some(AgentState::Done), AgentState::Done) => None,
         (_, AgentState::Working) => Some("agent_started"),
-        (_, AgentState::Waiting) => Some("agent_finished"),
+        (_, AgentState::Waiting) => Some("agent_waiting"),
+        (_, AgentState::Done) => Some("agent_finished"),
     }
 }
 
@@ -1651,6 +1653,7 @@ fn agent_state_label(state: AgentState) -> &'static str {
     match state {
         AgentState::Working => "working",
         AgentState::Waiting => "waiting",
+        AgentState::Done => "done",
     }
 }
 
@@ -1663,10 +1666,7 @@ fn agent_session_snapshot(sessions: &mut HashMap<String, AgentSession>) -> Vec<A
         .map(|(session_id, session)| AgentSessionDto {
             session_id: session_id.clone(),
             cwd: session.cwd.clone(),
-            state: match session.state {
-                AgentState::Working => "working".to_owned(),
-                AgentState::Waiting => "waiting".to_owned(),
-            },
+            state: agent_state_label(session.state).to_owned(),
             updated_at_unix_ms: session.updated_at_unix_ms,
             metadata: session.metadata.clone(),
         })
@@ -2892,6 +2892,14 @@ mod tests {
                 AgentSessionUpdateSource::Hook,
                 Some(AgentState::Working),
                 AgentState::Waiting,
+            ),
+            Some("agent_waiting")
+        );
+        assert_eq!(
+            notification_event_name_for_agent_transition(
+                AgentSessionUpdateSource::Hook,
+                Some(AgentState::Working),
+                AgentState::Done,
             ),
             Some("agent_finished")
         );
