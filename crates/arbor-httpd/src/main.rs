@@ -2,6 +2,7 @@
 pub(crate) mod agent_chat;
 mod auth;
 mod error;
+pub(crate) mod file_agent_store;
 mod github_service;
 mod issue_linking;
 mod issue_provider;
