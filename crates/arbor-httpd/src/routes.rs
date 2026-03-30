@@ -1191,6 +1191,7 @@ pub(crate) async fn agent_notify(
     );
     let agent_state = match request.hook_event_name.as_str() {
         "UserPromptSubmit" => AgentState::Working,
+        "SessionStart" | "Notification" => AgentState::Waiting,
         "Stop" => AgentState::Done,
         _ => {
             tracing::info!(
