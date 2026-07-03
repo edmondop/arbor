@@ -1,0 +1,181 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Learn GPUI through Arbor",
+  "steps": [
+    {
+      "file": "crates/arbor-gui/src/app_bootstrap.rs",
+      "line": 459,
+      "description": "## GPUI app lifecycle\n\n`Application::new().run(|cx: &mut App|)` starts the GPUI event loop. Inside that closure, `cx.open_window()` creates the native window and `cx.new(|cx| ...)` allocates the root entity that GPUI will render."
+    },
+    {
+      "file": "crates/arbor-gui/src/app_bootstrap.rs",
+      "line": 478,
+      "description": "## Entity allocation\n\n`cx.new(|cx| ...)` returns `Entity<T>`, GPUI's state container. The entity owns the ArborWindow struct while GPUI manages its lifetime, roughly like a retained component instance."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 168,
+      "description": "## Render trait\n\n`impl Render for ArborWindow` is the core GPUI rendering hook. GPUI calls it after `cx.notify()` and expects an `IntoElement` tree, not a virtual DOM component tree."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 197,
+      "description": "## Root element tree\n\nThe root `div()` chain builds layout and styling with Rust methods: size, background, flex direction, handlers, children, and overlays. Read it top-to-bottom like a retained UI tree."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 233,
+      "description": "## Conditional composition\n\n`.when(...)` and `.when_some(...)` conditionally add children without leaving the element-chain style. `.child()` appends one child; `.children()` appends an iterator."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 329,
+      "description": "## GPUI styling\n\nThe method chain here is a compact styling example: padding, rounded corners, background, border, flex layout, centering, and gaps. Most numeric spacing helpers are multiples of 4px."
+    },
+    {
+      "file": "crates/arbor-gui/src/app_bootstrap.rs",
+      "line": 38,
+      "description": "## Keybindings\n\n`cx.bind_keys()` maps key chords to action types. The third argument scopes the binding to a focus context; `None` means the binding is global."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 208,
+      "description": "## Action dispatch\n\n`.on_action(cx.listener(Self::method))` registers an action handler on this element. Actions bubble up from the focused element, and `cx.listener()` captures a weak entity reference safely."
+    },
+    {
+      "file": "crates/arbor-gui/src/key_handling.rs",
+      "line": 647,
+      "description": "## Action handler signature\n\nHandlers receive `(&mut self, &ActionType, &mut Window, &mut Context<Self>)`. The action argument is often `_` for zero-sized actions because the Rust type itself identifies the command."
+    },
+    {
+      "file": "crates/arbor-gui/src/key_handling.rs",
+      "line": 709,
+      "description": "## Explicit re-rendering\n\n`cx.notify()` is GPUI's explicit re-render signal. Mutating state without calling it leaves the UI stale by design, which avoids speculative re-renders."
+    },
+    {
+      "file": "crates/arbor-gui/src/welcome_ui.rs",
+      "line": 176,
+      "description": "## Focus model\n\n`.track_focus(&handle)` attaches a focus handle, and `window.focus(&handle)` moves focus. Unlike HTML, mouse clicks do not automatically focus an element."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 206,
+      "description": "## Event handlers\n\n`on_key_down`, `on_click`, `on_mouse_down`, `on_mouse_move`, and drag handlers are type-safe GPUI events. Listener closures receive the event, window, and context."
+    },
+    {
+      "file": "crates/arbor-gui/src/version_check.rs",
+      "line": 69,
+      "description": "## GPUI async pattern\n\nThe safe pattern is foreground spawn -> background work -> entity update. Use `cx.spawn`, move slow work into `cx.background_spawn(...)`, then mutate state in `this.update(...)` and notify."
+    },
+    {
+      "file": "crates/arbor-gui/src/command_palette.rs",
+      "line": 547,
+      "description": "## Modal state pattern\n\nA modal is usually `Option<State>` in the entity. Open by setting `Some(...)` and notifying; close by setting `None` and notifying; render an overlay only when the option is present."
+    },
+    {
+      "file": "crates/arbor-gui/src/diff_view.rs",
+      "line": 80,
+      "description": "## Virtualized lists\n\n`uniform_list(id, count, |range, _, _| ...)` renders only visible rows. It is for same-height rows, allowing GPUI to skip unnecessary layout and painting work."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 308,
+      "description": "## Complete quit dialog\n\nThis dialog combines conditionals, an absolute full-window overlay, backdrop styling, click dismissal, centering, and button styling. It is a useful small GPUI composition example."
+    },
+    {
+      "file": "crates/arbor-gui/src/sidebar.rs",
+      "line": 154,
+      "description": "## Animation IDs\n\n`with_animation((id, epoch), Animation::new(...), |el, delta| ...)` drives an element from `delta = 0` to `1`. Change the ID tuple to retrigger the animation."
+    },
+    {
+      "file": "crates/arbor-gui/src/terminal_rendering.rs",
+      "line": 461,
+      "description": "## Canvas escape hatch\n\n`canvas()` gives raw GPU painting when regular elements are too coarse. The prepaint closure participates in layout; the paint closure draws quads and shaped text."
+    },
+    {
+      "file": "crates/arbor-gui/src/diff_engine.rs",
+      "line": 453,
+      "description": "## Entity-aware async\n\n`cx.spawn(async move |this, cx| ...)` gives a `WeakEntity`, so the task does not keep the window alive. `this.update(...)` safely mutates if the entity still exists."
+    },
+    {
+      "file": "crates/arbor-gui/src/github_service.rs",
+      "line": 694,
+      "description": "## Smol and Tokio bridge\n\nGPUI uses smol, while octocrab expects Tokio. Arbor handles that mismatch with a short-lived Tokio runtime around the API call instead of making the whole app Tokio-based."
+    },
+    {
+      "file": "crates/arbor-gui/src/actions.rs",
+      "line": 3,
+      "description": "## Zero-sized actions\n\n`actions!()` generates Rust action types. Dispatch is type-based, so misspelling an action is a compile-time problem instead of a missed string event."
+    },
+    {
+      "file": "crates/arbor-gui/src/actions.rs",
+      "line": 29,
+      "description": "## Actions with data\n\n`#[derive(gpui::Action)]` supports payload-carrying actions such as `ConnectToLanDaemon`. Use `#[action(namespace, no_json)]` when the payload should not be serialized."
+    },
+    {
+      "file": "crates/arbor-gui/src/rendering.rs",
+      "line": 11,
+      "description": "## Input Method Editor protocol\n\n`EntityInputHandler` is GPUI's IME bridge. `replace_text_in_range` routes committed text into the active component, such as the terminal or a text field."
+    },
+    {
+      "file": "crates/arbor-terminal-emulator/src/alacritty_support.rs",
+      "line": 26,
+      "description": "## Alacritty without a window\n\nArbor reuses Alacritty's terminal core as a state machine: `Term` stores the grid and modes, while `Processor` consumes VTE bytes. No GUI window is needed."
+    },
+    {
+      "file": "crates/arbor-terminal-emulator/src/alacritty_support.rs",
+      "line": 69,
+      "description": "## Feeding terminal bytes\n\n`process_terminal_bytes` feeds raw PTY output into the VTE parser. A generation counter provides cheap cache invalidation for snapshots and render state."
+    },
+    {
+      "file": "crates/arbor-terminal-emulator/src/alacritty_support.rs",
+      "line": 95,
+      "description": "## Terminal event listener\n\nAlacritty's `EventListener` trait reports side-channel events such as bells and title changes. Arbor observes them with atomic counters instead of locking hot paths."
+    },
+    {
+      "file": "crates/arbor-mcp/src/lib.rs",
+      "line": 284,
+      "description": "## MCP server handler\n\n`#[tool_handler]` and `ServerHandler` define Arbor's MCP handshake and capabilities. The proc macro wires tool registration into the protocol implementation."
+    },
+    {
+      "file": "crates/arbor-mcp/src/lib.rs",
+      "line": 356,
+      "description": "## Stdio MCP transport\n\n`serve_stdio()` exposes the MCP server over stdin/stdout JSON-RPC. This is the standard transport used when an AI agent launches a local MCP server process."
+    },
+    {
+      "file": "crates/arbor-mcp/src/tools.rs",
+      "line": 139,
+      "description": "## MCP tool router\n\n`#[tool_router]` and `#[tool(description = ...)]` generate tool definitions and JSON Schema from Rust types. The schema stays coupled to the request structs."
+    },
+    {
+      "file": "crates/arbor-gui/src/diff_engine.rs",
+      "line": 121,
+      "description": "## Histogram diff\n\n`BlobInternedInput` interns file tokens to integers before `BlobDiff::compute` runs. This mirrors the kind of tokenized diffing used by modern git implementations."
+    },
+    {
+      "file": "crates/arbor-gui/src/terminal_backend.rs",
+      "line": 93,
+      "description": "## PTY lifecycle\n\n`openpty` creates master and slave ends. The child shell attaches to the slave, while Arbor reads and writes through cloned handles on the master."
+    },
+    {
+      "file": "crates/arbor-httpd/src/mdns.rs",
+      "line": 24,
+      "description": "## mDNS discovery\n\nArbor advertises daemons as `_arbor._tcp` services with TXT records. This is the same local-network discovery family used by AirPlay-style service lookup."
+    },
+    {
+      "file": "crates/arbor-ssh/src/connection.rs",
+      "line": 38,
+      "description": "## SSH connection setup\n\n`libssh-rs` reads `~/.ssh/config`, supports host aliases and ProxyJump, and tries authentication through the SSH agent before key files."
+    },
+    {
+      "file": "crates/arbor-tui/src/capture.rs",
+      "line": 3,
+      "description": "## Capture trait boundary\n\n`TerminalCapture` is the extension point for terminal backends. `capture_for()` picks an implementation from metadata, keeping backend-specific capture code out of callers."
+    },
+    {
+      "file": "crates/arbor-tui/src/main.rs",
+      "line": 31,
+      "description": "## Ratatui event loop\n\nThe TUI enters raw mode and the alternate screen, then repeatedly draws frames. A panic hook restores terminal state so crashes do not leave the shell broken."
+    }
+  ]
+}
